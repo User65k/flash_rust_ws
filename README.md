@@ -1,7 +1,15 @@
 A Webserver written in Rust.
 Build on the speedy [Hyper](https://hyper.rs/).
 
-Example Config:
+# Usage
+
+## Installation
+
+[Install cargo](https://www.rust-lang.org/tools/install) and then:
+`cargo install --git https://github.com/User65k/flash_rust_ws.git`
+
+
+## Example Config
 ```toml
 pidfile  = "/var/run/frws.pid" # Optional: Write PID to this file
 # Optional: Change user after binding
@@ -18,7 +26,8 @@ index = ["index.html"]
 ```
 Place the config file in one of these places:
 
-- 
+- `./config.toml`
+- `/etc/defaults/config.toml`
 
 # Goals
 - Easy configuration and safe defaults
