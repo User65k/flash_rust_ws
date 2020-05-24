@@ -1,0 +1,43 @@
+[package]
+name = "flash_rust_ws"
+version = "0.1.0"
+authors = ["User65k <15049544+User65k@users.noreply.github.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hyper = "0.13"      # HTTP
+http = "0.2"        # used by hyper
+bytes = "0.5"
+log = "0.4"
+
+#config:
+toml = "0.5"        # config files in toml
+serde = { version = "1.0", features = ["derive"] }
+
+#main:
+tokio = "0.2"
+futures-util = { version = "0.3", default-features = false }
+users = "0.10.0"
+percent-encoding = "2.1.0"
+mime_guess = "2.0.1"
+hyper-staticfile = "0.5.2"    # GET+HEAD for Files
+#async-fcgi = {path="../fcgi-req", features = ["web_server"]}
+
+#hyper-rustls = "0.2"
+#hyper_native_tls = "0.3"
+
+#acme-client         # auto hyper_native_tls
+
+#async_compression  # in no BREACH / TIME cases?
+
+#inspirations:
+#warp = "0.2.2"		# HTTP + Websockets
+#hyperdav-server = "0.1"	# webdav + insecure
+
+#tests:
+pretty_env_logger = { version = "0.4.0", default-features = false }
+
+[[bin]]
+name = "flash_rust_ws"
