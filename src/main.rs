@@ -182,6 +182,7 @@ async fn main() {
     match config::load_config() {
         Err(e) => {
             error!("Configuration error!\r\n{}", e);
+            eprintln!("Configuration error! See Logs");
         },
         Ok(mut cfg) => {
             //group config by SocketAddrs
@@ -206,6 +207,7 @@ async fn main() {
                                 hcfg.default_host = Some(params);
                             }else{
                                 error!("{} is the second host on {} that does not validate the server name", vhost, addr);
+                                eprintln!("Configuration error! See Logs");
                                 return;
                             }
                         }
@@ -220,12 +222,14 @@ async fn main() {
                     if let Some(user) = cfg.user {
                         if let Err(e) = user::switch_user(&user) {
                             error!("Could not switch User: {}", e);
+                            eprintln!("Error! See Logs");
                             return;
                         }
                     }
                     if let Some(group) = cfg.group {
                         if let Err(e) = user::switch_group(&group) {
                             error!("Could not switch Group: {}", e);
+                            eprintln!("Error! See Logs");
                             return;
                         }
                     }
@@ -233,6 +237,7 @@ async fn main() {
                     if let Some(pidfile) = cfg.pidfile {
                         if let Err(e) = pidfile::create_pid_file(pidfile) {
                             error!("Could not write Pid File: {}", e);
+                            eprintln!("Error! See Logs");
                             return;
                         }
                     }
@@ -241,6 +246,7 @@ async fn main() {
                 },
                 Err(e) => {
                     error!("{}",e);
+                    eprintln!("Error! See Logs");
                 }
             }
         }

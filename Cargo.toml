@@ -19,11 +19,10 @@ serde = { version = "1.0", features = ["derive"] }
 #main:
 tokio = "0.2"
 futures-util = { version = "0.3", default-features = false }
-users = "0.10.0"
 percent-encoding = "2.1.0"
 mime_guess = "2.0.1"
 hyper-staticfile = "0.5.2"    # GET+HEAD for Files
-#async-fcgi = {path="../fcgi-req", features = ["web_server"]}
+#async-fcgi = {path="../fcgi-req", features = ["con_pool"]}
 
 #hyper-rustls = "0.2"
 #hyper_native_tls = "0.3"
@@ -38,6 +37,9 @@ hyper-staticfile = "0.5.2"    # GET+HEAD for Files
 
 #tests:
 pretty_env_logger = { version = "0.4.0", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+users = "0.10.0"
 
 [[bin]]
 name = "flash_rust_ws"
