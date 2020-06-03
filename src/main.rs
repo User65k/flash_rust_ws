@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use hyper_staticfile::ResponseBuilder as FileResponseBuilder;
 use std::path::{Component, Path, PathBuf};
+use async_fcgi::client::con_pool::ConPool as FCGIApp;
 
 mod config;
 mod user;
@@ -59,6 +60,10 @@ async fn handle_wwwroot<B>(req: Request<B>,
             let full_path = wwwr.dir.join(req_path);
 
             return file_dispatch::resolve(&wwwr, &req, &full_path).await.map(|result| {
+                if let Some(fcgi_cfg) = &wwwr.fcgi {
+                    //if fcgi_cfg.exec
+                    //if fcgi_cfg.serve
+                }
                 FileResponseBuilder::new()
                     .request(&req)
                     .cache_headers(Some(500))
@@ -187,8 +192,23 @@ async fn main() {
         Ok(mut cfg) => {
             //group config by SocketAddrs
             let mut listening_ifs = HashMap::new();
-            for (vhost, params) in cfg.hosts.drain() {
+            for (vhost, mut params) in cfg.hosts.drain() {
                 let addr = params.ip;
+                for (_, wwwroot) in params.paths.iter_mut() {
+                    wwwroot.fcgi = if let Some(mut fcgi_cfg) = wwwroot.fcgi.take() {
+                        match FCGIApp::new(&(&fcgi_cfg.sock).into()).await {
+                            Ok(app) => fcgi_cfg.app = Some(app),
+                            Err(e) => {
+                                error!("FCGIApp: {}", e);
+                                eprintln!("FCGI Error! See Logs");
+                                return;
+                            }
+                        }
+                        Some(fcgi_cfg)
+                    }else{
+                        None
+                    }
+                }
                 match listening_ifs.get_mut(&addr) {
                     None => {
                         let mut hcfg = HostCfg::new();

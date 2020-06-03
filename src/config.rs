@@ -8,6 +8,18 @@ use std::fs::File;
 use std::error::Error;
 use std::io::{Error as IOError, ErrorKind};
 use std::fmt;
+use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
+use async_fcgi::FCGIAddr;
+
+
+impl From<&FCGISock> for FCGIAddr {
+    fn from(addr: &FCGISock) -> FCGIAddr {
+        match addr {
+            FCGISock::TCP(s) => FCGIAddr::Inet(*s),
+            FCGISock::Unix(p) => FCGIAddr::Unix(p.to_path_buf()),
+        }
+    }
+}
 
 #[derive(Debug)]
 #[derive(Deserialize)]
@@ -23,7 +35,9 @@ pub enum FCGISock {
 pub struct FCGIApp {
     pub sock: FCGISock,
     pub exec: Option<Vec<String>>,
-    pub serve: Option<Vec<String>>
+    pub serve: Option<Vec<String>>,
+    #[serde(skip)]
+    pub app: Option<FCGIAppPool>
 }
 
 
@@ -43,7 +57,7 @@ pub struct VHost {
     pub ip: SocketAddr,
     pub validate_server_name: Option<bool>,
     #[serde(flatten)]
-    root: Option<WwwRoot>,
+    root: Option<WwwRoot>, //only in toml -> will be added to paths
     #[serde(flatten)]
     pub paths: HashMap<PathBuf, WwwRoot>,
 }
@@ -137,11 +151,11 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
 fn config_file(){
     extern crate pretty_env_logger;
     pretty_env_logger::init();
-    let c = load_config().expect("configuration error");
+    load_config().expect("configuration error");
 }
 #[test]
 fn toml_to_struct() {
-    let mut cfg: Configuration = toml::from_str(r#"
+    let _cfg: Configuration = toml::from_str(r#"
 pidfile = 'bar'
 
 your.ip = "[::1]:1234" # hah
