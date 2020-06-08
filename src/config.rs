@@ -34,8 +34,8 @@ pub enum FCGISock {
 #[derive(Deserialize)]
 pub struct FCGIApp {
     pub sock: FCGISock,
-    pub exec: Option<Vec<String>>,
-    pub serve: Option<Vec<String>>,
+    pub exec: Option<Vec<PathBuf>>,
+    pub serve: Option<Vec<PathBuf>>,
     #[serde(skip)]
     pub app: Option<FCGIAppPool>
 }
@@ -46,7 +46,7 @@ pub struct FCGIApp {
 #[derive(Deserialize)]
 pub struct WwwRoot {
     pub dir: PathBuf,
-    pub index: Option<Vec<String>>,
+    pub index: Option<Vec<PathBuf>>,
     pub fcgi: Option<FCGIApp>
 }
 

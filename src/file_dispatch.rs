@@ -1,4 +1,3 @@
-use http::{Method, Request};
 use mime_guess::MimeGuess;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::path::PathBuf;
@@ -7,11 +6,27 @@ use std::fs::{Metadata, OpenOptions as StdOpenOptions};
 use std::path::Path;
 use tokio::fs::{File, OpenOptions};
 use log::debug;
+use crate::config::WwwRoot;
+use hyper_staticfile::ResponseBuilder as FileResponseBuilder;
+use hyper::{Method, Body, Request, Response};
 
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 #[cfg(windows)]
 use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+
+pub async fn return_file(req: &Request<Body>,
+                    wwwr: &WwwRoot,
+                    full_path: &PathBuf) -> Result<Response<Body>, IoError> {
+    resolve(wwwr, req, full_path).await.map(|result| {
+
+        FileResponseBuilder::new()
+            .request(&req)
+            .cache_headers(Some(500))
+            .build(result)
+            .expect("unable to build response")
+    })
+}
 
 /// Open a file and get metadata.
 pub async fn open_with_metadata(path: impl AsRef<Path>) -> Result<(File, Metadata), IoError> {
@@ -27,7 +42,6 @@ pub async fn open_with_metadata(path: impl AsRef<Path>) -> Result<(File, Metadat
     Ok((file, metadata))
 }
 
-use crate::config::WwwRoot;
 
 
 pub async fn resolve<B>(
@@ -56,7 +70,7 @@ pub async fn resolve<B>(
 pub async fn resolve_path(
     full_path: &Path,
     is_dir_request: bool,
-    index_files: &Option<Vec<String>>
+    index_files: &Option<Vec<PathBuf>>
 ) -> Result<ResolveResult, IoError> {
 
 

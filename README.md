@@ -41,17 +41,21 @@ Place the config file in one of these places:
 - [x] Virtual Hosts
 - [x] "Mount Points" to serve files from
 - [ ] SCGI
-- [ ] FCGI
+- [x] FCGI
 - [ ] WebDAV
 - [ ] HTTPS
   - [ ] rustls (Fast)
   - [ ] native-tls (Smaller binary)
 - [ ] Security
+  - [ ] DoS protection
+    - [ ] limit connection count ?
+    - [ ] rate ?
+    - [ ] min speed ?
   - [x] no default files
   - [ ] no DAV without users
   - [x] no folder listings (except DAV)
   - [ ] recomended http headers by default
-  - [ ] no path traversals :-)
+  - [x] no path traversals :-)
   - [ ] users with blowfish
   - [ ] http digest auth ( https://developer.mozilla.org/en-US/docs/Web/HTTP/Authentication )
   - [ ] only https ?

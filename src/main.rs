@@ -7,9 +7,8 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 
 use futures_util::future::join_all;
 use http::response::Builder as HTTPResponseBuilder;
-use http::{header, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response};
+use hyper::{Body, Request, Response, header, StatusCode};
 use hyper::server::conn::AddrStream;
 use std::io::{Error as IoError, ErrorKind};
 use log::{info, error, debug, trace};
@@ -17,14 +16,18 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use hyper_staticfile::ResponseBuilder as FileResponseBuilder;
 use std::path::{Component, Path, PathBuf};
 use async_fcgi::client::con_pool::ConPool as FCGIApp;
+use std::convert::Into;
 
 mod config;
 mod user;
 mod pidfile;
 mod file_dispatch;
+mod fcgi_dispatch;
+mod body;
+//use body::FRBody;
+
 
 #[inline]
 fn decode_percents(string: &str) -> String {
@@ -49,7 +52,7 @@ fn normalize_path(path: &Path) -> PathBuf {
         })
 }
 
-async fn handle_wwwroot<B>(req: Request<B>,
+async fn handle_wwwroot(req: Request<Body>,
                             wwwr: &config::WwwRoot,
                             req_path: &Path,
                             mount_path: &Path) -> Result<Response<Body>, IoError> {
@@ -59,17 +62,13 @@ async fn handle_wwwroot<B>(req: Request<B>,
         Ok(req_path) => {
             let full_path = wwwr.dir.join(req_path);
 
-            return file_dispatch::resolve(&wwwr, &req, &full_path).await.map(|result| {
-                if let Some(fcgi_cfg) = &wwwr.fcgi {
-                    //if fcgi_cfg.exec
-                    //if fcgi_cfg.serve
+            if let Some(fcgi_cfg) = &wwwr.fcgi {
+                if fcgi_dispatch::is_fcgi_call(&fcgi_cfg, &req, &full_path).await {
+                    return fcgi_dispatch::fcgi_call(&fcgi_cfg, req, &full_path).await;
                 }
-                FileResponseBuilder::new()
-                    .request(&req)
-                    .cache_headers(Some(500))
-                    .build(result)
-                    .expect("unable to build response")
-            });
+            }
+
+            return Ok(file_dispatch::return_file(&req, &wwwr, &full_path).await?);
         },
         Err(e) => {
             error!("{}", e);
@@ -79,17 +78,17 @@ async fn handle_wwwroot<B>(req: Request<B>,
     
 }
 
-async fn handle_vhost<B>(req: Request<B>, cfg: &config::VHost) -> Result<Response<Body>, IoError> {
+async fn handle_vhost(req: Request<Body>, cfg: &config::VHost) -> Result<Response<Body>, IoError> {
 
     let request_path = PathBuf::from(decode_percents(&req.uri().path()));
 
     let req_path = normalize_path(&request_path);
     info!("req_path {:?}", req_path);
-    let skip_num = if req_path.as_os_str() == "" {
+    /*let skip_num = if req_path.as_os_str() == "" {
         0
     }else{
         1
-    };
+    };*/
 
     if cfg.paths.len()==1 {
         //fast path (don't walk request path)
@@ -99,22 +98,19 @@ async fn handle_vhost<B>(req: Request<B>, cfg: &config::VHost) -> Result<Respons
         }
     }
     //we want the longest match
-    for path in req_path.ancestors().skip(skip_num) {
+    for path in req_path.ancestors()/*.skip(skip_num) */{
        for (mount_path, wwwr) in cfg.paths.iter() {
+            debug!("checking mount point: {:?}", mount_path);
             if path.as_os_str() == mount_path {
                 return handle_wwwroot(req, &wwwr, &req_path, &mount_path).await;
             }
         }
     }
     
-    let res = HTTPResponseBuilder::new()
-        .status(StatusCode::FORBIDDEN)
-        .body(Body::empty())
-        .expect("unable to build response");
-    Ok(res)
+    Ok(create_resp_forbidden())
 }
 
-async fn handle_request<B>(req: Request<B>, cfg :Arc<HostCfg>, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
+async fn handle_request(req: Request<Body>, cfg :Arc<HostCfg>, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
     if let Some(host) = req.headers().get(header::HOST) {
         debug!("Host: {:?}", host);
@@ -129,11 +125,14 @@ async fn handle_request<B>(req: Request<B>, cfg :Arc<HostCfg>, remote_addr: Sock
     if let Some(hcfg) = &cfg.default_host {
         return handle_vhost(req, hcfg).await;
     }
-    let res = HTTPResponseBuilder::new()
+    Ok(create_resp_forbidden())
+}
+
+fn create_resp_forbidden() -> Response<Body> {
+    HTTPResponseBuilder::new()
         .status(StatusCode::FORBIDDEN)
         .body(Body::empty())
-        .expect("unable to build response");
-    Ok(res)
+        .expect("unable to build response")
 }
 
 #[derive(Debug)]
