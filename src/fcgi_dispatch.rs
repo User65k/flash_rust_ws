@@ -11,34 +11,14 @@ use crate::config;
 use crate::body::FCGIBody;
 
 
-pub async fn is_fcgi_call(fcgi_cfg: &config::FCGIApp, _req: &Request<Body>, full_path: &PathBuf)
-            -> bool {
-    if let Some(whitelist) = &fcgi_cfg.exec {
-        if let Some(ext) = full_path.extension() {
-            for e in whitelist {
-                if e == ext {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-    if let Some(blacklist) = &fcgi_cfg.serve {
-        if let Some(ext) = full_path.extension() {
-            for e in blacklist {
-                if e == ext {
-                    return false;
-                }
-            }
-        }
-    }
-
-    true  // no black or whitelist - handle all
-}
-
 pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path: &PathBuf)
             -> Result<Response<Body>, IoError> {
     if let Some(app) = &fcgi_cfg.app {
+        if fcgi_cfg.exec.is_some() && !full_path.is_file() {
+            // whitelist is used, check if file exists
+            return Err(IoError::new(ErrorKind::NotFound, "File not found"));
+        }
+
         let mut params = HashMap::new();
         params.insert( // must CGI/1.1  4.1.13, everybody cares
             Bytes::from(&b"SCRIPT_NAME"[..]),
@@ -59,20 +39,15 @@ pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path
         // - SERVER_SOFTWARE   must CGI/1.1  4.1.17
         // - REMOTE_ADDR       must CGI/1.1  4.1.8
         // - GATEWAY_INTERFACE must CGI/1.1  4.1.4
-        // - REMOTE_HOST       should CGI/1.1  4.1.9
-        // - REMOTE_IDENT      may CGI/1.1  4.1.10
-        // - REMOTE_USER       opt CGI/1.1
-        // - AUTH_TYPE         opt CGI/1.1
-        // - PATH_INFO         opt CGI/1.1   4.1.5 extra-path
-        // - PATH_TRANSLATED   opt CGI/1.1   4.1.6
-        // - SCRIPT_FILENAME   PHP cares for this
-        // - REMOTE_PORT       common
-        // - SERVER_ADDR       common
-        // - REQUEST_URI       common
-        // - DOCUMENT_URI      common
-        // - DOCUMENT_ROOT     common
+
+        if Some(true) == fcgi_cfg.script_filename {
+            params.insert( // PHP cares for this
+                Bytes::from(&b"SCRIPT_FILENAME"[..]),
+                path_to_bytes(full_path),
+            );
+        }
         trace!("to FCGI: {:?}", &params);
-        return Ok(app.forward(req, params).await?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))));
+        Ok(app.forward(req, params).await?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
     }else{
         error!("FCGI app not set");
         Err(IoError::new(ErrorKind::BrokenPipe,"FCGI app not available"))

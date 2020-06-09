@@ -8,7 +8,7 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 use futures_util::future::join_all;
 use http::response::Builder as HTTPResponseBuilder;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, header, StatusCode};
+use hyper::{Body, Request, Response, header, StatusCode, Method};
 use hyper::server::conn::AddrStream;
 use std::io::{Error as IoError, ErrorKind};
 use log::{info, error, debug, trace};
@@ -28,6 +28,41 @@ mod fcgi_dispatch;
 mod body;
 //use body::FRBody;
 
+fn insert_default_headers(header: &mut header::HeaderMap<header::HeaderValue>,
+                            config_header: &Option<HashMap<String, String>>) {
+    if let Some(config_header) = config_header {
+        for (key, value) in config_header.iter() {
+            let key = header::HeaderName::from_bytes(key.as_bytes()).expect("wrong HTTP header");
+            if !header.contains_key(&key) {
+                header.insert(key, header::HeaderValue::from_str(value).expect("wrong HTTP header"));
+            }
+        }
+    }
+    let default_headers = [
+        (header::X_FRAME_OPTIONS, "sameorigin"),
+        (header::CONTENT_SECURITY_POLICY, "default-src https:"),
+        (header::STRICT_TRANSPORT_SECURITY, "max-age=15768000"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    ];
+    for (key, value) in default_headers.iter() {
+        if !header.contains_key(key) {
+            header.insert(key, header::HeaderValue::from_static(value));
+        }
+    }
+}
+fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &PathBuf) -> bool {
+    if let Some(whitelist) = list {
+        if let Some(ext) = path.extension() {
+            for e in whitelist {
+                if e == ext {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    true  // no list == all is ok
+}
 
 #[inline]
 fn decode_percents(string: &str) -> String {
@@ -63,12 +98,42 @@ async fn handle_wwwroot(req: Request<Body>,
             let full_path = wwwr.dir.join(req_path);
 
             if let Some(fcgi_cfg) = &wwwr.fcgi {
-                if fcgi_dispatch::is_fcgi_call(&fcgi_cfg, &req, &full_path).await {
-                    return fcgi_dispatch::fcgi_call(&fcgi_cfg, req, &full_path).await;
+                if ext_in_list(&fcgi_cfg.exec, &full_path) {
+                    return match fcgi_dispatch::fcgi_call(&fcgi_cfg, req, &full_path).await{
+                        Ok(mut resp) => {
+                            insert_default_headers(resp.headers_mut(), &wwwr.header);
+                            Ok(resp)
+                        },
+                        Err(err) => {
+                            match err.kind() {
+                                ErrorKind::NotFound => {
+                                    Ok(HTTPResponseBuilder::new()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::empty())
+                                    .expect("unable to build response"))
+                                },
+                                _ => Err(err),
+                            }
+                        }
+                    };
                 }
             }
 
-            return Ok(file_dispatch::return_file(&req, &wwwr, &full_path).await?);
+            /*if req.method()==Method::OPTIONS {
+                return Ok(HTTPResponseBuilder::new()
+                        .status(StatusCode::OK)
+                        .header(header::ALLOW, "GET,HEAD,OPTIONS")
+                        .body(Body::empty())
+                        .expect("unable to build response"))
+            }*/
+
+            if ext_in_list(&wwwr.serve, &full_path) {
+                let mut resp = file_dispatch::return_file(&req, &wwwr, &full_path).await?;
+                insert_default_headers(resp.headers_mut(), &wwwr.header);
+                return Ok(resp);
+            }else{
+                Ok(create_resp_forbidden())
+            }
         },
         Err(e) => {
             error!("{}", e);
@@ -233,7 +298,7 @@ async fn main() {
                     }
                 }
             }
-            debug!("{:?}",listening_ifs);
+            debug!("{:#?}",listening_ifs);
             //setup all servers
             match prepare_hyper_servers(listening_ifs).await {
                 Ok(handles) => {

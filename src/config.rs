@@ -35,7 +35,7 @@ pub enum FCGISock {
 pub struct FCGIApp {
     pub sock: FCGISock,
     pub exec: Option<Vec<PathBuf>>,
-    pub serve: Option<Vec<PathBuf>>,
+    pub script_filename: Option<bool>,
     #[serde(skip)]
     pub app: Option<FCGIAppPool>
 }
@@ -47,7 +47,9 @@ pub struct FCGIApp {
 pub struct WwwRoot {
     pub dir: PathBuf,
     pub index: Option<Vec<PathBuf>>,
-    pub fcgi: Option<FCGIApp>
+    pub serve: Option<Vec<PathBuf>>,
+    pub fcgi: Option<FCGIApp>,
+    pub header: Option<HashMap<String, String>>,
 }
 
 /// vHost specific configuration

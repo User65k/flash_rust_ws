@@ -1,0 +1,14 @@
+#pidfile  = "/var/run/frws.pid" # Optional: Write PID to this file
+# Optional: Change user after binding
+#user = "www-data"
+#group = "www-data"
+
+["example.com"]
+ip = "127.0.0.1:1337"
+#validate_server_name = true # Optional: Match Host header against this vHost
+dir = "target/doc/flash_rust_ws/"
+index = ["index.html"]
+
+["example.com".cgi-bin]
+dir = "/"
+fcgi.sock = "127.0.0.1:9000"
