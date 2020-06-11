@@ -57,10 +57,10 @@ Place the config file in one of these places:
 # Functions
 - [x] Virtual Hosts
 - [x] "Mount Points" to serve files from
-- [x] FastCGI
+- [x] [FastCGI](https://github.com/User65k/async-fcgi)
 - [ ] HTTPS
-  - [ ] rustls (Fast)
-  - [ ] native-tls (Smaller binary)
+  - [ ] [rustls](https://github.com/ctz/rustls) (Fast)
+  - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary)
 - [ ] SCGI
 - [ ] WebDAV
 - [ ] Websocket
@@ -81,3 +81,18 @@ Place the config file in one of these places:
   - [ ] only https ?
   - [ ] lets encrypt build in ?
   - [x] avoid BEAST and CRIME
+
+# Logging
+For now [env_logger](https://docs.rs/env_logger/0.7.1/env_logger/) is used.
+
+```
+$ RUST_LOG=info flash_rust_ws
+INFO  flash_rust_ws::config > host: host @ 0.0.0.0:1337
+INFO  flash_rust_ws::config >   "" => "."
+INFO  flash_rust_ws::config > host: host2 @ 0.0.0.0:8080
+INFO  flash_rust_ws::config >   "" => "\nonexistend"
+ERROR flash_rust_ws         > Configuration error!
+"\nonexistend" (in host2/"") ist not a directory
+
+Configuration error! See Logs
+```
