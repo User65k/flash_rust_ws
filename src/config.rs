@@ -170,6 +170,7 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
     for (vhost, mut params) in cfg.hosts.drain() {
         let addr = params.ip;
         for (mount, wwwroot) in params.paths.iter_mut() {
+            //setup FCGI Apps
             wwwroot.fcgi = if let Some(mut fcgi_cfg) = wwwroot.fcgi.take() {
                 match FCGIAppPool::new(&(&fcgi_cfg.sock).into()).await {
                     Ok(app) => fcgi_cfg.app = Some(app),
@@ -182,6 +183,7 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
             }else{
                 None
             };
+            //check if header are parseable
             if wwwroot.header.is_none() {continue;}
             let mut _h = HeaderMap::new();
             if let Err(e) = crate::dispatch::insert_default_headers(&mut _h, &wwwroot.header) {
@@ -189,6 +191,7 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                 return Err(Box::new(errors));
             }
         }
+        //group vHosts by IP
         match listening_ifs.get_mut(&addr) {
             None => {
                 let mut hcfg = HostCfg::new();
@@ -236,10 +239,39 @@ your.ip = "[::1]:1234" # hah
 your.dir = "~"
 [host]
 ip = "0.0.0.0:1337"
-
 [host.path]
 dir = "/var/www/"
 index = ["index.html", "index.htm"]
 "#).expect("parse err");
     //print(&cfg);
+}
+
+#[tokio::test]
+async fn vhost_conflict() {
+    let mut cfg: Configuration = toml::from_str(r#"
+[host]
+ip = "0.0.0.0:1337"
+[another]
+ip = "0.0.0.0:1337"
+"#).expect("parse err");
+    assert!(group_config(&mut cfg).await.is_err());
+}
+#[tokio::test]
+async fn bad_header() {
+    let mut cfg: Configuration = toml::from_str(r#"
+[host]
+ip = "0.0.0.0:1337"
+[host."/"]
+dir = ""
+header = {test = "bad\u0000header"}
+"#).expect("parse err");
+    assert!(group_config(&mut cfg).await.is_err());
+    let mut cfg: Configuration = toml::from_str(r#"
+[host]
+ip = "0.0.0.0:1337"
+[host."/"]
+dir = ""
+header = {"test\n" = "1"}
+"#).expect("parse err");
+    assert!(group_config(&mut cfg).await.is_err());
 }
