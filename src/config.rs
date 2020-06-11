@@ -10,6 +10,7 @@ use std::io::{Error as IOError, ErrorKind};
 use std::fmt;
 use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 use async_fcgi::FCGIAddr;
+use hyper::header::HeaderMap;
 
 
 impl From<&FCGISock> for FCGIAddr {
@@ -149,10 +150,81 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
     }
 }
 
+#[derive(Debug)]
+pub struct HostCfg {
+    pub default_host: Option<VHost>,
+    pub vhosts: HashMap<String, VHost>,
+}
+impl HostCfg{
+    fn new() -> HostCfg {
+        HostCfg {
+            default_host: None,
+            vhosts: HashMap::new()
+        }
+    }
+}
+
+pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr, HostCfg>, Box<dyn Error>> {
+    let mut listening_ifs = HashMap::new();
+    let mut errors = CFGError::new();
+    for (vhost, mut params) in cfg.hosts.drain() {
+        let addr = params.ip;
+        for (mount, wwwroot) in params.paths.iter_mut() {
+            wwwroot.fcgi = if let Some(mut fcgi_cfg) = wwwroot.fcgi.take() {
+                match FCGIAppPool::new(&(&fcgi_cfg.sock).into()).await {
+                    Ok(app) => fcgi_cfg.app = Some(app),
+                    Err(e) => {
+                        errors.add(format!("FCGIApp @{:?}: {}", mount, e));
+                        return Err(Box::new(errors));
+                    }
+                }
+                Some(fcgi_cfg)
+            }else{
+                None
+            };
+            if wwwroot.header.is_none() {continue;}
+            let mut _h = HeaderMap::new();
+            if let Err(e) = crate::dispatch::insert_default_headers(&mut _h, &wwwroot.header) {
+                errors.add(format!("{:?}: {}", mount, e));
+                return Err(Box::new(errors));
+            }
+        }
+        match listening_ifs.get_mut(&addr) {
+            None => {
+                let mut hcfg = HostCfg::new();
+                if Some(true) == params.validate_server_name {
+                    hcfg.vhosts.insert(vhost, params);
+                }else{
+                    hcfg.default_host = Some(params);
+                }
+                listening_ifs.insert(addr, hcfg);
+            },
+            Some(mut hcfg) => {
+                if Some(true) == params.validate_server_name {
+                    hcfg.vhosts.insert(vhost, params);
+                }else{
+                    if hcfg.default_host.is_none() {
+                        hcfg.default_host = Some(params);
+                    }else{
+                        errors.add(format!("{} is the second host on {} that does not validate the server name", vhost, addr));
+                    }
+                }
+            }
+        }
+    }
+    if errors.has_errors() {
+        Err(Box::new(errors))
+    }else{
+        Ok(listening_ifs)
+    }
+}
+
 #[test]
 fn config_file(){
-    extern crate pretty_env_logger;
-    pretty_env_logger::init();
+    use std::fs::File;
+    use std::io::prelude::*;
+    let mut file = File::create("./config.toml")?;
+    file.write_all(b"[host]\nip = \"0.0.0.0:1337\"\ndir=\".\"")?;
     load_config().expect("configuration error");
 }
 #[test]
@@ -164,7 +236,7 @@ your.ip = "[::1]:1234" # hah
 your.dir = "~"
 [host]
 ip = "0.0.0.0:1337"
-port = 3
+
 [host.path]
 dir = "/var/www/"
 index = ["index.html", "index.htm"]

@@ -9,16 +9,17 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::path::{Component, Path, PathBuf};
-use crate::{config, HostCfg};
+use std::error::Error;
+use crate::config;
 
 
-fn insert_default_headers(header: &mut header::HeaderMap<header::HeaderValue>,
-    config_header: &Option<HashMap<String, String>>) {
+pub fn insert_default_headers(header: &mut header::HeaderMap<header::HeaderValue>,
+    config_header: &Option<HashMap<String, String>>) -> Result<(),Box<dyn Error>> {
     if let Some(config_header) = config_header {
         for (key, value) in config_header.iter() {
-            let key = header::HeaderName::from_bytes(key.as_bytes()).expect("wrong HTTP header");
+            let key = header::HeaderName::from_bytes(key.as_bytes())?;
             if !header.contains_key(&key) {
-                header.insert(key, header::HeaderValue::from_str(value).expect("wrong HTTP header"));
+                header.insert(key, header::HeaderValue::from_str(value)?);
             }
         }
     }
@@ -33,6 +34,7 @@ fn insert_default_headers(header: &mut header::HeaderMap<header::HeaderValue>,
             header.insert(key, header::HeaderValue::from_static(value));
         }
     }
+    Ok(())
 }
 fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &PathBuf) -> bool {
     if let Some(whitelist) = list {
@@ -85,7 +87,7 @@ async fn handle_wwwroot(req: Request<Body>,
                 if ext_in_list(&fcgi_cfg.exec, &full_path) {
                     return match fcgi::fcgi_call(&fcgi_cfg, req, &full_path).await{
                         Ok(mut resp) => {
-                            insert_default_headers(resp.headers_mut(), &wwwr.header);
+                            insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
                             Ok(resp)
                         },
                         Err(err) => {
@@ -113,7 +115,7 @@ async fn handle_wwwroot(req: Request<Body>,
 
             if ext_in_list(&wwwr.serve, &full_path) {
                 let mut resp = staticf::return_file(&req, &wwwr, &full_path).await?;
-                insert_default_headers(resp.headers_mut(), &wwwr.header);
+                insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
                 return Ok(resp);
             }else{
                 Ok(create_resp_forbidden())
@@ -158,7 +160,7 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost) -> Result<Respons
     Ok(create_resp_forbidden())
 }
 
-pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<HostCfg>, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
+pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
     if let Some(host) = req.headers().get(header::HOST) {
         debug!("Host: {:?}", host);

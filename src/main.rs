@@ -14,8 +14,6 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use async_fcgi::client::con_pool::ConPool as FCGIApp;
-use std::convert::Into;
 
 mod config;
 mod user;
@@ -23,21 +21,8 @@ mod pidfile;
 mod body;
 mod dispatch;
 
-#[derive(Debug)]
-struct HostCfg {
-    default_host: Option<config::VHost>,
-    vhosts: HashMap<String, config::VHost>,
-}
-impl HostCfg{
-    fn new() -> HostCfg {
-        HostCfg {
-            default_host: None,
-            vhosts: HashMap::new()
-        }
-    }
-}
 
-async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, HostCfg>)
+async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::HostCfg>)
  -> Result<Vec<JoinHandle<Result<(), hyper::error::Error>>>, hyper::error::Error> {
 
     let mut handles = vec![];
@@ -78,49 +63,10 @@ async fn main() {
         },
         Ok(mut cfg) => {
             //group config by SocketAddrs
-            let mut listening_ifs = HashMap::new();
-            for (vhost, mut params) in cfg.hosts.drain() {
-                let addr = params.ip;
-                for (_, wwwroot) in params.paths.iter_mut() {
-                    wwwroot.fcgi = if let Some(mut fcgi_cfg) = wwwroot.fcgi.take() {
-                        match FCGIApp::new(&(&fcgi_cfg.sock).into()).await {
-                            Ok(app) => fcgi_cfg.app = Some(app),
-                            Err(e) => {
-                                error!("FCGIApp: {}", e);
-                                eprintln!("FCGI Error! See Logs");
-                                return;
-                            }
-                        }
-                        Some(fcgi_cfg)
-                    }else{
-                        None
-                    }
-                }
-                match listening_ifs.get_mut(&addr) {
-                    None => {
-                        let mut hcfg = HostCfg::new();
-                        if Some(true) == params.validate_server_name {
-                            hcfg.vhosts.insert(vhost, params);
-                        }else{
-                            hcfg.default_host = Some(params);
-                        }
-                        listening_ifs.insert(addr, hcfg);
-                    },
-                    Some(mut hcfg) => {
-                        if Some(true) == params.validate_server_name {
-                            hcfg.vhosts.insert(vhost, params);
-                        }else{
-                            if hcfg.default_host.is_none() {
-                                hcfg.default_host = Some(params);
-                            }else{
-                                error!("{} is the second host on {} that does not validate the server name", vhost, addr);
-                                eprintln!("Configuration error! See Logs");
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
+            let listening_ifs = match config::group_config(&mut cfg).await {
+                Err(e) => {error!("{}", e);eprintln!("Error! See Logs");return;},
+                Ok(m) => m
+            };
             debug!("{:#?}",listening_ifs);
             //setup all servers
             match prepare_hyper_servers(listening_ifs).await {
