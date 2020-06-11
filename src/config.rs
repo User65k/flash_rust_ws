@@ -226,9 +226,16 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
 fn config_file(){
     use std::fs::File;
     use std::io::prelude::*;
-    let mut file = File::create("./config.toml")?;
-    file.write_all(b"[host]\nip = \"0.0.0.0:1337\"\ndir=\".\"")?;
-    load_config().expect("configuration error");
+    let mut file = File::create("./config.toml").expect("could not create cfg file");
+    file.write_all(b"[host]\nip = \"0.0.0.0:1337\"\ndir=\".\"").expect("could not write cfg file");
+    assert!(load_config().is_ok());
+
+    file.write_all(b"\n[host2]\nip = \"0.0.0.0:8080\"").expect("could not write cfg file");
+    assert!(load_config().is_err()); // does not serve anything
+
+
+    file.write_all(b"\ndir=\"\\nonexistend\"").expect("could not write cfg file");
+    assert!(load_config().is_err()); // folder non existent
 }
 #[test]
 fn toml_to_struct() {
