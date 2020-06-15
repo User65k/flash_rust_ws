@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use serde::Deserialize;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use log::info;
 use std::path::PathBuf;
 use std::io::Read;
@@ -154,12 +154,14 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
 pub struct HostCfg {
     pub default_host: Option<VHost>,
     pub vhosts: HashMap<String, VHost>,
+    pub listener: Option<TcpListener>
 }
 impl HostCfg{
-    fn new() -> HostCfg {
+    fn new(listener: TcpListener) -> HostCfg {
         HostCfg {
             default_host: None,
-            vhosts: HashMap::new()
+            vhosts: HashMap::new(),
+            listener: Some(listener)
         }
     }
 }
@@ -176,7 +178,6 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                     Ok(app) => fcgi_cfg.app = Some(app),
                     Err(e) => {
                         errors.add(format!("FCGIApp @{:?}: {}", mount, e));
-                        return Err(Box::new(errors));
                     }
                 }
                 Some(fcgi_cfg)
@@ -188,13 +189,12 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
             let mut _h = HeaderMap::new();
             if let Err(e) = crate::dispatch::insert_default_headers(&mut _h, &wwwroot.header) {
                 errors.add(format!("{:?}: {}", mount, e));
-                return Err(Box::new(errors));
             }
         }
         //group vHosts by IP
         match listening_ifs.get_mut(&addr) {
             None => {
-                let mut hcfg = HostCfg::new();
+                let mut hcfg = HostCfg::new(TcpListener::bind(addr)?);
                 if Some(true) == params.validate_server_name {
                     hcfg.vhosts.insert(vhost, params);
                 }else{
@@ -267,7 +267,7 @@ ip = "0.0.0.0:1337"
 async fn bad_header() {
     let mut cfg: Configuration = toml::from_str(r#"
 [host]
-ip = "0.0.0.0:1337"
+ip = "0.0.0.0:1338"
 [host."/"]
 dir = ""
 header = {test = "bad\u0000header"}
@@ -275,10 +275,19 @@ header = {test = "bad\u0000header"}
     assert!(group_config(&mut cfg).await.is_err());
     let mut cfg: Configuration = toml::from_str(r#"
 [host]
-ip = "0.0.0.0:1337"
+ip = "0.0.0.0:1339"
 [host."/"]
 dir = ""
 header = {"test\n" = "1"}
+"#).expect("parse err");
+    assert!(group_config(&mut cfg).await.is_err());
+}
+
+#[tokio::test]
+async fn cant_listen() {
+    let mut cfg: Configuration = toml::from_str(r#"
+[host]
+ip = "8.8.8.8:22"
 "#).expect("parse err");
     assert!(group_config(&mut cfg).await.is_err());
 }

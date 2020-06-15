@@ -14,6 +14,8 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
+use std::error::Error;
+use std::io::{Error as IoError, ErrorKind};
 
 mod config;
 mod user;
@@ -23,11 +25,15 @@ mod dispatch;
 
 
 async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::HostCfg>)
- -> Result<Vec<JoinHandle<Result<(), hyper::error::Error>>>, hyper::error::Error> {
+ -> Result<Vec<JoinHandle<Result<(), hyper::error::Error>>>, Box<dyn Error>> {
 
     let mut handles = vec![];
-    for (addr, cfg) in listening_ifs.drain() {
-        let server = match hyper::Server::try_bind(&addr) {
+    for (addr, mut cfg) in listening_ifs.drain() {
+        let l = match cfg.listener.take() {
+            Some(l) => l,
+            None => {return Err(Box::new(IoError::new(ErrorKind::Other, "could not listen")));}
+        };
+        let server = match hyper::Server::from_tcp(l) {
             Ok(server_builder) => {
                 info!("Bound to {}", &addr);
                 let hcfg = Arc::new(cfg);
@@ -43,7 +49,7 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
             },
             Err(err) => {
                 error!("{}: {}", addr, err);
-                return Err(err);
+                return Err(Box::new(err));
             }
         };
         handles.push(tokio::spawn(server));
@@ -68,33 +74,32 @@ async fn main() {
                 Ok(m) => m
             };
             debug!("{:#?}",listening_ifs);
+            // Switch user+group
+            if let Some(user) = cfg.user {
+                if let Err(e) = user::switch_user(&user) {
+                    error!("Could not switch User: {}", e);
+                    eprintln!("Error! See Logs");
+                    return;
+                }
+            }
+            if let Some(group) = cfg.group {
+                if let Err(e) = user::switch_group(&group) {
+                    error!("Could not switch Group: {}", e);
+                    eprintln!("Error! See Logs");
+                    return;
+                }
+            }
+            //Write pid file
+            if let Some(pidfile) = cfg.pidfile {
+                if let Err(e) = pidfile::create_pid_file(pidfile) {
+                    error!("Could not write Pid File: {}", e);
+                    eprintln!("Error! See Logs");
+                    return;
+                }
+            }
             //setup all servers
             match prepare_hyper_servers(listening_ifs).await {
                 Ok(handles) => {
-                    // Switch user+group
-                    if let Some(user) = cfg.user {
-                        if let Err(e) = user::switch_user(&user) {
-                            error!("Could not switch User: {}", e);
-                            eprintln!("Error! See Logs");
-                            return;
-                        }
-                    }
-                    if let Some(group) = cfg.group {
-                        if let Err(e) = user::switch_group(&group) {
-                            error!("Could not switch Group: {}", e);
-                            eprintln!("Error! See Logs");
-                            return;
-                        }
-                    }
-                    //Write pid file
-                    if let Some(pidfile) = cfg.pidfile {
-                        if let Err(e) = pidfile::create_pid_file(pidfile) {
-                            error!("Could not write Pid File: {}", e);
-                            eprintln!("Error! See Logs");
-                            return;
-                        }
-                    }
-
                     join_all(handles).await;
                 },
                 Err(e) => {
