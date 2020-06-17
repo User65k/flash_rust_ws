@@ -10,21 +10,20 @@ edition = "2018"
 hyper = "0.13"      # HTTP
 bytes = "0.5"
 log = "0.4"
-http-body = "0.3.1"
 
 #config:
 toml = "0.5"        # config files in toml
 serde = { version = "1.0", features = ["derive"] }
 
 #main:
-tokio = "0.2"
+tokio = {version = "0.2", features = ["fs", "tcp", "macros", "time", "rt-core"]}
 futures-util = { version = "0.3", default-features = false }
 percent-encoding = "2.1.0"
+#files:
 mime_guess = "2.0.3"
 hyper-staticfile = "0.5.3"    # GET+HEAD for Files
+#fcgi:
 async-fcgi = {git="https://github.com/User65k/async-fcgi", features = ["con_pool"]}
-#hyper-rustls = "0.2"
-#hyper_native_tls = "0.3"
 
 #acme-client         # auto hyper_native_tls
 
