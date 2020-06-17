@@ -75,16 +75,16 @@ async fn main() {
             };
             debug!("{:#?}",listening_ifs);
             // Switch user+group
-            if let Some(user) = cfg.user {
-                if let Err(e) = user::switch_user(&user) {
-                    error!("Could not switch User: {}", e);
+            if let Some(group) = cfg.group {
+                if let Err(e) = user::switch_group(&group) {
+                    error!("Could not switch Group: {}", e);
                     eprintln!("Error! See Logs");
                     return;
                 }
             }
-            if let Some(group) = cfg.group {
-                if let Err(e) = user::switch_group(&group) {
-                    error!("Could not switch Group: {}", e);
+            if let Some(user) = cfg.user {
+                if let Err(e) = user::switch_user(&user) {
+                    error!("Could not switch User: {}", e);
                     eprintln!("Error! See Logs");
                     return;
                 }
