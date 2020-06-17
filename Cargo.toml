@@ -8,7 +8,6 @@ edition = "2018"
 
 [dependencies]
 hyper = "0.13"      # HTTP
-http = "0.2"        # used by hyper
 bytes = "0.5"
 log = "0.4"
 http-body = "0.3.1"
@@ -24,7 +23,6 @@ percent-encoding = "2.1.0"
 mime_guess = "2.0.3"
 hyper-staticfile = "0.5.3"    # GET+HEAD for Files
 async-fcgi = {git="https://github.com/User65k/async-fcgi", features = ["con_pool"]}
-
 #hyper-rustls = "0.2"
 #hyper_native_tls = "0.3"
 

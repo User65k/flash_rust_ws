@@ -1,7 +1,6 @@
 mod staticf;
 mod fcgi;
 
-use http::response::Builder as HTTPResponseBuilder;
 use hyper::{Body, Request, Response, header, StatusCode}; //, Method};
 use std::io::{Error as IoError, ErrorKind};
 use log::{info, error, debug, trace};
@@ -93,7 +92,7 @@ async fn handle_wwwroot(req: Request<Body>,
                         Err(err) => {
                             match err.kind() {
                                 ErrorKind::NotFound => {
-                                    Ok(HTTPResponseBuilder::new()
+                                    Ok(Response::builder()
                                     .status(StatusCode::NOT_FOUND)
                                     .body(Body::empty())
                                     .expect("unable to build response"))
@@ -106,7 +105,7 @@ async fn handle_wwwroot(req: Request<Body>,
             }
 
             /*if req.method()==Method::OPTIONS {
-            return Ok(HTTPResponseBuilder::new()
+            return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(header::ALLOW, "GET,HEAD,OPTIONS")
             .body(Body::empty())
@@ -179,7 +178,7 @@ pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>
 }
 
 fn create_resp_forbidden() -> Response<Body> {
-    HTTPResponseBuilder::new()
+    Response::builder()
     .status(StatusCode::FORBIDDEN)
     .body(Body::empty())
     .expect("unable to build response")
