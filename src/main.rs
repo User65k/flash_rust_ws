@@ -8,7 +8,6 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 use futures_util::future::join_all;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request};
-use hyper::server::conn::AddrStream;
 use log::{info, error, debug, trace};
 use std::net::SocketAddr;
 use std::collections::HashMap;
@@ -22,6 +21,9 @@ mod user;
 mod pidfile;
 mod body;
 mod dispatch;
+mod transport;
+
+use transport::{PlainIncoming, PlainStream};
 
 
 async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::HostCfg>)
@@ -33,19 +35,19 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
             Some(l) => l,
             None => {return Err(Box::new(IoError::new(ErrorKind::Other, "could not listen")));}
         };
-        let server = match hyper::Server::from_tcp(l) {
-            Ok(server_builder) => {
+        let server = match PlainIncoming::from_std(l) {
+            Ok(incomming) => {
                 info!("Bound to {}", &addr);
                 let hcfg = Arc::new(cfg);
-                let make_service = make_service_fn(move |socket: &AddrStream| {
-                    let remote_addr = socket.remote_addr();
+                let make_service = make_service_fn(move |socket: &PlainStream| {
+                    let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
                     trace!("Connected on {}", &addr);
                     let hcfg = hcfg.clone();
                     async move {
                         Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| dispatch::handle_request(req, hcfg.clone(), remote_addr) ))
                     }
                 });
-                server_builder.serve(make_service)
+                hyper::Server::builder(incomming).serve(make_service)
             },
             Err(err) => {
                 error!("{}: {}", addr, err);
