@@ -60,7 +60,7 @@ Place the config file in one of these places:
 - [x] [FastCGI](https://github.com/User65k/async-fcgi)
 - [ ] HTTPS
   - [ ] [rustls](https://github.com/ctz/rustls) (Fast)
-  - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary)
+  - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once sfackler/rust-native-tls#105 is done)
 - [ ] SCGI
 - [ ] WebDAV
 - [ ] Websocket
@@ -76,8 +76,7 @@ Place the config file in one of these places:
   - [x] no folder listings (except DAV)
   - [x] recomended http headers by default
   - [x] no path traversals :-)
-  - [ ] users with blowfish
-  - [ ] http digest auth ( https://developer.mozilla.org/en-US/docs/Web/HTTP/Authentication )
+  - [ ] HTTP user auth: Digest? Mutual?
   - [ ] only https ?
   - [ ] lets encrypt build in ?
   - [x] avoid BEAST and CRIME

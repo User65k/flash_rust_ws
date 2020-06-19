@@ -41,6 +41,9 @@ use hyper::server::accept::Accept;
 use log::{info, error, debug, trace};
 use futures_util::ready;
 
+#[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+pub mod tls;
+
 /// A stream of connections from binding to an address.
 #[must_use = "streams do nothing unless polled"]
 pub struct PlainIncoming {

@@ -24,6 +24,8 @@ mime_guess = "2.0.3"
 hyper-staticfile = "0.5.3"    # GET+HEAD for Files
 #fcgi:
 async-fcgi = {git="https://github.com/User65k/async-fcgi", features = ["con_pool"]}
+#https:
+tokio-rustls = { version = "0.13.1", optional = true }
 
 #acme-client         # auto hyper_native_tls
 
@@ -38,6 +40,10 @@ pretty_env_logger = { version = "0.4.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 users = "0.10.0"
+
+[features]
+default = ["tlsrust"]
+tlsrust = ["tokio-rustls"]
 
 [[bin]]
 name = "flash_rust_ws"

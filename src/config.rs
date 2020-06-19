@@ -11,6 +11,8 @@ use std::fmt;
 use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 use async_fcgi::FCGIAddr;
 use hyper::header::HeaderMap;
+#[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+use crate::transport::tls::TlsConfig;
 
 
 impl From<&FCGISock> for FCGIAddr {
@@ -58,6 +60,8 @@ pub struct WwwRoot {
 #[derive(Deserialize)]
 pub struct VHost {
     pub ip: SocketAddr,
+    #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+    pub tls: Option<TlsConfig>,
     pub validate_server_name: Option<bool>,
     #[serde(flatten)]
     root: Option<WwwRoot>, //only in toml -> will be added to paths
