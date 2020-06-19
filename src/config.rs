@@ -12,7 +12,7 @@ use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 use async_fcgi::FCGIAddr;
 use hyper::header::HeaderMap;
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-use crate::transport::tls::TlsConfig;
+use crate::transport::tls::{TLSConfig, TlsUserConfig, get_config};
 
 
 impl From<&FCGISock> for FCGIAddr {
@@ -61,7 +61,7 @@ pub struct WwwRoot {
 pub struct VHost {
     pub ip: SocketAddr,
     #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-    pub tls: Option<TlsConfig>,
+    pub tls: Option<TlsUserConfig>,
     pub validate_server_name: Option<bool>,
     #[serde(flatten)]
     root: Option<WwwRoot>, //only in toml -> will be added to paths
@@ -154,19 +154,30 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
     }
 }
 
-#[derive(Debug)]
 pub struct HostCfg {
     pub default_host: Option<VHost>,
     pub vhosts: HashMap<String, VHost>,
-    pub listener: Option<TcpListener>
+    pub listener: Option<TcpListener>,
+    #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+    pub has_tls: Option<TLSConfig>,
 }
 impl HostCfg{
     fn new(listener: TcpListener) -> HostCfg {
         HostCfg {
             default_host: None,
             vhosts: HashMap::new(),
-            listener: Some(listener)
+            listener: Some(listener),
+            #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+            has_tls: None,
         }
+    }
+}
+impl fmt::Debug for HostCfg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostCfg")
+        .field("default_host", &self.default_host)
+        .field("vhosts", &self.vhosts)
+        .finish()
     }
 }
 
@@ -199,6 +210,13 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
         match listening_ifs.get_mut(&addr) {
             None => {
                 let mut hcfg = HostCfg::new(TcpListener::bind(addr)?);
+                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+                if let Some(tlscfg) = params.tls.take() {
+                    match get_config(&tlscfg) {
+                        Ok(tls) => hcfg.has_tls = Some(tls),
+                        Err(e) => errors.add(format!("vHosts {}:  {}", vhost, e)),
+                    }
+                }
                 if Some(true) == params.validate_server_name {
                     hcfg.vhosts.insert(vhost, params);
                 }else{
@@ -207,6 +225,10 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                 listening_ifs.insert(addr, hcfg);
             },
             Some(mut hcfg) => {
+                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+                if params.tls.is_some() != hcfg.has_tls.is_some() {
+                    errors.add(format!("All vHosts on {} must be either TLS or not", addr));
+                }
                 if Some(true) == params.validate_server_name {
                     hcfg.vhosts.insert(vhost, params);
                 }else{
@@ -291,6 +313,20 @@ header = {"test\n" = "1"}
 async fn cant_listen() {
     let mut cfg: Configuration = toml::from_str(r#"
 [host]
+ip = "8.8.8.8:22"
+"#).expect("parse err");
+    assert!(group_config(&mut cfg).await.is_err());
+}
+
+#[cfg(feature = "tlsrust")]
+#[tokio::test]
+async fn tls_plain_mix() {
+    let mut cfg: Configuration = toml::from_str(r#"
+[host]
+ip = "8.8.8.8:22"
+tls.cert_file = ""
+tls.key_file = ""
+[host2]
 ip = "8.8.8.8:22"
 "#).expect("parse err");
     assert!(group_config(&mut cfg).await.is_err());

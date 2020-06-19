@@ -2,9 +2,9 @@
 mod rustls;
 
 #[cfg(feature = "tlsrust")]
-use self::rustls::{UnderlyingTLSStream, UnderlyingAccept, UnderlyingConfig, get_config, get_accept_feature};
+use self::rustls::{UnderlyingTLSStream, UnderlyingAccept, get_accept_feature};
 #[cfg(feature = "tlsrust")]
-pub use self::rustls::TlsConfig;
+pub use self::rustls::{TlsUserConfig, TLSConfig, get_config};
 
 use super::{PlainIncoming, PlainStream};
 use core::task::{Context, Poll};
@@ -30,7 +30,7 @@ pub(crate) struct TlsStream {
 }
 
 impl TlsStream {
-    fn new(stream: PlainStream, config: Arc<UnderlyingConfig>) -> TlsStream {
+    fn new(stream: PlainStream, config: Arc<TLSConfig>) -> TlsStream {
         //let remote_addr = stream.remote_addr();
         let accept = get_accept_feature(config, stream);
         TlsStream {
@@ -97,17 +97,12 @@ impl AsyncWrite for TlsStream {
 }
 
 pub(crate) struct TlsAcceptor {
-    config: Arc<UnderlyingConfig>,
+    config: Arc<TLSConfig>,
     incoming: PlainIncoming,
 }
 
 impl TlsAcceptor {
-    pub fn new(listener: PlainIncoming,
-                conf: &TlsConfig) -> Result<TlsAcceptor, Box<dyn std::error::Error + Send + Sync>> {
-        let cfg = get_config(conf)?;
-        Ok(TlsAcceptor::from_inc(cfg, listener))
-    }
-    pub(crate) fn from_inc(config: UnderlyingConfig, incoming: PlainIncoming) -> TlsAcceptor {
+    pub(crate) fn new(config: TLSConfig, incoming: PlainIncoming) -> TlsAcceptor {
         TlsAcceptor {
             config: Arc::new(config),
             incoming,
