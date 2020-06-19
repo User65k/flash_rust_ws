@@ -60,14 +60,15 @@ Place the config file in one of these places:
 - [x] [FastCGI](https://github.com/User65k/async-fcgi)
 - [ ] HTTPS
   - [ ] [rustls](https://github.com/ctz/rustls) (Fast)
-  - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once sfackler/rust-native-tls#105 is done)
-- [ ] SCGI
+  - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once https://github.com/sfackler/rust-native-tls/issues/105 / https://github.com/sfackler/rust-native-tls/issues/163 is done)
 - [ ] WebDAV
 - [ ] Websocket
   - [ ] Reverse-Proxy
   - [ ] to normal Socket (SCGI Style)
 - [ ] Security
+  - [ ] HTTP user auth: Digest? Mutual?
   - [ ] DoS protection
+    - [x] Don't be affected by Sloloris
     - [ ] limit connection count ?
     - [ ] rate ?
     - [ ] min speed ?
@@ -76,10 +77,10 @@ Place the config file in one of these places:
   - [x] no folder listings (except DAV)
   - [x] recomended http headers by default
   - [x] no path traversals :-)
-  - [ ] HTTP user auth: Digest? Mutual?
   - [ ] only https ?
   - [ ] lets encrypt build in ?
   - [x] avoid BEAST and CRIME
+- [ ] SCGI
 
 # Logging
 For now [env_logger](https://docs.rs/env_logger/0.7.1/env_logger/) is used.
