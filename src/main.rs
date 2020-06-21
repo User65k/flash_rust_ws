@@ -22,6 +22,7 @@ mod pidfile;
 mod body;
 mod dispatch;
 mod transport;
+mod logging;
 
 use transport::{PlainIncoming, PlainStream};
 
@@ -61,36 +62,36 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
 
 #[tokio::main]
 async fn main() {
-    extern crate pretty_env_logger;
-    pretty_env_logger::init();
+    let logging_handle = logging::init_stderr_logging();
 
     match config::load_config() {
         Err(e) => {
             error!("Configuration error!\r\n{}", e);
-            eprintln!("Configuration error! See Logs");
         },
         Ok(mut cfg) => {
             //group config by SocketAddrs
             let listening_ifs = match config::group_config(&mut cfg).await {
-                Err(e) => {error!("{}", e);eprintln!("Error! See Logs");return;},
+                Err(e) => {error!("{}", e);return;},
                 Ok(m) => m
             };
-            debug!("{:#?}",listening_ifs);
             // Switch user+group
             if let Some(group) = cfg.group {
                 if let Err(e) = user::switch_group(&group) {
                     error!("Could not switch Group: {}", e);
-                    eprintln!("Error! See Logs");
                     return;
                 }
             }
             if let Some(user) = cfg.user {
                 if let Err(e) = user::switch_user(&user) {
                     error!("Could not switch User: {}", e);
-                    eprintln!("Error! See Logs");
                     return;
                 }
             }
+            //switch logging to value from config
+            if let Some(logconf) = cfg.log.take() {
+                logging::init_file(logconf, &logging_handle);
+            }
+            debug!("{:#?}",listening_ifs);
             //Write pid file
             if let Some(pidfile) = cfg.pidfile {
                 if let Err(e) = pidfile::create_pid_file(pidfile) {

@@ -11,6 +11,7 @@ use std::fmt;
 use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 use async_fcgi::FCGIAddr;
 use hyper::header::HeaderMap;
+use log4rs::file::RawConfig as LogConfig;
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
 use crate::transport::tls::{TLSConfig, TlsUserConfig, get_config};
 
@@ -77,6 +78,7 @@ pub struct Configuration {
     pub pidfile: Option<PathBuf>,
     pub user: Option<String>,
     pub group: Option<String>,
+    pub log: Option<LogConfig>,
 
     #[serde(flatten)]
     pub hosts: HashMap<String, VHost>,

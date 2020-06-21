@@ -10,6 +10,7 @@ edition = "2018"
 hyper = "0.13"      # HTTP
 bytes = "0.5"
 log = "0.4"
+log4rs = { version = "0.12.0", default-features = false, features = ["all_components", "file"] }
 
 #config:
 toml = "0.5"        # config files in toml
@@ -35,15 +36,13 @@ tokio-rustls = { version = "0.13.1", optional = true }
 #warp = "0.2.2"		# HTTP + Websockets
 #hyperdav-server = "0.1"	# webdav + insecure
 
-#tests:
-pretty_env_logger = { version = "0.4.0", default-features = false }
-
 [target.'cfg(unix)'.dependencies]
 users = "0.10.0"
 
 [features]
 default = ["tlsrust"]
 tlsrust = ["tokio-rustls"]
+logrot = ["log4rs/background_rotation"]
 
 [[bin]]
 name = "flash_rust_ws"

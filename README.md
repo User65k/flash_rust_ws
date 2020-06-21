@@ -83,16 +83,6 @@ Place the config file in one of these places:
 - [ ] SCGI
 
 # Logging
-For now [env_logger](https://docs.rs/env_logger/0.7.1/env_logger/) is used.
 
-```
-$ RUST_LOG=info flash_rust_ws
-INFO  flash_rust_ws::config > host: host @ 0.0.0.0:1337
-INFO  flash_rust_ws::config >   "" => "."
-INFO  flash_rust_ws::config > host: host2 @ 0.0.0.0:8080
-INFO  flash_rust_ws::config >   "" => "\nonexistend"
-ERROR flash_rust_ws         > Configuration error!
-"\nonexistend" (in host2/"") ist not a directory
-
-Configuration error! See Logs
-```
+See [log4rs](https://docs.rs/log4rs/0.12.0/log4rs/).
+It defaults to logging on STDERR
