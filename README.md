@@ -16,13 +16,9 @@ pidfile  = "/var/run/frws.pid" # Optional: Write PID to this file
 #user = "www-data"
 #group = "www-data"
 
-# Optional: Change logging
-# Log warnings+ to STDERR (default)
-log.appenders.stderr = {kind = "console", target="stderr", encoder={pattern = "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {t} - {m}{n}"}}
-log.root = {level = "warn", appenders = ["stderr"]}
-# Log info+ of class "flash_rust_ws::dispatch" to "./requests.log"
-log.appenders.requests = {kind = "file", path = "./requests.log", append=true, encoder={pattern = "{d} {m}{n}"}}
-log.loggers."flash_rust_ws::dispatch" = {level = "info",appenders = ["requests"],additive = false}
+# Optional: Change logging - See README for more
+log.appenders.stdout = {kind = "console"}
+log.root = {level = "info", appenders = ["stdout"]}
 
 ["example.com"]
 ip = "127.0.0.1:1337"
@@ -68,13 +64,16 @@ Place the config file in one of these places:
 - [x] [FastCGI](https://github.com/User65k/async-fcgi)
 - [ ] HTTPS
   - [ ] [rustls](https://github.com/ctz/rustls) (Fast)
-  - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once https://github.com/sfackler/rust-native-tls/issues/105 / https://github.com/sfackler/rust-native-tls/issues/163 is done)
+  - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once [rust-native-tls#105](https://github.com/sfackler/rust-native-tls/issues/105) / [rust-native-tls#163](https://github.com/sfackler/rust-native-tls/issues/163) is done)
 - [ ] WebDAV
 - [ ] Websocket
   - [ ] Reverse-Proxy
   - [ ] to normal Socket (SCGI Style)
+- [ ] More Logging
+  - [ ] to journald
+  - [ ] to Windows Event Log?
 - [ ] Security
-  - [ ] HTTP user auth: Digest? Mutual?
+  - [ ] HTTP user auth: Digest - (MD5 because FireFox, but better that nothing)
   - [ ] DoS protection
     - [x] Don't be affected by Sloloris
     - [ ] limit connection count ?
@@ -95,8 +94,22 @@ Place the config file in one of these places:
 See [log4rs](https://docs.rs/log4rs/0.12.0/log4rs/) and its [patterns](https://docs.rs/log4rs/0.12.0/log4rs/encode/pattern/index.html).
 It defaults to log on STDERR:
 
-- flash_rust_ws::config Info (Configuration parsing)
-- flash_rust_ws::dispatch Warn (Request resolving)
-- flash_rust_ws Warn (This server)
-- hyper Warn (Low level HTTP server)
-- async_fcgi Warn (FastCGI)
+- `flash_rust_ws::config` Info (Configuration parsing)
+- `flash_rust_ws::dispatch` Warn (Request resolving)
+- `flash_rust_ws` Warn (This server)
+- `hyper` Warn (Low level HTTP server)
+- `async_fcgi` Warn (FastCGI)
+
+## Logging Example
+
+- Log all requests to `./requests.log` (Level info for `flash_rust_ws::dispatch`)
+- Log everything else as usual
+
+```toml
+# Log warnings+ to STDERR (default)
+log.appenders.stderr = {kind = "console", target="stderr", encoder={pattern = "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {t} - {m}{n}"}}
+log.root = {level = "warn", appenders = ["stderr"]}
+# Log info+ of class "flash_rust_ws::dispatch" to "./requests.log"
+log.appenders.requests = {kind = "file", path = "./requests.log", append=true, encoder={pattern = "{d} {m}{n}"}}
+log.loggers."flash_rust_ws::dispatch" = {level = "info",appenders = ["requests"],additive = false}
+```
