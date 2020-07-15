@@ -13,7 +13,7 @@ use async_fcgi::FCGIAddr;
 use hyper::header::HeaderMap;
 use log4rs::file::RawConfig as LogConfig;
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-use crate::transport::tls::{TLSConfig, TlsUserConfig, get_config};
+use crate::transport::tls::{TlsUserConfig, ParsedTLSConfig, TLSBuilderTrait};
 
 
 impl From<&FCGISock> for FCGIAddr {
@@ -115,7 +115,9 @@ impl Error for CFGError {
 
 /// load and verify configuration options
 pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
+    #[cfg(not(test))]
     let mut path = None;
+    #[cfg(not(test))]
     for cfg_path in ["./config.toml", "/etc/defaults/config.toml"].iter() {
         let p: PathBuf = cfg_path.into();
         if p.is_file() {
@@ -123,10 +125,15 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
             break;
         }
     }
+    #[cfg(not(test))]
     if path.is_none() {
         return Err(Box::new(IOError::new(ErrorKind::NotFound, "No config file found!")));
     }
+    #[cfg(test)]
+    let path = Some("./test_cfg.toml");
+
     let mut f = File::open(path.unwrap())?;
+    //.metadata()?.len()
     let mut buffer = Vec::new();
 
     // read the whole file
@@ -161,7 +168,7 @@ pub struct HostCfg {
     pub vhosts: HashMap<String, VHost>,
     pub listener: Option<TcpListener>,
     #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-    pub has_tls: Option<TLSConfig>,
+    pub tls: Option<ParsedTLSConfig>,
 }
 impl HostCfg{
     fn new(listener: TcpListener) -> HostCfg {
@@ -170,7 +177,7 @@ impl HostCfg{
             vhosts: HashMap::new(),
             listener: Some(listener),
             #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-            has_tls: None,
+            tls: None,
         }
     }
 }
@@ -214,8 +221,8 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                 let mut hcfg = HostCfg::new(TcpListener::bind(addr)?);
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if let Some(tlscfg) = params.tls.take() {
-                    match get_config(&tlscfg) {
-                        Ok(tls) => hcfg.has_tls = Some(tls),
+                    match ParsedTLSConfig::new(&tlscfg, Some(&vhost)) {
+                        Ok(tlscfg_parsed) => hcfg.tls = Some(tlscfg_parsed),
                         Err(e) => errors.add(format!("vHosts {}:  {}", vhost, e)),
                     }
                 }
@@ -228,9 +235,16 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
             },
             Some(mut hcfg) => {
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-                if params.tls.is_some() != hcfg.has_tls.is_some() {
+                if params.tls.is_some() != hcfg.tls.is_some() {
                     errors.add(format!("All vHosts on {} must be either TLS or not", addr));
                 }
+                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+                if let Some(tlscfg) = params.tls.take() {
+                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(&tlscfg, Some(&vhost)) {
+                        errors.add(format!("vHosts {}:  {}", vhost, e));
+                    }
+                }
+                
                 if Some(true) == params.validate_server_name {
                     hcfg.vhosts.insert(vhost, params);
                 }else{
@@ -254,9 +268,9 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
 fn config_file(){
     use std::fs::File;
     use std::io::prelude::*;
-    let mut file = File::create("./config.toml").expect("could not create cfg file");
+    let mut file = File::create("./test_cfg.toml").expect("could not create cfg file");
     file.write_all(b"[host]\nip = \"0.0.0.0:1337\"\ndir=\".\"").expect("could not write cfg file");
-    assert!(load_config().is_ok());
+    load_config().expect("should be a valid cfg");
 
     file.write_all(b"\n[host2]\nip = \"0.0.0.0:8080\"").expect("could not write cfg file");
     assert!(load_config().is_err()); // does not serve anything

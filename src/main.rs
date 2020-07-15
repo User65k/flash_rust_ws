@@ -25,8 +25,10 @@ mod transport;
 mod logging;
 
 use transport::{PlainIncoming, PlainStream};
+#[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+use crate::transport::tls::{TlsAcceptor, TlsStream, TLSBuilderTrait};
 
-
+/// Set everything up and gather all the service handles
 async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::HostCfg>)
  -> Result<Vec<JoinHandle<Result<(), hyper::error::Error>>>, Box<dyn Error>> {
 
@@ -39,23 +41,50 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
         let server = match PlainIncoming::from_std(l) {
             Ok(incomming) => {
                 info!("Bound to {}", &addr);
+                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+                let use_tls = cfg.tls.take();
+
                 let hcfg = Arc::new(cfg);
-                let make_service = make_service_fn(move |socket: &PlainStream| {
-                    let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
-                    trace!("Connected on {}", &addr);
+                let serv_func = move |remote_addr: SocketAddr| {
+                    trace!("Connected on {} by {}", &addr, &remote_addr);
                     let hcfg = hcfg.clone();
                     async move {
                         Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| dispatch::handle_request(req, hcfg.clone(), remote_addr) ))
                     }
-                });
-                hyper::Server::builder(incomming).serve(make_service)
+                };
+                
+                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+                if let Some(tls_cfg) = use_tls {
+                    let a = TlsAcceptor::new(tls_cfg.get_config(), incomming);
+                    let make_service = make_service_fn(move |socket: &TlsStream| {
+                        //let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
+                        //trace!("Connected securely on {}", &addr);
+                        let remote_addr = "127.0.0.1:8080".parse().unwrap();
+                        serv_func(remote_addr)
+                    });
+                    tokio::spawn(hyper::Server::builder(a).serve(make_service))
+                }else{
+                    let make_service = make_service_fn(move |socket: &PlainStream| {
+                        let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
+                        serv_func(remote_addr)
+                    });
+                    tokio::spawn(hyper::Server::builder(incomming).serve(make_service))
+                }
+                #[cfg(not(any(feature = "tlsrust",feature = "tlsnative")))]
+                {
+                    let make_service = make_service_fn(move |socket: &PlainStream| {
+                        let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
+                        serv_func(remote_addr)
+                    });
+                    tokio::spawn(hyper::Server::builder(incomming).serve(make_service))
+                }
             },
             Err(err) => {
                 error!("{}: {}", addr, err);
                 return Err(Box::new(err));
             }
         };
-        handles.push(tokio::spawn(server));
+        handles.push(server);
     }
     Ok(handles)
 }
@@ -89,7 +118,10 @@ async fn main() {
             }
             //switch logging to value from config
             if let Some(logconf) = cfg.log.take() {
-                logging::init_file(logconf, &logging_handle);
+                if let Err(e) = logging::init_file(logconf, &logging_handle) {
+                    error!("Could not setup logging: {}", e);
+                    return;
+                }
             }
             debug!("{:#?}",listening_ifs);
             //Write pid file

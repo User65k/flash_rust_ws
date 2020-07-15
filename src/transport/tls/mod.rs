@@ -2,9 +2,9 @@
 mod rustls;
 
 #[cfg(feature = "tlsrust")]
-use self::rustls::{UnderlyingTLSStream, UnderlyingAccept, get_accept_feature};
+use self::rustls::{UnderlyingTLSStream, UnderlyingAccept};
 #[cfg(feature = "tlsrust")]
-pub use self::rustls::{TlsUserConfig, TLSConfig, get_config};
+pub use self::rustls::{TlsUserConfig, TLSConfig, ParsedTLSConfig};
 
 use super::{PlainIncoming, PlainStream};
 use core::task::{Context, Poll};
@@ -21,6 +21,13 @@ enum State {
     Streaming(UnderlyingTLSStream<PlainStream>),
 }
 
+pub(crate) trait TLSBuilderTrait {
+    fn new(c: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> where Self: std::marker::Sized;
+    fn add(&mut self, c: &TlsUserConfig, sni: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn get_config(self) -> TLSConfig;
+    fn get_accept_feature(config: Arc<TLSConfig>, stream: PlainStream) -> UnderlyingAccept<PlainStream>;
+}
+
 // tokio_rustls::server::TlsStream doesn't expose constructor methods,
 // so we have to TlsAcceptor::accept and handshake to have access to it
 // TlsStream implements AsyncRead/AsyncWrite handshaking tokio_rustls::Accept first
@@ -32,7 +39,7 @@ pub(crate) struct TlsStream {
 impl TlsStream {
     fn new(stream: PlainStream, config: Arc<TLSConfig>) -> TlsStream {
         //let remote_addr = stream.remote_addr();
-        let accept = get_accept_feature(config, stream);
+        let accept = ParsedTLSConfig::get_accept_feature(config, stream);
         TlsStream {
             state: State::Handshaking(accept),
             //remote_addr,
