@@ -50,6 +50,8 @@ pub struct FCGIApp {
 #[derive(Deserialize)]
 pub struct WwwRoot {
     pub dir: PathBuf,
+    #[serde(default)]
+    pub follow_symlinks: bool, // = false
     pub index: Option<Vec<PathBuf>>,
     pub serve: Option<Vec<PathBuf>>,
     pub fcgi: Option<FCGIApp>,
@@ -63,7 +65,8 @@ pub struct VHost {
     pub ip: SocketAddr,
     #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
     pub tls: Option<TlsUserConfig>,
-    pub validate_server_name: Option<bool>,
+    #[serde(default)]
+    pub validate_server_name: bool, // = false
     #[serde(flatten)]
     root: Option<WwwRoot>, //only in toml -> will be added to paths
     #[serde(flatten)]
@@ -148,12 +151,12 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
         }
         for (k, v) in vhost.paths.iter() {
             if !v.dir.is_dir() {
-                errors.add(format!("{:?} (in {}/{:?}) ist not a directory", v.dir, host_name, k));
+                errors.add(format!("{:?} (in \"{}/{}\") ist not a directory", v.dir, host_name, k.to_string_lossy()));
             }
             info!("\t {:?} => {:?}", k, v.dir );
         }
         if vhost.paths.len()==0 {
-            errors.add(format!("vHost '{}' does not serve anything", host_name));
+            errors.add(format!("vHost \"{}\" does not serve anything", host_name));
         }
     }
     if errors.has_errors() {
@@ -201,7 +204,7 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                 match FCGIAppPool::new(&(&fcgi_cfg.sock).into()).await {
                     Ok(app) => fcgi_cfg.app = Some(app),
                     Err(e) => {
-                        errors.add(format!("FCGIApp @{:?}: {}", mount, e));
+                        errors.add(format!("FCGIApp @\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
                     }
                 }
                 Some(fcgi_cfg)
@@ -212,21 +215,28 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
             if wwwroot.header.is_none() {continue;}
             let mut _h = HeaderMap::new();
             if let Err(e) = crate::dispatch::insert_default_headers(&mut _h, &wwwroot.header) {
-                errors.add(format!("{:?}: {}", mount, e));
+                errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
             }
         }
+
+        #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+        let sni = if params.validate_server_name {
+            Some(vhost.as_str())
+        }else{
+            None
+        };
         //group vHosts by IP
         match listening_ifs.get_mut(&addr) {
             None => {
                 let mut hcfg = HostCfg::new(TcpListener::bind(addr)?);
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if let Some(tlscfg) = params.tls.take() {
-                    match ParsedTLSConfig::new(&tlscfg, Some(&vhost)) {
+                    match ParsedTLSConfig::new(&tlscfg, sni) {
                         Ok(tlscfg_parsed) => hcfg.tls = Some(tlscfg_parsed),
-                        Err(e) => errors.add(format!("vHosts {}:  {}", vhost, e)),
+                        Err(e) => errors.add(format!("vHost {}:  {}", vhost, e)),
                     }
                 }
-                if Some(true) == params.validate_server_name {
+                if params.validate_server_name {
                     hcfg.vhosts.insert(vhost, params);
                 }else{
                     hcfg.default_host = Some(params);
@@ -240,12 +250,12 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                 }
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if let Some(tlscfg) = params.tls.take() {
-                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(&tlscfg, Some(&vhost)) {
-                        errors.add(format!("vHosts {}:  {}", vhost, e));
+                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(&tlscfg, sni) {
+                        errors.add(format!("vHost {}:  {}", vhost, e));
                     }
                 }
                 
-                if Some(true) == params.validate_server_name {
+                if params.validate_server_name {
                     hcfg.vhosts.insert(vhost, params);
                 }else{
                     if hcfg.default_host.is_none() {

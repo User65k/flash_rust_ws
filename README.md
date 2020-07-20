@@ -24,12 +24,14 @@ log.root = {level = "info", appenders = ["stdout"]}
 ip = "127.0.0.1:1337"
 #validate_server_name = true # Optional: Match Host header against this vHost
 dir = "/var/www/" # Optional: A mount point must match if omitted
+tls = {key_file = "./4kRsa.pem", cert_file = "./localhost.crt"} # Optional: use HTTPS
 
 ["example.com".docs] # /docs/* will not go to /var/www/ but to ./target/doc/
 dir = "target/doc/"
 index = ["index.html"]
 # Optional: Set some headers if they were not present before
 header = {Referrer-Policy = "strict-origin-when-cross-origin", Feature-Policy = "microphone 'none'; geolocation 'none'"}
+follow_symlinks = true # Optional: follow symlinks
 
 ["example.com".php] # /php/* will go to FastCGI
 dir = "/opt/php/"
@@ -62,14 +64,15 @@ Place the config file in one of these places:
 - [x] Virtual Hosts
 - [x] "Mount Points" to serve files from
 - [x] [FastCGI](https://github.com/User65k/async-fcgi)
-- [ ] HTTPS
-  - [ ] [rustls](https://github.com/ctz/rustls) (Fast)
+- [x] HTTPS
+  - [x] [rustls](https://github.com/ctz/rustls) (Fast)
   - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once [rust-native-tls#105](https://github.com/sfackler/rust-native-tls/issues/105) / [rust-native-tls#163](https://github.com/sfackler/rust-native-tls/issues/163) is done)
+- [ ] HTTP2
 - [ ] WebDAV
 - [ ] Websocket
   - [ ] Reverse-Proxy
   - [ ] to normal Socket (SCGI Style)
-- [ ] More Logging
+- [x] Customizable Logging
   - [ ] to journald
   - [ ] to Windows Event Log?
 - [ ] Security
@@ -87,6 +90,7 @@ Place the config file in one of these places:
   - [ ] only https ?
   - [ ] lets encrypt build in ?
   - [x] avoid BEAST and CRIME
+  - [x] only follow symlinks if told so
 - [ ] SCGI
 
 # Logging
@@ -112,4 +116,28 @@ log.root = {level = "warn", appenders = ["stderr"]}
 # Log info+ of class "flash_rust_ws::dispatch" to "./requests.log"
 log.appenders.requests = {kind = "file", path = "./requests.log", append=true, encoder={pattern = "{d} {m}{n}"}}
 log.loggers."flash_rust_ws::dispatch" = {level = "info",appenders = ["requests"],additive = false}
+```
+or
+```toml
+# Log warnings+ to STDERR (default)
+[log.appenders.stderr]  # create an appender named "stderr"
+kind = "console"  # ... that logs to the console
+target = "stderr"  # ... on stderr (not out)
+encoder = {pattern = "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {t} - {m}{n}"}
+
+[log.root]
+level = "warn"
+appenders = ["stderr"]  # use the appender from above
+
+# Log info+ of class "flash_rust_ws::dispatch" to "./requests.log"
+[log.appenders.requests]  # create an appender named "requests"
+kind = "file"  # ... that logs to a file
+path = "./requests.log"
+append = true  # do not overwrite the file
+encoder = {pattern = "{d} {m}{n}"}
+
+[log.loggers."flash_rust_ws::dispatch"]  # create an addtional logger for the class "flash_rust_ws::dispatch"
+level = "info"
+appenders = ["requests"]
+additive = false  # do NOT also use the root logger
 ```
