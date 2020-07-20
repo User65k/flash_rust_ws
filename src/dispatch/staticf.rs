@@ -29,7 +29,7 @@ pub async fn return_file(req: &Request<Body>,
 }
 
 /// Open a file and get metadata.
-pub async fn open_with_metadata(path: impl AsRef<Path>) -> Result<(File, Metadata), IoError> {
+pub async fn open_with_metadata(path: impl AsRef<Path>, follow_symlinks: bool) -> Result<(File, Metadata), IoError> {
     let mut opts = StdOpenOptions::new();
     opts.read(true);
 
@@ -37,8 +37,16 @@ pub async fn open_with_metadata(path: impl AsRef<Path>) -> Result<(File, Metadat
     #[cfg(windows)]
     opts.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
 
-    let file = OpenOptions::from(opts).open(path).await?;
-    let metadata = file.metadata().await?;
+    let file = OpenOptions::from(opts).open(&path).await?;
+    let metadata = if follow_symlinks {
+        file.metadata().await?
+    }else{
+        let metadata = tokio::fs::symlink_metadata(path).await?;
+        if metadata.file_type().is_symlink() {
+            return Err(IoError::new(IoErrorKind::PermissionDenied, "Symlinks are not allowed"));
+        }
+        metadata
+    };
     Ok((file, metadata))
 }
 
@@ -63,18 +71,19 @@ pub async fn resolve<B>(
     }
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
 
-    resolve_path(full_path, is_dir_request, &root.index).await
+    resolve_path(full_path, is_dir_request, &root.index, root.follow_symlinks).await
 }
 
 
 pub async fn resolve_path(
     full_path: &Path,
     is_dir_request: bool,
-    index_files: &Option<Vec<PathBuf>>
+    index_files: &Option<Vec<PathBuf>>,
+    follow_symlinks: bool
 ) -> Result<ResolveResult, IoError> {
 
 
-    let (file, metadata) = match open_with_metadata(&full_path).await {
+    let (file, metadata) = match open_with_metadata(&full_path, follow_symlinks).await {
         Ok(pair) => pair,
         Err(err) => return match err.kind() {
             IoErrorKind::NotFound => Ok(ResolveResult::NotFound),
@@ -107,7 +116,7 @@ pub async fn resolve_path(
         for index_file in ifiles {
             let full_path_index = full_path.join(index_file);
             debug!("checking for {:?}",full_path_index);
-            match open_with_metadata(&full_path_index).await {
+            match open_with_metadata(&full_path_index, follow_symlinks).await {
                 Ok((file, metadata)) => {
 
                     // The directory index cannot itself be a directory.
