@@ -81,7 +81,7 @@ async fn handle_wwwroot(req: Request<Body>,
     match req_path.strip_prefix(mount_path) {
         Ok(req_path) => {
             let full_path = wwwr.dir.join(req_path);
-
+            
             if let Some(fcgi_cfg) = &wwwr.fcgi {
                 if ext_in_list(&fcgi_cfg.exec, &full_path) {
                     return match fcgi::fcgi_call(&fcgi_cfg, req, &full_path).await{
@@ -164,6 +164,7 @@ pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>
     if let Some(host) = req.headers().get(header::HOST) {
         debug!("Host: {:?}", host);
         if let Ok(host) = host.to_str() {
+            let host = host.split(':').next().unwrap();
             if let Some(hcfg) = cfg.vhosts.get(host) {
                 //user wants this host
                 return handle_vhost(req, hcfg).await;

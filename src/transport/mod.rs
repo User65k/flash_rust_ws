@@ -36,10 +36,16 @@ use core::task::{Context, Poll};
 use std::pin::Pin;
 
 //use hyper::server::conn::AddrStream;
-pub use tokio::net::TcpStream as PlainStream;
+//pub use tokio::net::TcpStream as PlainStream;
 use hyper::server::accept::Accept;
 use log::{info, error, debug, trace};
 use futures_util::ready;
+
+use bytes::{Buf, BufMut};
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
 pub mod tls;
@@ -133,7 +139,8 @@ impl PlainIncoming {
                     if let Err(e) = socket.set_nodelay(self.tcp_nodelay) {
                         trace!("error trying to set TCP nodelay: {}", e);
                     }
-                    return Poll::Ready(Ok(socket));
+                    return Poll::Ready(Ok(PlainStream::new(socket, addr)));
+                    //return Poll::Ready(Ok(socket));
                 }
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => {
@@ -206,5 +213,111 @@ impl fmt::Debug for PlainIncoming {
             .field("tcp_keepalive_timeout", &self.tcp_keepalive_timeout)
             .field("tcp_nodelay", &self.tcp_nodelay)
             .finish()
+    }
+}
+
+#[derive(Debug)]
+pub struct PlainStream {
+    inner: TcpStream,
+    pub(super) remote_addr: SocketAddr,
+}
+
+impl PlainStream {
+    pub(super) fn new(tcp: TcpStream, addr: SocketAddr) -> PlainStream {
+        PlainStream {
+            inner: tcp,
+            remote_addr: addr,
+        }
+    }
+
+    /// Returns the remote (peer) address of this connection.
+    #[inline]
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    /// Consumes the PlainStream and returns the underlying IO object
+    #[inline]
+    pub fn into_inner(self) -> TcpStream {
+        self.inner
+    }
+
+    /// Attempt to receive data on the socket, without removing that data
+    /// from the queue, registering the current task for wakeup if data is
+    /// not yet available.
+    pub fn poll_peek(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        self.inner.poll_peek(cx, buf)
+    }
+}
+
+impl AsyncRead for PlainStream {
+    unsafe fn prepare_uninitialized_buffer(
+        &self,
+        buf: &mut [std::mem::MaybeUninit<u8>],
+    ) -> bool {
+        self.inner.prepare_uninitialized_buffer(buf)
+    }
+
+    #[inline]
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+
+    #[inline]
+    fn poll_read_buf<B: BufMut>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut B,
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_read_buf(cx, buf)
+    }
+}
+
+impl AsyncWrite for PlainStream {
+    #[inline]
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    #[inline]
+    fn poll_write_buf<B: Buf>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut B,
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_buf(cx, buf)
+    }
+
+    #[inline]
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // TCP flush is a noop
+        Poll::Ready(Ok(()))
+    }
+
+    #[inline]
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(unix)]
+impl AsRawFd for PlainStream {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
     }
 }

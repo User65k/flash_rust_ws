@@ -39,7 +39,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
 
     fn new(config: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut cfg = TLSConfig::new(NoClientAuth::new());
-        cfg.set_protocols(&[b"h2".to_vec(), b"http/1.1".to_vec()]);
+        cfg.set_protocols(&[/*b"h2".to_vec(),*/ b"http/1.1".to_vec()]);
 
         let mut own_cipher = false;
         let mut own_vers = false;
@@ -147,11 +147,12 @@ impl ResolvesServerCert for ResolveServerCert {
         trace!("{:#?}", client_hello.alpn()); // -> Option<&'a [&'a [u8]]>
 
         if let Some(name) = client_hello.server_name() {
-            self.by_name.get(name.into())
-                .cloned()
+            match self.by_name.get(name.into()) {
+                Some(cert_by_name) => Some(cert_by_name.clone()),
+                None => self.default.as_ref().cloned()
+            }
         } else {
-            // This kind of resolver requires SNI
-            None
+            self.default.as_ref().cloned()
         }
     }
 }

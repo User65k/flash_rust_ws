@@ -16,6 +16,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use std::future::Future;
 
+use std::net::SocketAddr;
+
 enum State {
     Handshaking(UnderlyingAccept<PlainStream>),
     Streaming(UnderlyingTLSStream<PlainStream>),
@@ -33,17 +35,21 @@ pub(crate) trait TLSBuilderTrait {
 // TlsStream implements AsyncRead/AsyncWrite handshaking tokio_rustls::Accept first
 pub(crate) struct TlsStream {
     state: State,
-    //remote_addr: SocketAddr,
+    remote_addr: SocketAddr,
 }
 
 impl TlsStream {
     fn new(stream: PlainStream, config: Arc<TLSConfig>) -> TlsStream {
-        //let remote_addr = stream.remote_addr();
+        let remote_addr = stream.remote_addr();
         let accept = ParsedTLSConfig::get_accept_feature(config, stream);
         TlsStream {
             state: State::Handshaking(accept),
-            //remote_addr,
+            remote_addr,
         }
+    }
+    #[inline]
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
     }
 }
 

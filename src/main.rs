@@ -57,15 +57,13 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
                 if let Some(tls_cfg) = use_tls {
                     let a = TlsAcceptor::new(tls_cfg.get_config(), incomming);
                     let make_service = make_service_fn(move |socket: &TlsStream| {
-                        //let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
-                        //trace!("Connected securely on {}", &addr);
-                        let remote_addr = "127.0.0.1:8080".parse().unwrap();
+                        let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
-                    tokio::spawn(hyper::Server::builder(a).serve(make_service))
+                    tokio::spawn(hyper::Server::builder(a).http1_only(true).serve(make_service))
                 }else{
                     let make_service = make_service_fn(move |socket: &PlainStream| {
-                        let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
+                        let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
                     tokio::spawn(hyper::Server::builder(incomming).serve(make_service))
@@ -73,7 +71,7 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
                 #[cfg(not(any(feature = "tlsrust",feature = "tlsnative")))]
                 {
                     let make_service = make_service_fn(move |socket: &PlainStream| {
-                        let remote_addr = socket.peer_addr().unwrap_or("127.0.0.1:8080".parse().unwrap());
+                        let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
                     tokio::spawn(hyper::Server::builder(incomming).serve(make_service))
