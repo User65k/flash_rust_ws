@@ -25,8 +25,10 @@ mime_guess = "2.0.3"
 hyper-staticfile = "0.5.3"    # GET+HEAD for Files
 #fcgi:
 async-fcgi = {git="https://github.com/User65k/async-fcgi", features = ["con_pool"]}
+#rproxy
+#hyper-reverse-proxy = "0.4"
 #https:
-tokio-rustls = { version = "0.13.1", optional = true }
+tokio-rustls = { version = "0.14.0", optional = true }
 
 #acme-client         # auto hyper_native_tls
 

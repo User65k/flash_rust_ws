@@ -19,7 +19,7 @@ pub async fn return_file(req: &Request<Body>,
                     wwwr: &WwwRoot,
                     full_path: &PathBuf) -> Result<Response<Body>, IoError> {
     resolve(wwwr, req, full_path).await.map(|result| {
-
+        debug!("resolved to {:?}", result);
         FileResponseBuilder::new()
             .request(&req)
             .cache_headers(Some(500))
@@ -65,10 +65,6 @@ pub async fn resolve<B>(
         }
     }
 
-    // Handle only simple path requests.
-    if req.uri().scheme_str().is_some() || req.uri().host().is_some() {
-        return Ok(ResolveResult::UriNotMatched);
-    }
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
 
     resolve_path(full_path, is_dir_request, &root.index, root.follow_symlinks).await

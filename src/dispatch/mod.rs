@@ -1,7 +1,7 @@
 mod staticf;
 mod fcgi;
 
-use hyper::{Body, Request, Response, header, StatusCode}; //, Method};
+use hyper::{Body, Request, Response, header, StatusCode, Version}; //, Method};
 use std::io::{Error as IoError, ErrorKind};
 use log::{info, error, debug, trace};
 use std::net::SocketAddr;
@@ -81,7 +81,7 @@ async fn handle_wwwroot(req: Request<Body>,
     match req_path.strip_prefix(mount_path) {
         Ok(req_path) => {
             let full_path = wwwr.dir.join(req_path);
-            
+
             if let Some(fcgi_cfg) = &wwwr.fcgi {
                 if ext_in_list(&fcgi_cfg.exec, &full_path) {
                     return match fcgi::fcgi_call(&fcgi_cfg, req, &full_path).await{
@@ -159,16 +159,30 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost) -> Result<Respons
     Ok(create_resp_forbidden())
 }
 
+fn get_host(req: &Request<Body>) -> Option<&str> {
+    match req.version() {
+        Version::HTTP_2 => {
+            req.uri().host()
+        },
+        Version::HTTP_11 | Version::HTTP_10 | Version::HTTP_09 => {
+            if let Some(host) = req.headers().get(header::HOST) {
+                if let Ok(host) = host.to_str() {
+                    return Some(host.split(':').next().unwrap());
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
 pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
-    if let Some(host) = req.headers().get(header::HOST) {
+    if let Some(host) = get_host(&req) {
         debug!("Host: {:?}", host);
-        if let Ok(host) = host.to_str() {
-            let host = host.split(':').next().unwrap();
-            if let Some(hcfg) = cfg.vhosts.get(host) {
-                //user wants this host
-                return handle_vhost(req, hcfg).await;
-            }
+        if let Some(hcfg) = cfg.vhosts.get(host) {
+            //user wants this host
+            return handle_vhost(req, hcfg).await;
         }
     }
 

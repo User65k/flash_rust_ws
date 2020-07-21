@@ -67,7 +67,7 @@ Place the config file in one of these places:
 - [x] HTTPS
   - [x] [rustls](https://github.com/ctz/rustls) (Fast)
   - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once [rust-native-tls#105](https://github.com/sfackler/rust-native-tls/issues/105) / [rust-native-tls#163](https://github.com/sfackler/rust-native-tls/issues/163) is done)
-- [ ] HTTP2
+- [x] HTTP2
 - [ ] WebDAV
 - [ ] Websocket
   - [ ] Reverse-Proxy
