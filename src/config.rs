@@ -8,8 +8,7 @@ use std::fs::File;
 use std::error::Error;
 use std::io::{Error as IOError, ErrorKind};
 use std::fmt;
-use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
-use async_fcgi::FCGIAddr;
+use crate::dispatch::fcgi::{FCGIAppPool, FCGIAddr, setup_fcgi};
 use hyper::header::HeaderMap;
 use log4rs::file::RawConfig as LogConfig;
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
@@ -40,6 +39,10 @@ pub struct FCGIApp {
     pub sock: FCGISock,
     pub exec: Option<Vec<PathBuf>>,
     pub script_filename: Option<bool>,
+    pub bin_path: Option<PathBuf>,
+    pub bin_wdir: Option<PathBuf>,
+    pub bin_environment: Option<HashMap<String, String>>,
+    pub bin_copy_environment: Option<Vec<String>>,
     #[serde(skip)]
     pub app: Option<FCGIAppPool>
 }
@@ -201,12 +204,11 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
         for (mount, wwwroot) in params.paths.iter_mut() {
             //setup FCGI Apps
             wwwroot.fcgi = if let Some(mut fcgi_cfg) = wwwroot.fcgi.take() {
-                match FCGIAppPool::new(&(&fcgi_cfg.sock).into()).await {
-                    Ok(app) => fcgi_cfg.app = Some(app),
-                    Err(e) => {
-                        errors.add(format!("FCGIApp @\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
-                    }
+
+                if let Err(e) = setup_fcgi(&mut fcgi_cfg).await {
+                    errors.add(format!("FCGIApp @\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
                 }
+            
                 Some(fcgi_cfg)
             }else{
                 None

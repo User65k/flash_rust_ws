@@ -10,11 +10,14 @@ use std::path::Path;
 use crate::config;
 use crate::body::FCGIBody;
 
+pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
+pub use async_fcgi::FCGIAddr;
+
 
 pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path: &PathBuf)
             -> Result<Response<Body>, IoError> {
     if let Some(app) = &fcgi_cfg.app {
-        if fcgi_cfg.exec.is_some() && !full_path.is_file() {
+        if fcgi_cfg.exec.is_some() && !full_path.is_file() { //TODO index file
             // whitelist is used, check if file exists
             return Err(IoError::new(ErrorKind::NotFound, "File not found"));
         }
@@ -64,4 +67,31 @@ fn path_to_bytes<P: AsRef<Path>>(path: P) -> Bytes {
     // On Windows, could use std::os::windows::ffi::OsStrExt to encode_wide(),
     // but end up with u16
     BytesMut::from(path.as_ref().to_string_lossy().to_string().as_bytes()).freeze()
+}
+
+pub async fn setup_fcgi(fcgi_cfg: &mut config::FCGIApp) -> Result<(), Box<dyn std::error::Error>> {
+
+    let sock: FCGIAddr = (&fcgi_cfg.sock).into();
+
+    if let Some(bin) = fcgi_cfg.bin_path.as_ref() {
+        let mut cmd = FCGIAppPool::prep_server(bin, &sock).await?;
+        cmd.env_clear();
+        if let Some(dir) = fcgi_cfg.bin_wdir.as_ref() {
+            cmd.current_dir(dir);
+        }
+        //gid ?
+        //uid ?
+        if let Some(env_map) = fcgi_cfg.bin_environment.as_ref() {
+            cmd.envs(env_map);
+        }
+        if let Some(env_copy) = fcgi_cfg.bin_copy_environment.as_ref() {
+            cmd.envs(env_copy.iter().filter_map(|key|std::env::var_os(key).map(|val|(key, val))));
+        }
+        cmd
+        .spawn()?;
+    }
+    let app = FCGIAppPool::new(&sock).await?;
+    fcgi_cfg.app = Some(app);
+
+    Ok(())
 }

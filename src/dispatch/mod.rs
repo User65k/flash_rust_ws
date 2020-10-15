@@ -1,5 +1,5 @@
 mod staticf;
-mod fcgi;
+pub mod fcgi;
 
 use hyper::{Body, Request, Response, header, StatusCode, Version}; //, Method};
 use std::io::{Error as IoError, ErrorKind};
@@ -23,8 +23,8 @@ pub fn insert_default_headers(header: &mut header::HeaderMap<header::HeaderValue
         }
     }
     let default_headers = [
-        (header::X_FRAME_OPTIONS, "sameorigin"),
-        (header::CONTENT_SECURITY_POLICY, "default-src https:"),
+        //(header::X_FRAME_OPTIONS, "sameorigin"),
+        (header::CONTENT_SECURITY_POLICY, "default-src 'self';frame-ancestors 'self'"),
         (header::STRICT_TRANSPORT_SECURITY, "max-age=15768000"),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
     ];
@@ -81,7 +81,8 @@ async fn handle_wwwroot(req: Request<Body>,
     match req_path.strip_prefix(mount_path) {
         Ok(req_path) => {
             let full_path = wwwr.dir.join(req_path);
-
+            trace!("full_path {:?}", full_path.canonicalize());
+            
             if let Some(fcgi_cfg) = &wwwr.fcgi {
                 if ext_in_list(&fcgi_cfg.exec, &full_path) {
                     return match fcgi::fcgi_call(&fcgi_cfg, req, &full_path).await{

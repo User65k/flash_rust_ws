@@ -44,6 +44,10 @@ serve = ["css", "js", "png", "jpeg", "jpg"]
 # PHP does not follow the CGI/1.1 spec, it needs SCRIPT_FILENAME set
 # to do so:
 fcgi.script_filename = true
+# Optional: Start the FCGI App from here
+fcgi.bin_path = "/usr/bin/php-cgi7.4"
+fcgi.bin_environment = {PHP_FCGI_CHILDREN = "16", PHP_FCGI_MAX_REQUESTS = "10000"}
+fcgi.bin_copy_environment = ["PATH", "SHELL", "USER"]
 
 ["example.com".py] # /py/* will go to FastCGI
 dir = "/opt/py/"

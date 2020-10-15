@@ -7,10 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hyper = "0.13"      # HTTP
+hyper = { version = "0.13", default-features = false}      # HTTP
 bytes = "0.5"
 log = "0.4"
-log4rs = { version = "0.12.0", default-features = false, features = ["all_components", "file"] }
+log4rs = { version = "0.13.0", default-features = false, features = ["all_components", "file"] }
 
 #config:
 toml = "0.5"        # config files in toml
@@ -24,7 +24,7 @@ percent-encoding = "2.1.0"
 mime_guess = "2.0.3"
 hyper-staticfile = "0.5.3"    # GET+HEAD for Files
 #fcgi:
-async-fcgi = {git="https://github.com/User65k/async-fcgi", features = ["con_pool"]}
+async-fcgi = {version = "0.2", features = ["app_start"]}
 #rproxy
 #hyper-reverse-proxy = "0.4"
 #https:
@@ -39,7 +39,7 @@ tokio-rustls = { version = "0.14.0", optional = true }
 #hyperdav-server = "0.1"	# webdav + insecure
 
 [target.'cfg(unix)'.dependencies]
-users = "0.10.0"
+users = "0.11.0"
 
 [features]
 default = ["tlsrust"]
