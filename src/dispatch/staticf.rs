@@ -79,14 +79,7 @@ pub async fn resolve_path(
 ) -> Result<ResolveResult, IoError> {
 
 
-    let (file, metadata) = match open_with_metadata(&full_path, follow_symlinks).await {
-        Ok(pair) => pair,
-        Err(err) => return match err.kind() {
-            IoErrorKind::NotFound => Ok(ResolveResult::NotFound),
-            IoErrorKind::PermissionDenied => Ok(ResolveResult::PermissionDenied),
-            _ => Err(err),
-        },
-    };
+    let (file, metadata) = open_with_metadata(&full_path, follow_symlinks).await?;
     debug!("have {:?}",metadata);
 
     // The resolved `full_path` doesn't contain the trailing slash anymore, so we may

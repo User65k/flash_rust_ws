@@ -1,5 +1,5 @@
 
-use std::io::{Error as IoError, ErrorKind};
+use std::{net::SocketAddr, io::{Error as IoError, ErrorKind}};
 use log::{error, trace};
 use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
@@ -14,7 +14,7 @@ pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
 
 
-pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path: &PathBuf)
+pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path: &PathBuf, remote_addr: SocketAddr)
             -> Result<Response<Body>, IoError> {
     if let Some(app) = &fcgi_cfg.app {
         if fcgi_cfg.exec.is_some() && !full_path.is_file() { //TODO index file
@@ -39,8 +39,11 @@ pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path
             Bytes::from(&b"SERVER_PROTOCOL"[..]),
             Bytes::from(&b"HTTP"[..]),
         );
+        params.insert(  // must CGI/1.1  4.1.8
+            Bytes::from(&b"REMOTE_ADDR"[..]),
+            Bytes::from(remote_addr.to_string()),
+        );
         // - SERVER_SOFTWARE   must CGI/1.1  4.1.17
-        // - REMOTE_ADDR       must CGI/1.1  4.1.8
         // - GATEWAY_INTERFACE must CGI/1.1  4.1.4
 
         if Some(true) == fcgi_cfg.script_filename {

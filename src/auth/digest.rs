@@ -1,8 +1,7 @@
 use hyper::{Body, Response, Request, header, StatusCode};
-use std::io::{Error as IoError};
+use std::io::{Error as IoError, ErrorKind};
 use std::path::PathBuf;
 use crate::auth::{strip_prefix, get_map_from_header};
-use crate::dispatch::create_resp_forbidden;
 use tokio::fs::File;
 use tokio::io::{BufReader, AsyncBufReadExt};
 use md5::Context;
@@ -114,7 +113,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                     match validate_nonce(nonce) {
                         Ok(true) => {}, // good
                         Ok(false) => return Ok(Some(create_resp_needs_auth(realm))), // old
-                        Err(()) => return Ok(Some(create_resp_forbidden())), // strange
+                        Err(()) => return Err(IoError::new(ErrorKind::PermissionDenied,"Invalid Nonce")), // strange
                     }
 
                     let file = File::open(auth_file).await?;
@@ -127,7 +126,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                         if file.read_line(&mut buf).await? < 1 {
                             //user not found
                             info!("user not found");
-                            return Ok(Some(create_resp_forbidden()));
+                            return Err(IoError::new(ErrorKind::PermissionDenied,"User not found"));
                         }
                         if buf.starts_with(username) {
                             //user:realm:H1
@@ -211,7 +210,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                 }
             }
             //there is an auth header, but its garbage - at least to us
-            Ok(Some(create_resp_forbidden()))
+            Err(IoError::new(ErrorKind::InvalidData,"auth failed"))
         }
     }
 }
@@ -303,8 +302,8 @@ mod tests {
         file.write_all(b"daniel:a realm:109c7da4a649a1da4a35843583146140").expect("could not write cfg file");
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap().unwrap();
-        assert_eq!(e.status(), StatusCode::FORBIDDEN);
+        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::PermissionDenied);
     }
     #[tokio::test]
     async fn auth_wrong_realm() {
@@ -313,19 +312,19 @@ mod tests {
         file.write_all(b"dani:another realm:1a30634ead89d6934aa82b933863acf3").expect("could not write cfg file");
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap().unwrap();
-        assert_eq!(e.status(), StatusCode::FORBIDDEN);
+        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::PermissionDenied);
     }
     #[tokio::test]
     async fn auth_error() {
         let path = PathBuf::from(r"/tmp/abc");
         let h = create_req(Some("Digest username=\"dani\""));
-        let e = check_digest(&path, &h, &String::from("abc")).await.unwrap().unwrap();
-        assert_eq!(e.status(), StatusCode::FORBIDDEN);
+        let e = check_digest(&path, &h, &String::from("abc")).await.unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidData);
 
         let h = create_req(Some("Digest ===,,"));
-        let e = check_digest(&path, &h, &String::from("abc")).await.unwrap().unwrap();
-        assert_eq!(e.status(), StatusCode::FORBIDDEN);
+        let e = check_digest(&path, &h, &String::from("abc")).await.unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidData);
     }
     #[test]
     fn nonce() {

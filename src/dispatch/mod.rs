@@ -1,7 +1,7 @@
 mod staticf;
 pub mod fcgi;
 
-use hyper::{Body, Request, Response, header, StatusCode, Version}; //, Method};
+use hyper::{Body, Request, Response, header, StatusCode, Version, http::Error as HTTPError}; //, Method};
 use std::io::{Error as IoError, ErrorKind};
 use log::{info, error, debug, trace};
 use std::net::SocketAddr;
@@ -79,7 +79,8 @@ fn normalize_path(path: &Path) -> PathBuf {
 /// - returning a static file
 async fn handle_wwwroot(req: Request<Body>,
     wwwr: &config::WwwRoot,
-    full_path: &PathBuf) -> Result<Response<Body>, IoError> {
+    full_path: &PathBuf,
+    remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
 
     debug!("working root {:?}", wwwr);
 
@@ -94,23 +95,9 @@ async fn handle_wwwroot(req: Request<Body>,
     
     if let Some(fcgi_cfg) = &wwwr.fcgi {
         if ext_in_list(&fcgi_cfg.exec, full_path) {
-            return match fcgi::fcgi_call(&fcgi_cfg, req, full_path).await{
-                Ok(mut resp) => {
-                    insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
-                    Ok(resp)
-                },
-                Err(err) => {
-                    match err.kind() {
-                        ErrorKind::NotFound => {
-                            Ok(Response::builder()
-                            .status(StatusCode::NOT_FOUND)
-                            .body(Body::empty())
-                            .expect("unable to build response"))
-                        },
-                        _ => Err(err),
-                    }
-                }
-            };
+            let mut resp = fcgi::fcgi_call(&fcgi_cfg, req, full_path, remote_addr).await?;
+            insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
+            return Ok(resp);
         }
     }
 
@@ -125,9 +112,9 @@ async fn handle_wwwroot(req: Request<Body>,
     if ext_in_list(&wwwr.serve, full_path) {
         let mut resp = staticf::return_file(&req, &wwwr, full_path).await?;
         insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
-        return Ok(resp);
+        Ok(resp)
     }else{
-        Ok(create_resp_forbidden())
+        Err(IoError::new(ErrorKind::PermissionDenied,"bad file extension"))
     }
 
 }
@@ -146,7 +133,7 @@ fn get_full_path(
             trace!("full_path {:?}", full_path.canonicalize());
             Ok(full_path)
         },
-        Err(e) => {
+        Err(_e) => {
             Err(())
         }
     }
@@ -155,7 +142,7 @@ fn get_full_path(
 
 /// new request on a particular vHost.
 /// picks the matching WwwRoot and calls `handle_wwwroot`
-async fn handle_vhost(req: Request<Body>, cfg: &config::VHost) -> Result<Response<Body>, IoError> {
+async fn handle_vhost(req: Request<Body>, cfg: &config::VHost, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
     let request_path = PathBuf::from(decode_percents(&req.uri().path()));
 
     let req_path = normalize_path(&request_path);
@@ -166,11 +153,11 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost) -> Result<Respons
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
         if let Ok(full_path) = get_full_path(&wwwr, &req_path, &mount_path) {
-            return handle_wwwroot(req, &wwwr, &full_path).await;
+            return handle_wwwroot(req, &wwwr, &full_path, remote_addr).await;
         }
     }
 
-    Ok(create_resp_forbidden())
+    Err(IoError::new(ErrorKind::PermissionDenied,"not a mount path"))
 }
 
 /// return the Host header
@@ -191,27 +178,63 @@ fn get_host(req: &Request<Body>) -> Option<&str> {
     }
 }
 
-/// new request on a `SocketAddr`.
+
 /// picks the matching vHost and calls `handle_vhost`
-pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
-    info!("{} {} {}", remote_addr, req.method(), req.uri());
+async fn dispatch_to_vhost(req: Request<Body>, cfg :Arc<config::HostCfg>, remote_addr: SocketAddr)
+ -> Result<Response<Body>, IoError> {
+
     if let Some(host) = get_host(&req) {
         debug!("Host: {:?}", host);
         if let Some(hcfg) = cfg.vhosts.get(host) {
             //user wants this host
-            return handle_vhost(req, hcfg).await;
+            return handle_vhost(req, hcfg, remote_addr).await;
         }
     }
 
     if let Some(hcfg) = &cfg.default_host {
-        return handle_vhost(req, hcfg).await;
+        return handle_vhost(req, hcfg, remote_addr).await;
     }
-    Ok(create_resp_forbidden())
+    Err(IoError::new(ErrorKind::PermissionDenied,"no vHost found"))
 }
 
-pub(crate) fn create_resp_forbidden() -> Response<Body> {
-    Response::builder()
-    .status(StatusCode::FORBIDDEN)
-    .body(Body::empty())
-    .expect("unable to build response")
+/// new request on a `SocketAddr`.
+/// turn errors into responses
+pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>, remote_addr: SocketAddr)
+ -> Result<Response<Body>, HTTPError> {
+    info!("{} {} {}", remote_addr, req.method(), req.uri());
+
+    dispatch_to_vhost(req, cfg, remote_addr).await.or_else(|err| {
+        error!("{}", err);
+        match err.kind() {
+            ErrorKind::NotFound => {
+                Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+            },
+            ErrorKind::PermissionDenied => {
+                Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::empty())
+            },
+            ErrorKind::InvalidData => {
+                Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+            },
+            ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset => {
+                Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::empty())
+            },
+            _ => {
+                Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+            },
+        }
+        
+    })
 }
