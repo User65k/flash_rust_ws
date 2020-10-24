@@ -6,10 +6,25 @@ use crate::dispatch::create_resp_forbidden;
 use tokio::fs::File;
 use tokio::io::{BufReader, AsyncBufReadExt};
 use md5::Context;
-use log::info;
+use log::{info, trace};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use std::time::{SystemTime,UNIX_EPOCH};
+use lazy_static::lazy_static;
+
+use bytes::Buf;
+use log::{Level::Trace, log_enabled};
+
+lazy_static! {
+    static ref NONCESTARTHASH: Context = {
+        let rnd = OsRng.next_u64();
+        
+        let mut h = Context::new();
+        h.consume(rnd.to_be_bytes());
+        h.consume(std::process::id().to_be_bytes());
+        h
+    };
+}
 
 fn create_resp_needs_auth(realm: &String) -> Response<Body> {
     let p = format!("Digest realm=\"{}\",nonce=\"{}\",qop=\"auth\"", realm, create_nonce());
@@ -27,42 +42,45 @@ fn create_resp_needs_auth(realm: &String) -> Response<Body> {
 }
 
 /// 34 char nonce
-/// time+rnd+md5(rnd+pid)
+/// time+md5(rnd+pid+time)
 fn create_nonce() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)
         .expect(&"creating nonces from before UNIX epoch not supported".to_string());
     let secs = now.as_secs() as u32;
-    let rnd = OsRng.next_u32();
-    let mut h = Context::new();
-    h.consume(rnd.to_be_bytes());
-    h.consume(std::process::id().to_be_bytes());
+    let mut h = NONCESTARTHASH.clone();
+    h.consume(secs.to_be_bytes());
     
-    let n = format!("{:08x}{:08x}{:032x}", secs, OsRng.next_u32(), h.compute());
+    let n = format!("{:08x}{:032x}", secs, h.compute());
     n[..34].to_string()
 }
 
-fn validate_nonce(nonce: &[u8]) -> bool {
+/// Check if a nonce is still valid.
+/// Return an error if it was never valid
+fn validate_nonce(nonce: &[u8]) -> Result<bool,()> {
     if nonce.len() != 34 {
-        return false;
+        return Err(());
     }
     //parse hex
     if let Ok(n) = std::str::from_utf8(nonce) {
         //get time
-        if let Ok(secs) = u32::from_str_radix(&n[..4], 16) {
-            //TODO check time
+        if let Ok(secs_nonce) = u32::from_str_radix(&n[..8], 16) {
+            //check time
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)
+            .expect(&"creating nonces from before UNIX epoch not supported".to_string());
+            let secs_now = now.as_secs() as u32;
 
-            //get rnd
-            if let Ok(rnd) = u32::from_str_radix(&n[4..8], 16) {
+            if let Some(dur) = secs_now.checked_sub(secs_nonce) {
                 //check hash
-                let mut h = Context::new();
-                h.consume(rnd.to_be_bytes());
-                h.consume(std::process::id().to_be_bytes());
+                let mut h = NONCESTARTHASH.clone();
+                h.consume(secs_nonce.to_be_bytes());
                 let h = format!("{:x}", h.compute());
-                return h[..16] == n[8..34];
+                if h[..26] == n[8..34] {
+                    return Ok(dur < 300) // from the last 5min
+                }
             }
         }
     }
-    false
+    Err(())
 }
 
 pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &String) -> Result<Option<Response<Body>>, IoError> {
@@ -73,6 +91,16 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
         },
         Some(header) => {
             if let Ok(user_vals) = get_map_from_header(header) {
+
+                if log_enabled!(Trace) {
+                    use std::iter::FromIterator;
+                    use std::collections::HashMap;
+                    use bytes::Bytes;
+
+                    let h: HashMap<Bytes, Bytes> = HashMap::from_iter(user_vals.clone().into_iter().map(|(mut k, mut v)| (k.to_bytes(),v.to_bytes())));
+                    trace!("from header: {:?}", h);
+                }                
+
                 if let (Ok(username), Some(nonce), Some(user_response)) =
                     (std::str::from_utf8(
                         user_vals.get(b"username".as_ref())
@@ -82,8 +110,11 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                     ,user_vals.get(b"response".as_ref()))
                 {
                     //check if the nonce is from us
-                    if !validate_nonce(nonce) {
-                        return Ok(Some(create_resp_forbidden()));
+                    #[cfg(not(test))]
+                    match validate_nonce(nonce) {
+                        Ok(true) => {}, // good
+                        Ok(false) => return Ok(Some(create_resp_needs_auth(realm))), // old
+                        Err(()) => return Ok(Some(create_resp_forbidden())), // strange
                     }
 
                     let file = File::open(auth_file).await?;
@@ -95,6 +126,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                         let mut buf = String::new();
                         if file.read_line(&mut buf).await? < 1 {
                             //user not found
+                            info!("user not found");
                             return Ok(Some(create_resp_forbidden()));
                         }
                         if buf.starts_with(username) {
@@ -103,7 +135,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                             if p.len() == 3
                             && p[1] == realm
                             && p[0].len() == username.len() {
-                                break p[2].to_string();
+                                break p[2].trim_end().to_string();
                             }
                         }
                     };
@@ -119,6 +151,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                     if let Some(qop) = user_vals.get(b"qop".as_ref()) {
                         if let Some(algorithm) = user_vals.get(b"algorithm".as_ref()) {
                             if algorithm == &b"MD5-sess".as_ref() {
+                                trace!("MD5-sess");
                                 ha1 = {
                                     let mut c = Context::new();
                                     c.consume(&ha1);
@@ -133,6 +166,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                             }
                         }
                         if qop == &b"auth".as_ref() || qop == &b"auth-int".as_ref() {
+                            trace!("qop: auth");
                             correct_response = Some({
                                 let mut c = Context::new();
                                 c.consume(&ha1);
@@ -170,7 +204,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                         // grant access
                         Ok(None)
                     }else{
-                        info!("auth failed {}!={:?}", correct_response, *user_response);
+                        info!("user {} auth failed {}!={:?}", username, correct_response, user_response.clone().to_bytes());
                         // wrong PW
                         Ok(Some(create_resp_needs_auth(realm)))
                     };
@@ -212,6 +246,17 @@ mod tests {
         let path = PathBuf::from(r"/tmp/auth_suc");
         let mut file = File::create(&path).expect("could not create htdigest file");
         file.write_all(b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a").expect("could not write cfg file");
+
+        let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
+        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap();
+        println!("{:?}", e);
+        assert!(e.is_none());
+    }
+    #[tokio::test]
+    async fn auth_success_multi() {
+        let path = PathBuf::from(r"/tmp/auth_suc0");
+        let mut file = File::create(&path).expect("could not create htdigest file");
+        file.write_all(b"egal:1:1\r\ndani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a\r\n").expect("could not write cfg file");
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
         let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap();
@@ -281,5 +326,20 @@ mod tests {
         let h = create_req(Some("Digest ===,,"));
         let e = check_digest(&path, &h, &String::from("abc")).await.unwrap().unwrap();
         assert_eq!(e.status(), StatusCode::FORBIDDEN);
+    }
+    #[test]
+    fn nonce() {
+        //fresh one is ok
+        assert!(validate_nonce(create_nonce().as_bytes()).unwrap());
+        //an old one not
+        let secs = 1603288711_u32;
+        let mut h = NONCESTARTHASH.clone();
+        h.consume(secs.to_be_bytes());
+        
+        let n = format!("{:08x}{:032x}", secs, h.compute());
+        let n = n[..34].as_bytes();
+        assert!(!validate_nonce(n).unwrap());
+        //garbage not
+        assert!(validate_nonce(b"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
     }
 }

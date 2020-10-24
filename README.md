@@ -32,6 +32,7 @@ index = ["index.html"]
 # Optional: Set some headers if they were not present before
 header = {Referrer-Policy = "strict-origin-when-cross-origin", Feature-Policy = "microphone 'none'; geolocation 'none'"}
 follow_symlinks = true # Optional: follow symlinks
+auth = {type = "Digest", realm = "test", userfile = ".htdigest"}
 
 ["example.com".php] # /php/* will go to FastCGI
 dir = "/opt/php/"
@@ -80,7 +81,7 @@ Place the config file in one of these places:
   - [ ] to journald
   - [ ] to Windows Event Log?
 - [ ] Security
-  - [ ] HTTP user auth: Digest - (MD5 because FireFox, but better that nothing)
+  - [x] HTTP user auth: Digest - (MD5 because FireFox, but better that nothing)
   - [ ] DoS protection
     - [x] Don't be affected by Sloloris
     - [ ] limit connection count ?
