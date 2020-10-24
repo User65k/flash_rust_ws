@@ -203,16 +203,11 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
         let addr = params.ip;
         for (mount, wwwroot) in params.paths.iter_mut() {
             //setup FCGI Apps
-            wwwroot.fcgi = if let Some(mut fcgi_cfg) = wwwroot.fcgi.take() {
-
-                if let Err(e) = setup_fcgi(&mut fcgi_cfg).await {
+            if let Some(fcgi_cfg) = wwwroot.fcgi.as_mut() {
+                if let Err(e) = setup_fcgi(fcgi_cfg).await {
                     errors.add(format!("FCGIApp @\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
                 }
-            
-                Some(fcgi_cfg)
-            }else{
-                None
-            };
+            }
             //check if header are parseable
             if wwwroot.header.is_none() {continue;}
             let mut _h = HeaderMap::new();
@@ -232,8 +227,8 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
             None => {
                 let mut hcfg = HostCfg::new(TcpListener::bind(addr)?);
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-                if let Some(tlscfg) = params.tls.take() {
-                    match ParsedTLSConfig::new(&tlscfg, sni) {
+                if let Some(tlscfg) = params.tls.as_ref() {
+                    match ParsedTLSConfig::new(tlscfg, sni) {
                         Ok(tlscfg_parsed) => hcfg.tls = Some(tlscfg_parsed),
                         Err(e) => errors.add(format!("vHost {}:  {}", vhost, e)),
                     }
@@ -251,8 +246,8 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                     errors.add(format!("All vHosts on {} must be either TLS or not", addr));
                 }
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-                if let Some(tlscfg) = params.tls.take() {
-                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(&tlscfg, sni) {
+                if let Some(tlscfg) = params.tls.as_ref() {
+                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(tlscfg, sni) {
                         errors.add(format!("vHost {}:  {}", vhost, e));
                     }
                 }
