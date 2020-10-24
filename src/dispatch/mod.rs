@@ -83,6 +83,15 @@ async fn handle_wwwroot(req: Request<Body>,
 
     debug!("working root {:?}", wwwr);
 
+    if let Some(auth_conf) = wwwr.auth.as_ref() {
+        //Authorisation is needed
+        if let Some(resp) = crate::auth::check_is_authorized(auth_conf, &req).await? {
+            return Ok(resp);
+        }
+    }
+
+    //hyper_reverse_proxy::call(remote_addr.ip(), "http://127.0.0.1:13901", req)
+    
     if let Some(fcgi_cfg) = &wwwr.fcgi {
         if ext_in_list(&fcgi_cfg.exec, full_path) {
             return match fcgi::fcgi_call(&fcgi_cfg, req, full_path).await{

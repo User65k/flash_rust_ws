@@ -23,12 +23,16 @@ mod body;
 mod dispatch;
 mod transport;
 mod logging;
+mod auth;
 
 use transport::{PlainIncoming, PlainStream};
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
 use crate::transport::tls::{TlsAcceptor, TlsStream, TLSBuilderTrait};
 
-/// Set everything up and gather all the service handles
+/// Set up each `SocketAddr` and return the `JoinHandle`s
+///
+/// Walk trought `listening_ifs` and create a `PlainIncoming` (TCP Listener) for each `SocketAddr`.
+/// If its config has TLS wrap the `PlainIncoming` into an `TlsAcceptor`
 async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::HostCfg>)
  -> Result<Vec<JoinHandle<Result<(), hyper::error::Error>>>, Box<dyn Error>> {
 

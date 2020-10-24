@@ -47,6 +47,13 @@ pub struct FCGIApp {
     pub app: Option<FCGIAppPool>
 }
 
+#[derive(Debug)]
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+pub enum Authenticatoin {
+    Digest{userfile: PathBuf, realm: String},
+    //FCGI{server: FCGIApp}
+}
 
 /// A single directory
 #[derive(Debug)]
@@ -59,6 +66,7 @@ pub struct WwwRoot {
     pub serve: Option<Vec<PathBuf>>,
     pub fcgi: Option<FCGIApp>,
     pub header: Option<HashMap<String, String>>,
+    pub auth: Option<Authenticatoin>,
 }
 
 /// vHost specific configuration
