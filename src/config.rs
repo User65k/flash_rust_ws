@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use serde::Deserialize;
 use std::net::{SocketAddr, TcpListener};
 use log::info;
@@ -73,7 +73,7 @@ pub struct VHost {
     #[serde(flatten)]
     root: Option<WwwRoot>, //only in toml -> will be added to paths
     #[serde(flatten)]
-    pub paths: HashMap<PathBuf, WwwRoot>,
+    pub paths: BTreeMap<PathBuf, WwwRoot>,
 }
 
 /// Gernal configuration
@@ -196,6 +196,11 @@ impl fmt::Debug for HostCfg {
     }
 }
 
+/// group the configuration by `SocketAddr` so that each endpoint has a config.
+/// Also
+/// - binds on the `SocketAddr`s,
+/// - executes and connects to FCGI servers
+/// - setup TLS config
 pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr, HostCfg>, Box<dyn Error>> {
     let mut listening_ifs = HashMap::new();
     let mut errors = CFGError::new();
@@ -247,7 +252,7 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                 }
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if let Some(tlscfg) = params.tls.as_ref() {
-                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(tlscfg, sni) {
+                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(tlscfg, sni) { //safe because hcfg.tls is some at this point
                         errors.add(format!("vHost {}:  {}", vhost, e));
                     }
                 }

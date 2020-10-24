@@ -72,94 +72,99 @@ fn normalize_path(path: &Path) -> PathBuf {
     })
 }
 
+/// handle a request by
+/// - checking for authentication
+/// - building the absolute file path
+/// - forwarding to FCGI
+/// - returning a static file
 async fn handle_wwwroot(req: Request<Body>,
     wwwr: &config::WwwRoot,
-    req_path: &Path,
-    mount_path: &Path) -> Result<Response<Body>, IoError> {
+    full_path: &PathBuf) -> Result<Response<Body>, IoError> {
 
     debug!("working root {:?}", wwwr);
+
+    if let Some(fcgi_cfg) = &wwwr.fcgi {
+        if ext_in_list(&fcgi_cfg.exec, full_path) {
+            return match fcgi::fcgi_call(&fcgi_cfg, req, full_path).await{
+                Ok(mut resp) => {
+                    insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
+                    Ok(resp)
+                },
+                Err(err) => {
+                    match err.kind() {
+                        ErrorKind::NotFound => {
+                            Ok(Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Body::empty())
+                            .expect("unable to build response"))
+                        },
+                        _ => Err(err),
+                    }
+                }
+            };
+        }
+    }
+
+    /*if req.method()==Method::OPTIONS {
+    return Ok(Response::builder()
+    .status(StatusCode::OK)
+    .header(header::ALLOW, "GET,HEAD,OPTIONS")
+    .body(Body::empty())
+    .expect("unable to build response"))
+    }*/
+
+    if ext_in_list(&wwwr.serve, full_path) {
+        let mut resp = staticf::return_file(&req, &wwwr, full_path).await?;
+        insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
+        return Ok(resp);
+    }else{
+        Ok(create_resp_forbidden())
+    }
+
+}
+
+/// get the full path of a requested resource
+/// or return an error if the request_path is not part of this wwwroot
+/// Note: /a is not part of /aa (but of /a/a and /a)
+fn get_full_path(
+    wwwr: &config::WwwRoot,
+    req_path: &Path,
+    mount_path: &Path) -> Result<PathBuf, ()> {
+
     match req_path.strip_prefix(mount_path) {
         Ok(req_path) => {
             let full_path = wwwr.dir.join(req_path);
             trace!("full_path {:?}", full_path.canonicalize());
-            
-            if let Some(fcgi_cfg) = &wwwr.fcgi {
-                if ext_in_list(&fcgi_cfg.exec, &full_path) {
-                    return match fcgi::fcgi_call(&fcgi_cfg, req, &full_path).await{
-                        Ok(mut resp) => {
-                            insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
-                            Ok(resp)
-                        },
-                        Err(err) => {
-                            match err.kind() {
-                                ErrorKind::NotFound => {
-                                    Ok(Response::builder()
-                                    .status(StatusCode::NOT_FOUND)
-                                    .body(Body::empty())
-                                    .expect("unable to build response"))
-                                },
-                                _ => Err(err),
-                            }
-                        }
-                    };
-                }
-            }
-
-            /*if req.method()==Method::OPTIONS {
-            return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(header::ALLOW, "GET,HEAD,OPTIONS")
-            .body(Body::empty())
-            .expect("unable to build response"))
-            }*/
-
-            if ext_in_list(&wwwr.serve, &full_path) {
-                let mut resp = staticf::return_file(&req, &wwwr, &full_path).await?;
-                insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
-                return Ok(resp);
-            }else{
-                Ok(create_resp_forbidden())
-            }
+            Ok(full_path)
         },
         Err(e) => {
-            error!("{}", e);
-            Err(IoError::new(ErrorKind::InvalidInput, format!("{}",e)))
+            Err(())
         }
     }
 
 }
 
+/// new request on a particular vHost.
+/// picks the matching WwwRoot and calls `handle_wwwroot`
 async fn handle_vhost(req: Request<Body>, cfg: &config::VHost) -> Result<Response<Body>, IoError> {
     let request_path = PathBuf::from(decode_percents(&req.uri().path()));
 
     let req_path = normalize_path(&request_path);
     debug!("req_path {:?}", req_path);
-    /*let skip_num = if req_path.as_os_str() == "" {
-    0
-    }else{
-    1
-    };*/
 
-    if cfg.paths.len()==1 {
-        //fast path (don't walk request path)
-        let (mount_path, wwwr) = cfg.paths.iter().next().unwrap();  // save because len == 1
-        if req_path.starts_with(mount_path) {
-            return handle_wwwroot(req, &wwwr, &req_path, &mount_path).await;
-        }
-    }
     //we want the longest match
-    for path in req_path.ancestors()/*.skip(skip_num) */{
-        for (mount_path, wwwr) in cfg.paths.iter() {
-            trace!("checking mount point: {:?}", mount_path);
-            if path.as_os_str() == mount_path {
-                return handle_wwwroot(req, &wwwr, &req_path, &mount_path).await;
-            }
+    //BTreeMap is sorted from small to big
+    for (mount_path, wwwr) in cfg.paths.iter().rev() {
+        trace!("checking mount point: {:?}", mount_path);
+        if let Ok(full_path) = get_full_path(&wwwr, &req_path, &mount_path) {
+            return handle_wwwroot(req, &wwwr, &full_path).await;
         }
     }
 
     Ok(create_resp_forbidden())
 }
 
+/// return the Host header
 fn get_host(req: &Request<Body>) -> Option<&str> {
     match req.version() {
         Version::HTTP_2 => {
@@ -177,6 +182,8 @@ fn get_host(req: &Request<Body>) -> Option<&str> {
     }
 }
 
+/// new request on a `SocketAddr`.
+/// picks the matching vHost and calls `handle_vhost`
 pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
     if let Some(host) = get_host(&req) {
@@ -193,7 +200,7 @@ pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>
     Ok(create_resp_forbidden())
 }
 
-fn create_resp_forbidden() -> Response<Body> {
+pub(crate) fn create_resp_forbidden() -> Response<Body> {
     Response::builder()
     .status(StatusCode::FORBIDDEN)
     .body(Body::empty())
