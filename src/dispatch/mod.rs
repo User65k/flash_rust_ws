@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::path::{Component, Path, PathBuf};
 use std::error::Error;
 use crate::config;
+use hyper_staticfile::{ResolveResult, ResponseBuilder as FileResponseBuilder};
 
 
 pub fn insert_default_headers(header: &mut header::HeaderMap<header::HeaderValue>,
@@ -93,26 +94,37 @@ async fn handle_wwwroot(req: Request<Body>,
 
     //hyper_reverse_proxy::call(remote_addr.ip(), "http://127.0.0.1:13901", req)
     
+    let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
+
     if let Some(fcgi_cfg) = &wwwr.fcgi {
-        if ext_in_list(&fcgi_cfg.exec, full_path) {
-            let mut resp = fcgi::fcgi_call(&fcgi_cfg, req, full_path, remote_addr).await?;
-            insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
-            return Ok(resp);
+        if fcgi_cfg.exec.is_none() {
+            //FCGI + dont check for file -> always FCGI
+            return fcgi::fcgi_call(&fcgi_cfg, req, full_path, remote_addr).await;
         }
     }
 
-    /*if req.method()==Method::OPTIONS {
-    return Ok(Response::builder()
-    .status(StatusCode::OK)
-    .header(header::ALLOW, "GET,HEAD,OPTIONS")
-    .body(Body::empty())
-    .expect("unable to build response"))
-    }*/
+    let (full_path, resolved_file) = staticf::resolve_path(full_path,
+                                                    is_dir_request,
+                                                    &wwwr.index,
+                                                    wwwr.follow_symlinks).await?;
 
-    if ext_in_list(&wwwr.serve, full_path) {
-        let mut resp = staticf::return_file(&req, &wwwr, full_path).await?;
-        insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
-        Ok(resp)
+    if let ResolveResult::IsDirectory = resolved_file {
+        //request for a file that is a directory
+        return Ok(FileResponseBuilder::new()
+                .request(&req)
+                .build(ResolveResult::IsDirectory)
+                .expect("unable to build response"));
+    }
+
+    if let Some(fcgi_cfg) = &wwwr.fcgi {
+        //FCGI + check for file
+        if ext_in_list(&fcgi_cfg.exec, &full_path) {
+            return fcgi::fcgi_call(&fcgi_cfg, req, &full_path, remote_addr).await;
+        }
+    }
+
+    if ext_in_list(&wwwr.serve, &full_path) {
+        staticf::return_file(&req, resolved_file).await
     }else{
         Err(IoError::new(ErrorKind::PermissionDenied,"bad file extension"))
     }
@@ -153,7 +165,9 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost, remote_addr: Sock
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
         if let Ok(full_path) = get_full_path(&wwwr, &req_path, &mount_path) {
-            return handle_wwwroot(req, &wwwr, &full_path, remote_addr).await;
+            let mut resp = handle_wwwroot(req, &wwwr, &full_path, remote_addr).await?;
+            insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
+            return Ok(resp);
         }
     }
 

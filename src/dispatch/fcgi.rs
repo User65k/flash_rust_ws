@@ -17,10 +17,6 @@ pub use async_fcgi::FCGIAddr;
 pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path: &PathBuf, remote_addr: SocketAddr)
             -> Result<Response<Body>, IoError> {
     if let Some(app) = &fcgi_cfg.app {
-        if fcgi_cfg.exec.is_some() && !full_path.is_file() { //TODO index file
-            // whitelist is used, check if file exists
-            return Err(IoError::new(ErrorKind::NotFound, "File not found"));
-        }
 
         let mut params = HashMap::new();
         params.insert( // must CGI/1.1  4.1.13, everybody cares
