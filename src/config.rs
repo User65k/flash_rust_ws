@@ -32,6 +32,16 @@ pub enum FCGISock {
     Unix(PathBuf),
 }
 
+/// Information to execute a FCGI App
+#[derive(Debug)]
+#[derive(Deserialize)]
+pub struct FCGIAppExec {
+    pub path: PathBuf,
+    pub wdir: Option<PathBuf>,
+    pub environment: Option<HashMap<String, String>>,
+    pub copy_environment: Option<Vec<String>>,
+}
+
 /// A FCGI Application
 #[derive(Debug)]
 #[derive(Deserialize)]
@@ -39,10 +49,7 @@ pub struct FCGIApp {
     pub sock: FCGISock,
     pub exec: Option<Vec<PathBuf>>,
     pub script_filename: Option<bool>,
-    pub bin_path: Option<PathBuf>,
-    pub bin_wdir: Option<PathBuf>,
-    pub bin_environment: Option<HashMap<String, String>>,
-    pub bin_copy_environment: Option<Vec<String>>,
+    pub bin: Option<FCGIAppExec>,
     #[serde(skip)]
     pub app: Option<FCGIAppPool>
 }

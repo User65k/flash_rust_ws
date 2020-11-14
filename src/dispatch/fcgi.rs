@@ -1,6 +1,6 @@
 
 use std::{net::SocketAddr, io::{Error as IoError, ErrorKind}};
-use log::{error, trace};
+use log::{error, trace, info};
 use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
 use hyper::{Body, Request, Response};
@@ -52,7 +52,7 @@ pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path
         Ok(app.forward(req, params).await?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
     }else{
         error!("FCGI app not set");
-        Err(IoError::new(ErrorKind::BrokenPipe,"FCGI app not available"))
+        Err(IoError::new(ErrorKind::NotConnected,"FCGI app not available"))
     }
 }
 #[cfg(unix)]
@@ -72,22 +72,29 @@ pub async fn setup_fcgi(fcgi_cfg: &mut config::FCGIApp) -> Result<(), Box<dyn st
 
     let sock: FCGIAddr = (&fcgi_cfg.sock).into();
 
-    if let Some(bin) = fcgi_cfg.bin_path.as_ref() {
-        let mut cmd = FCGIAppPool::prep_server(bin, &sock).await?;
+    if let Some(bin) = fcgi_cfg.bin.as_ref() {
+        let mut cmd = FCGIAppPool::prep_server(&bin.path, &sock).await?;
         cmd.env_clear();
-        if let Some(dir) = fcgi_cfg.bin_wdir.as_ref() {
+        if let Some(dir) = bin.wdir.as_ref() {
             cmd.current_dir(dir);
         }
         //gid ?
         //uid ?
-        if let Some(env_map) = fcgi_cfg.bin_environment.as_ref() {
+        if let Some(env_map) = bin.environment.as_ref() {
             cmd.envs(env_map);
         }
-        if let Some(env_copy) = fcgi_cfg.bin_copy_environment.as_ref() {
+        if let Some(env_copy) = bin.copy_environment.as_ref() {
             cmd.envs(env_copy.iter().filter_map(|key|std::env::var_os(key).map(|val|(key, val))));
         }
-        cmd
-        .spawn()?;
+        let running_cmd = cmd
+                            .kill_on_drop(true)
+                            .spawn()?;
+        tokio::spawn(async move {
+            match running_cmd.await {
+                Ok(status) => error!("FCGI app exit: {}", status),
+                Err(e) => error!("FCGI app: {}", e),
+            }
+        });
     }
     let app = FCGIAppPool::new(&sock).await?;
     fcgi_cfg.app = Some(app);

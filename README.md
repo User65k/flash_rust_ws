@@ -34,7 +34,7 @@ header = {Referrer-Policy = "strict-origin-when-cross-origin", Feature-Policy = 
 follow_symlinks = true # Optional: follow symlinks
 auth = {type = "Digest", realm = "test", userfile = ".htdigest"}
 
-["example.com".php] # /php/* will go to FastCGI
+["example.com".php] # /php/* will go to php-cgi via FastCGI
 dir = "/opt/php/"
 index = ["index.php"]
 fcgi.sock = "127.0.0.1:9000" # TCP
@@ -46,14 +46,20 @@ serve = ["css", "js", "png", "jpeg", "jpg"]
 # to do so:
 fcgi.script_filename = true
 # Optional: Start the FCGI App from here
-fcgi.bin_path = "/usr/bin/php-cgi7.4"
-fcgi.bin_environment = {PHP_FCGI_CHILDREN = "16", PHP_FCGI_MAX_REQUESTS = "10000"}
-fcgi.bin_copy_environment = ["PATH", "SHELL", "USER"]
+fcgi.bin.path = "/usr/bin/php-cgi7.4"
+fcgi.bin.environment = {PHP_FCGI_CHILDREN = "16", PHP_FCGI_MAX_REQUESTS = "10000"}
+fcgi.bin.copy_environment = ["PATH", "SHELL", "USER"]
 
-["example.com".py] # /py/* will go to FastCGI
+["example.com".py] # /py/* will go to flup via FastCGI
 dir = "/opt/py/"
 fcgi.sock = "/tmp/py.sock" # Unix Socket
 # we don't check if the file actually exists. This is up to Python
+
+
+["example.com".php-fpm] # /php-fpm/* will go to php-cgi via FastCGI
+fcgi.sock => "/var/run/php/php7.4-fpm.sock",
+fcgi.script_filename = true
+
 ```
 Place the config file in one of these places:
 
