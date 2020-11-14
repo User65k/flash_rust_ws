@@ -44,12 +44,23 @@ pub fn init_stderr_logging() -> Handle {
         .encoder(Box::new(PatternEncoder::new("{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {t} - {m}{n}")))
         .target(Target::Stderr).build();
 
+    let root_level = if let Ok(level) = std::env::var("RUST_LOG") {
+        match level.as_str() {
+            "debug" => LevelFilter::Debug,
+            "info" => LevelFilter::Info,
+            "trace" => LevelFilter::Trace,
+            _ => LevelFilter::Warn,
+        }
+    }else{
+        LevelFilter::Warn
+    };
+
     let config = Config::builder()
         .appender(Appender::builder().build("stderr", Box::new(stderr)))
         .logger(Logger::builder().build("flash_rust_ws::config", LevelFilter::Info))
-        .logger(Logger::builder().build("flash_rust_ws", LevelFilter::Warn))
-        .logger(Logger::builder().build("hyper", LevelFilter::Warn))
-        .logger(Logger::builder().build("async_fcgi", LevelFilter::Warn))
+        .logger(Logger::builder().build("flash_rust_ws", root_level))
+        .logger(Logger::builder().build("hyper", root_level))
+        .logger(Logger::builder().build("async_fcgi", root_level))
         .build(Root::builder().appender("stderr").build(LevelFilter::Warn))
         .unwrap();
 
