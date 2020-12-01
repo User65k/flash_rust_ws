@@ -113,5 +113,5 @@ pub async fn resolve_path(
             }
         }
     }
-    Err(IoError::new(IoErrorKind::PermissionDenied, ""))
+    Err(IoError::new(IoErrorKind::PermissionDenied, "dir w/o index file"))
 }

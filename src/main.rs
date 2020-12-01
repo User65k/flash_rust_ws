@@ -102,7 +102,7 @@ async fn main() {
         Ok(mut cfg) => {
             //group config by SocketAddrs
             let listening_ifs = match config::group_config(&mut cfg).await {
-                Err(e) => {error!("{}", e);return;},
+                Err(e) => {error!("Configuration error!\r\n{}", e);return;},
                 Ok(m) => m
             };
             // Switch user+group
@@ -137,6 +137,7 @@ async fn main() {
             //setup all servers
             match prepare_hyper_servers(listening_ifs).await {
                 Ok(handles) => {
+                    info!("serving");
                     join_all(handles).await;
                 },
                 Err(e) => {
