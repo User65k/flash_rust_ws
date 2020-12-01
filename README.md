@@ -1,3 +1,7 @@
+[![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
+[![GitHub](https://img.shields.io/github/license/User65k/flash_rust_ws)](./LICENSE)
+![GitHub Workflow Status](https://img.shields.io/github/workflow/status/User65k/flash_rust_ws/Rust)
+
 A Webserver written in Rust.
 Build on the speedy [Hyper](https://hyper.rs/).
 
