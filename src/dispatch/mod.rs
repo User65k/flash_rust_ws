@@ -235,7 +235,8 @@ pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::empty())
             },
-            ErrorKind::UnexpectedEof
+            ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
             | ErrorKind::ConnectionAborted
             | ErrorKind::ConnectionRefused
             | ErrorKind::ConnectionReset => {
