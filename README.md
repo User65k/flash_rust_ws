@@ -28,7 +28,7 @@ log.root = {level = "info", appenders = ["stdout"]}
 ip = "127.0.0.1:1337"
 #validate_server_name = true # Optional: Match Host header against this vHost
 dir = "/var/www/" # Optional: A mount point must match if omitted
-tls = {key_file = "./4kRsa.pem", cert_file = "./localhost.crt"} # Optional: use HTTPS
+tls.host = [{key_file = "./4kRsa.pem", cert_file = "./localhost.crt"}] # Optional: use HTTPS
 
 ["example.com".docs] # /docs/* will not go to /var/www/ but to ./target/doc/
 dir = "target/doc/"
@@ -81,6 +81,9 @@ Place the config file in one of these places:
 - [x] [FastCGI](https://github.com/User65k/async-fcgi)
 - [x] HTTPS
   - [x] [rustls](https://github.com/ctz/rustls) (Fast)
+    - [x] Cert per vHost / SNI
+    - [x] Cert per Keytype (EC, ED, RSA)
+    - [ ] ACME-TLS
   - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once [rust-native-tls#105](https://github.com/sfackler/rust-native-tls/issues/105) / [rust-native-tls#163](https://github.com/sfackler/rust-native-tls/issues/163) is done)
 - [x] HTTP2
 - [ ] WebDAV
@@ -118,6 +121,8 @@ It defaults to log on STDERR:
 - `flash_rust_ws` Warn (This server)
 - `hyper` Warn (Low level HTTP server)
 - `async_fcgi` Warn (FastCGI)
+- `flash_rust_ws::transport::tls` Warn (TLS)
+- `rustls` Warn (Low level TLS)
 
 ## Logging Example
 

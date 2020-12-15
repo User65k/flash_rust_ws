@@ -1,11 +1,11 @@
 pub use tokio_rustls::{server::TlsStream as UnderlyingTLSStream, Accept as UnderlyingAccept};
 pub use tokio_rustls::rustls::ServerConfig as TLSConfig;
 use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::{Certificate, PrivateKey, NoClientAuth};
+use tokio_rustls::rustls::{Certificate, PrivateKey, NoClientAuth, SignatureScheme};
 use tokio_rustls::rustls::internal::pemfile;
 use tokio_rustls::rustls::{SupportedCipherSuite, ALL_CIPHERSUITES, ProtocolVersion};
 use tokio_rustls::rustls::{ClientHello, ResolvesServerCert};
-use tokio_rustls::rustls::sign::{CertifiedKey, any_supported_type};
+use tokio_rustls::rustls::sign::{CertifiedKey, RSASigningKey, any_ecdsa_type, any_eddsa_type};
 
 use std::vec::Vec;
 use std::sync::Arc;
@@ -18,9 +18,14 @@ use super::{PlainStream, TLSBuilderTrait};
 
 #[derive(Debug)]
 #[derive(Deserialize)]
-pub struct TlsUserConfig {
+pub struct KeySet {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
+}
+#[derive(Debug)]
+#[derive(Deserialize)]
+pub struct TlsUserConfig {
+    pub host: Vec<KeySet>,
     pub ciphersuites: Option<Vec<String>>,
     pub versions: Option<Vec<String>>,
 }
@@ -39,7 +44,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
 
     fn new(config: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut cfg = TLSConfig::new(NoClientAuth::new());
-        cfg.set_protocols(&[/*b"h2".to_vec(),*/ b"http/1.1".to_vec()]);
+        cfg.set_protocols(&[b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
 
         let mut own_cipher = false;
         let mut own_vers = false;
@@ -52,11 +57,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
             own_vers = true;
         }
         let mut certres = ResolveServerCert::new();
-        // Load public certificate.
-        let certs = load_certs(&config.cert_file)?;
-        // Load private key.
-        let key = load_private_key(&config.key_file)?;
-        certres.add(sni, certs, &key)?;
+        certres.add(sni, &config.host)?;
         Ok(ParsedTLSConfig {
             cfg,
             certres,
@@ -88,11 +89,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
             }
         }
 
-        // Load public certificate.
-        let certs = load_certs(&config.cert_file)?;
-        // Load private key.
-        let key = load_private_key(&config.key_file)?;
-        self.certres.add(sni, certs, &key)?;
+        self.certres.add(sni, &config.host)?;
 
         Ok(())
     }
@@ -102,10 +99,15 @@ impl TLSBuilderTrait for ParsedTLSConfig {
     }
 }
 
+struct CertKeys {
+    rsa: Option<CertifiedKey>,
+    ec: Option<CertifiedKey>,
+    ed: Option<CertifiedKey>
+}
 
 pub struct ResolveServerCert {
-    by_name: std::collections::HashMap<String, CertifiedKey>,
-    default: Option<CertifiedKey>
+    by_name: std::collections::HashMap<String, CertKeys>,
+    default: Option<CertKeys>
 }
 
 impl ResolveServerCert {
@@ -120,22 +122,61 @@ impl ResolveServerCert {
     /// it's not valid for the supplied certificate, or if the certificate
     /// chain is syntactically faulty.
     pub fn add(&mut self, sni: Option<&str>,
-                chain: Vec<Certificate>,
-                priv_key: &PrivateKey) -> Result<(), tokio_rustls::rustls::TLSError> {
-        let key = any_supported_type(priv_key)
-            .map_err(|_| tokio_rustls::rustls::TLSError::General("invalid private key".into()))?;
-        let ck = CertifiedKey::new(chain, Arc::new(key));
-
-        if let Some(name) = sni {
-            let checked_name = tokio_rustls::webpki::DNSNameRef::try_from_ascii_str(name)
-                .map_err(|_| tokio_rustls::rustls::TLSError::General("Bad DNS name".into()))?;
-            ck.cross_check_end_entity_cert(Some(checked_name))?;
-            self.by_name.insert(name.into(), ck);
+                keyset: &Vec<KeySet>) -> Result<(), tokio_rustls::rustls::TLSError> {
+        
+        let ident = if let Some(name) = sni {
+            self.by_name.insert(name.into(), CertKeys{rsa:None,ec:None, ed:None});
+            self.by_name.get_mut(name.into()).unwrap()
         }else{
             if self.default.is_some() {
                 return Err( tokio_rustls::rustls::TLSError::General("More than one default Cert/Key".into()) );
             }
-            self.default = Some(ck);
+            self.default = Some(CertKeys{rsa:None,ec:None, ed:None});
+            self.default.as_mut().unwrap()
+        };
+        for set in keyset {
+            let k = load_private_key(&set.key_file).map_err(|_| tokio_rustls::rustls::TLSError::General("Bad Key file".into()))?;
+            let chain = load_certs(&set.cert_file).map_err(|_| tokio_rustls::rustls::TLSError::General("Bad Cert file".into()))?;
+            
+            if let Ok(rsa) = RSASigningKey::new(&k) {
+                if ident.rsa.is_some() {
+                    return Err(tokio_rustls::rustls::TLSError::General("More than one RSA key".into()));
+                }
+                let key = Box::new(rsa);
+                let ck = CertifiedKey::new(chain, Arc::new(key));
+                debug!("added RSA Cert");
+                ident.rsa = Some(ck);
+            }else if let Ok(key) = any_ecdsa_type(&k) {
+                if ident.ec.is_some() {
+                    return Err(tokio_rustls::rustls::TLSError::General("More than one EC key".into()));
+                }                
+                let ck = CertifiedKey::new(chain, Arc::new(key));
+                debug!("added EC Cert");
+                ident.ec = Some(ck);
+            }else if let Ok(key) = any_eddsa_type(&k) {
+                if ident.ed.is_some() {
+                    return Err(tokio_rustls::rustls::TLSError::General("More than one ED key".into()));
+                }
+                let ck = CertifiedKey::new(chain, Arc::new(key));
+                debug!("added ED Cert");
+                ident.ed = Some(ck);
+            }else{
+                return Err(tokio_rustls::rustls::TLSError::General("Bad key type".into()));
+            }
+        }
+        // check if all certs are usable with the vHost
+        if let Some(name) = sni {
+            let checked_name = tokio_rustls::webpki::DNSNameRef::try_from_ascii_str(name)
+                .map_err(|_| tokio_rustls::rustls::TLSError::General("Bad DNS name".into()))?;
+            if let Some(ck) = &ident.rsa {
+                ck.cross_check_end_entity_cert(Some(checked_name))?;
+            }
+            if let Some(ck) = &ident.ec {
+                ck.cross_check_end_entity_cert(Some(checked_name))?;
+            }
+            if let Some(ck) = &ident.ed {
+                ck.cross_check_end_entity_cert(Some(checked_name))?;
+            }
         }
         Ok(())
     }
@@ -143,16 +184,63 @@ impl ResolveServerCert {
 
 impl ResolvesServerCert for ResolveServerCert {
     fn resolve(&self, client_hello: ClientHello) -> Option<CertifiedKey> {
-        trace!("{:?}", client_hello.sigschemes()); // -> &[SignatureScheme]
-        trace!("{:#?}", client_hello.alpn()); // -> Option<&'a [&'a [u8]]>
-
-        if let Some(name) = client_hello.server_name() {
-            match self.by_name.get(name.into()) {
-                Some(cert_by_name) => Some(cert_by_name.clone()),
-                None => self.default.as_ref().cloned()
+        //client_hello.alpn() -> Option<&'a [&'a [u8]]>
+        client_hello.alpn().and_then(|a|{
+            for alp in a {
+                if alp==b"acme-tls/1" {
+                    return Some(())
+                }
             }
-        } else {
-            self.default.as_ref().cloned()
+            None
+        });
+        let mut ed = false;
+        let mut ec = false;
+        let mut rsa = false;
+        for s in client_hello.sigschemes() {
+            match s {
+                SignatureScheme::ECDSA_SHA1_Legacy |
+                SignatureScheme::ECDSA_NISTP256_SHA256 |
+                SignatureScheme::ECDSA_NISTP384_SHA384 |
+                SignatureScheme::ECDSA_NISTP521_SHA512 => {
+                    ec = true;
+                    if rsa && ed {
+                        break;
+                    }
+                },
+                SignatureScheme::ED25519 |
+                SignatureScheme::ED448 => {
+                    ed = true;
+                    if rsa && ec {
+                        break;
+                    }
+                },
+                SignatureScheme::RSA_PKCS1_SHA1 |
+                SignatureScheme::RSA_PKCS1_SHA256 |
+                SignatureScheme::RSA_PKCS1_SHA384 |
+                SignatureScheme::RSA_PKCS1_SHA512 => {
+                    rsa = true;
+                    if ec && ed {
+                        break;
+                    }
+                },
+                _ => {},
+            }
+        }
+        trace!("ec: {}, ed: {}, rsa: {} - {:?}", ec, ed, rsa, client_hello.sigschemes());
+
+        let ks = client_hello.server_name().and_then(|name|self.by_name.get(name.into()))
+                                    .or(self.default.as_ref());
+
+        //this kinda impacts the chiper order - maybe coordinate with sess.config.ignore_client_order?
+        if let Some(ks) = ks {
+            match (ks.ec.as_ref(), ks.ed.as_ref(), ks.rsa.as_ref(), ec, ed, rsa) {
+                (Some(k), _, _, true, _, _) => Some(k.clone()), //ec
+                (_, Some(k), _, _, true, _) => Some(k.clone()), //ed
+                (_, _, Some(k), _, _, true) => Some(k.clone()), //rsa
+                _ => None
+            }
+        }else{
+            None
         }
     }
 }
@@ -169,12 +257,24 @@ fn load_certs(filename: &PathBuf) -> Result<Vec<Certificate>,io::Error> {
 
 // Load private key from file.
 fn load_private_key(filename: &PathBuf) -> Result<PrivateKey,io::Error> {
-    // Open keyfile.
-    let keyfile = fs::File::open(filename)?;
-    let mut reader = io::BufReader::new(keyfile);
+    let rsa_keys = {
+        let keyfile = fs::File::open(filename)?;
+        let mut reader = io::BufReader::new(keyfile);
+        pemfile::rsa_private_keys(&mut reader).map_err(|_|io::Error::new(io::ErrorKind::InvalidData, "could not parse rsa priv key"))?
+    };
+
+    let pkcs8_keys = {
+        let keyfile = fs::File::open(filename)?;
+        let mut reader = io::BufReader::new(keyfile);
+        pemfile::pkcs8_private_keys(&mut reader).map_err(|_|io::Error::new(io::ErrorKind::InvalidData, "could not parse pkcs8 priv key"))?
+    };
 
     // Load and return a single private key.
-    let keys = pemfile::rsa_private_keys(&mut reader).map_err(|_|io::Error::new(io::ErrorKind::InvalidData, "could not parse priv key"))?;
+    let keys = if pkcs8_keys.len()>0 {
+        pkcs8_keys
+    }else{
+        rsa_keys
+    };
     if keys.len() != 1 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a single private key"));
     }
@@ -214,9 +314,12 @@ fn lookup_versions(versions: &Vec<String>) -> Result<Vec<ProtocolVersion>, io::E
 
 #[test]
 fn todo(){
-    let u1 = TlsUserConfig {
+    let ks = KeySet {
         cert_file: PathBuf::from("./test_cert.der"),
-        key_file: PathBuf::from("./test_key.der"),
+        key_file: PathBuf::from("./test_key.der")
+    };
+    let u1 = TlsUserConfig {
+        host: vec![ks],
         ciphersuites: None,
         versions: None,
     };
