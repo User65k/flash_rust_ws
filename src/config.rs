@@ -367,8 +367,9 @@ async fn tls_plain_mix() {
     let mut cfg: Configuration = toml::from_str(r#"
 [host]
 ip = "8.8.8.8:22"
-tls.cert_file = ""
-tls.key_file = ""
+[[host.tls.host]]
+cert_file = ""
+key_file = ""
 [host2]
 ip = "8.8.8.8:22"
 "#).expect("parse err");
