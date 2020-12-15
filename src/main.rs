@@ -105,6 +105,14 @@ async fn main() {
                 Err(e) => {error!("Configuration error!\r\n{}", e);return;},
                 Ok(m) => m
             };
+            //Write pid file
+            if let Some(pidfile) = cfg.pidfile {
+                if let Err(e) = pidfile::create_pid_file(pidfile) {
+                    error!("Could not write Pid File: {}", e);
+                    eprintln!("Error! See Logs");
+                    return;
+                }
+            }
             // Switch user+group
             if let Some(group) = cfg.group {
                 if let Err(e) = user::switch_group(&group) {
@@ -126,14 +134,6 @@ async fn main() {
                 }
             }
             debug!("{:#?}",listening_ifs);
-            //Write pid file
-            if let Some(pidfile) = cfg.pidfile {
-                if let Err(e) = pidfile::create_pid_file(pidfile) {
-                    error!("Could not write Pid File: {}", e);
-                    eprintln!("Error! See Logs");
-                    return;
-                }
-            }
             //setup all servers
             match prepare_hyper_servers(listening_ifs).await {
                 Ok(handles) => {
