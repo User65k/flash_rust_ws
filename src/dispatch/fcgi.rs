@@ -6,6 +6,9 @@ use bytes::{Bytes, BytesMut};
 use hyper::{Body, Request, Response};
 use std::path::PathBuf;
 use std::path::Path;
+use tokio::time::timeout;
+use tokio::task::yield_now;
+use std::time::Duration;
 
 use crate::config;
 use crate::body::FCGIBody;
@@ -49,7 +52,11 @@ pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path
             );
         }
         trace!("to FCGI: {:?}", &params);
-        Ok(app.forward(req, params).await?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
+        match timeout(Duration::from_secs(3), app.forward(req, params)).await {
+            Err(_) => Err(IoError::new(ErrorKind::TimedOut,"FCGI app did not respond")),
+            Ok(val) => Ok(val?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
+        }
+        //Ok(app.forward(req, params).await?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
     }else{
         error!("FCGI app not set");
         Err(IoError::new(ErrorKind::NotConnected,"FCGI app not available"))
@@ -89,14 +96,31 @@ pub async fn setup_fcgi(fcgi_cfg: &mut config::FCGIApp) -> Result<(), Box<dyn st
         let running_cmd = cmd
                             .kill_on_drop(true)
                             .spawn()?;
+        info!("Started {:?} @ {}", &bin.path, &sock);
+        let delete_after_use = 
+        if let FCGIAddr::Unix(a) = &sock {
+            Some(a.to_path_buf())
+        }else{
+            None
+        };
         tokio::spawn(async move {
             match running_cmd.await {
                 Ok(status) => error!("FCGI app exit: {}", status),
                 Err(e) => error!("FCGI app: {}", e),
             }
+            if let Some(path) = delete_after_use {
+                std::fs::remove_file(path).unwrap();
+            }
         });
+        yield_now().await;
     }
-    let app = FCGIAppPool::new(&sock).await?;
+    let app =     
+    match timeout(Duration::from_secs(3),FCGIAppPool::new(&sock)).await {
+        Err(_) => return Err(Box::new(IoError::new(ErrorKind::TimedOut,"timeout during connect"))),
+        Ok(res) => res?
+    };
+
+    info!("FCGI App ready @ {}", &sock);
     fcgi_cfg.app = Some(app);
 
     Ok(())

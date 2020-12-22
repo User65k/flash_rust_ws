@@ -244,6 +244,11 @@ pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Body::empty())
             },
+            ErrorKind::TimedOut => {
+                Response::builder()
+                .status(StatusCode::GATEWAY_TIMEOUT)
+                .body(Body::empty())
+            },
             _ => {
                 Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
