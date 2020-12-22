@@ -61,7 +61,7 @@ fcgi.sock = "/tmp/py.sock" # Unix Socket
 
 
 ["example.com".php-fpm] # /php-fpm/* will go to php-cgi via FastCGI
-fcgi.sock => "/var/run/php/php7.4-fpm.sock",
+fcgi.sock = "/var/run/php/php7.4-fpm.sock",
 fcgi.script_filename = true
 
 ```
