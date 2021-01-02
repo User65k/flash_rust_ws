@@ -9,15 +9,15 @@ use std::path::Path;
 use tokio::time::timeout;
 use tokio::task::yield_now;
 use std::time::Duration;
+use serde::Deserialize;
 
-use crate::config;
 use crate::body::FCGIBody;
 
 pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
 
 
-pub async fn fcgi_call(fcgi_cfg: &config::FCGIApp, req: Request<Body>, full_path: &PathBuf, remote_addr: SocketAddr)
+pub async fn fcgi_call(fcgi_cfg: &FCGIApp, req: Request<Body>, full_path: &PathBuf, remote_addr: SocketAddr)
             -> Result<Response<Body>, IoError> {
     if let Some(app) = &fcgi_cfg.app {
 
@@ -75,7 +75,7 @@ fn path_to_bytes<P: AsRef<Path>>(path: P) -> Bytes {
     BytesMut::from(path.as_ref().to_string_lossy().to_string().as_bytes()).freeze()
 }
 
-pub async fn setup_fcgi(fcgi_cfg: &mut config::FCGIApp) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn setup_fcgi(fcgi_cfg: &mut FCGIApp) -> Result<(), Box<dyn std::error::Error>> {
 
     let sock: FCGIAddr = (&fcgi_cfg.sock).into();
 
@@ -93,7 +93,7 @@ pub async fn setup_fcgi(fcgi_cfg: &mut config::FCGIApp) -> Result<(), Box<dyn st
         if let Some(env_copy) = bin.copy_environment.as_ref() {
             cmd.envs(env_copy.iter().filter_map(|key|std::env::var_os(key).map(|val|(key, val))));
         }
-        let running_cmd = cmd
+        let mut running_cmd = cmd
                             .kill_on_drop(true)
                             .spawn()?;
         info!("Started {:?} @ {}", &bin.path, &sock);
@@ -104,7 +104,7 @@ pub async fn setup_fcgi(fcgi_cfg: &mut config::FCGIApp) -> Result<(), Box<dyn st
             None
         };
         tokio::spawn(async move {
-            match running_cmd.await {
+            match running_cmd.wait().await {
                 Ok(status) => error!("FCGI app exit: {}", status),
                 Err(e) => error!("FCGI app: {}", e),
             }
@@ -124,4 +124,43 @@ pub async fn setup_fcgi(fcgi_cfg: &mut config::FCGIApp) -> Result<(), Box<dyn st
     fcgi_cfg.app = Some(app);
 
     Ok(())
+}
+
+impl From<&FCGISock> for FCGIAddr {
+    fn from(addr: &FCGISock) -> FCGIAddr {
+        match addr {
+            FCGISock::TCP(s) => FCGIAddr::Inet(*s),
+            FCGISock::Unix(p) => FCGIAddr::Unix(p.to_path_buf()),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum FCGISock {
+    TCP(SocketAddr),
+    Unix(PathBuf),
+}
+
+/// Information to execute a FCGI App
+#[derive(Debug)]
+#[derive(Deserialize)]
+pub struct FCGIAppExec {
+    pub path: PathBuf,
+    pub wdir: Option<PathBuf>,
+    pub environment: Option<HashMap<String, String>>,
+    pub copy_environment: Option<Vec<String>>,
+}
+
+/// A FCGI Application
+#[derive(Debug)]
+#[derive(Deserialize)]
+pub struct FCGIApp {
+    pub sock: FCGISock,
+    pub exec: Option<Vec<PathBuf>>,
+    pub script_filename: Option<bool>,
+    pub bin: Option<FCGIAppExec>,
+    #[serde(skip)]
+    pub app: Option<FCGIAppPool>
 }

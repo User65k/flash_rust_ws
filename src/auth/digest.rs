@@ -11,7 +11,7 @@ use rand::RngCore;
 use std::time::{SystemTime,UNIX_EPOCH};
 use lazy_static::lazy_static;
 
-use bytes::Buf;
+use bytes::Bytes;
 use log::{Level::Trace, log_enabled};
 
 lazy_static! {
@@ -90,15 +90,14 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
         },
         Some(header) => {
             if let Ok(user_vals) = get_map_from_header(header) {
-
+                
                 if log_enabled!(Trace) {
                     use std::iter::FromIterator;
                     use std::collections::HashMap;
-                    use bytes::Bytes;
 
-                    let h: HashMap<Bytes, Bytes> = HashMap::from_iter(user_vals.clone().into_iter().map(|(mut k, mut v)| (k.to_bytes(),v.to_bytes())));
+                    let h: HashMap<Bytes, Bytes> = HashMap::from_iter(user_vals.clone().into_iter().map(|(k, v)| (Bytes::copy_from_slice(k), Bytes::copy_from_slice(v))));
                     trace!("from header: {:?}", h);
-                }                
+                }
 
                 if let (Ok(username), Some(nonce), Some(user_response)) =
                     (std::str::from_utf8(
@@ -203,7 +202,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                         // grant access
                         Ok(None)
                     }else{
-                        info!("user {} auth failed {}!={:?}", username, correct_response, user_response.clone().to_bytes());
+                        info!("user {} auth failed {}!={:?}", username, correct_response, Bytes::copy_from_slice(*user_response));
                         // wrong PW
                         Ok(Some(create_resp_needs_auth(realm)))
                     };

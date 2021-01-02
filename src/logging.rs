@@ -11,7 +11,7 @@ use std::{
 };
 
 use log4rs::{
-    file::{Deserializers, RawConfig},
+    config::{Deserializers, RawConfig},
     init_config
 };
 
@@ -26,8 +26,8 @@ pub fn init_file(config: RawConfig, handle: &Handle) -> Result<(), Box<dyn error
 }
 fn deserialize(config: &RawConfig, deserializers: &Deserializers) ->  Result<Config, Box<dyn error::Error>> {
     let (appenders, mut errors) = config.appenders_lossy(deserializers);
-    if let Some(e) = errors.pop() {
-        return Err(e.into());
+    if !errors.is_empty() {
+        return Err(Box::new(errors));
     }
 
     let config = Config::builder()

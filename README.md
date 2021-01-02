@@ -61,7 +61,7 @@ fcgi.sock = "/tmp/py.sock" # Unix Socket
 
 
 ["example.com".php-fpm] # /php-fpm/* will go to php-cgi via FastCGI
-fcgi.sock = "/var/run/php/php7.4-fpm.sock",
+fcgi.sock = "/var/run/php/php7.4-fpm.sock"
 fcgi.script_filename = true
 
 ```
@@ -87,6 +87,7 @@ Place the config file in one of these places:
   - [ ] [native-tls](https://github.com/sfackler/rust-native-tls) (Smaller binary - Once [rust-native-tls#105](https://github.com/sfackler/rust-native-tls/issues/105) / [rust-native-tls#163](https://github.com/sfackler/rust-native-tls/issues/163) is done)
 - [x] HTTP2
 - [ ] WebDAV
+- [ ] Reverse-Proxy
 - [ ] Websocket
   - [ ] Reverse-Proxy
   - [ ] to normal Socket (SCGI Style)

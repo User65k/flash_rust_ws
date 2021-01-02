@@ -29,7 +29,6 @@ use std::time::Duration;
 
 use futures_util::FutureExt as _;
 use tokio::net::TcpListener;
-use tokio::time::Delay;
 
 use std::future::Future;
 use core::task::{Context, Poll};
@@ -41,11 +40,11 @@ use hyper::server::accept::Accept;
 use log::{info, error, debug, trace};
 use futures_util::ready;
 
-use bytes::{Buf, BufMut};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::time::Sleep;
 
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
 pub mod tls;
@@ -56,9 +55,8 @@ pub struct PlainIncoming {
     addr: SocketAddr,
     listener: TcpListener,
     sleep_on_errors: bool,
-    tcp_keepalive_timeout: Option<Duration>,
     tcp_nodelay: bool,
-    timeout: Option<Delay>,
+    timeout: Option<Pin<Box<Sleep>>>,
 }
 
 impl PlainIncoming {
@@ -69,7 +67,6 @@ impl PlainIncoming {
             listener,
             addr,
             sleep_on_errors: true,
-            tcp_keepalive_timeout: None,
             tcp_nodelay: false,
             timeout: None,
         })
@@ -78,16 +75,6 @@ impl PlainIncoming {
     /// Get the local address bound to this listener.
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
-    }
-
-    /// Set whether TCP keepalive messages are enabled on accepted connections.
-    ///
-    /// If `None` is specified, keepalive is disabled, otherwise the duration
-    /// specified will be the time to remain idle before sending TCP keepalive
-    /// probes.
-    pub fn set_keepalive(&mut self, keepalive: Option<Duration>) -> &mut Self {
-        self.tcp_keepalive_timeout = keepalive;
-        self
     }
 
     /// Set the value of `TCP_NODELAY` option for accepted connections.
@@ -117,13 +104,12 @@ impl PlainIncoming {
 
     fn poll_next_(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<PlainStream>> {
         // Check if a previous timeout is active that was set by IO errors.
-        if let Some(ref mut to) = self.timeout {
+        if let Some(ref mut to) = self.timeout.take() {
             match Pin::new(to).poll(cx) {
                 Poll::Ready(()) => {}
                 Poll::Pending => return Poll::Pending,
             }
         }
-        self.timeout = None;
 
         let accept = self.listener.accept();
         futures_util::pin_mut!(accept);
@@ -131,11 +117,6 @@ impl PlainIncoming {
         loop {
             match accept.poll_unpin(cx) {
                 Poll::Ready(Ok((socket, addr))) => {
-                    if let Some(dur) = self.tcp_keepalive_timeout {
-                        if let Err(e) = socket.set_keepalive(Some(dur)) {
-                            trace!("error trying to set TCP keepalive: {}", e);
-                        }
-                    }
                     if let Err(e) = socket.set_nodelay(self.tcp_nodelay) {
                         trace!("error trying to set TCP nodelay: {}", e);
                     }
@@ -155,17 +136,18 @@ impl PlainIncoming {
                         error!("accept error: {}", e);
 
                         // Sleep 1s.
-                        let mut timeout = tokio::time::delay_for(Duration::from_secs(1));
-
-                        match Pin::new(&mut timeout).poll(cx) {
+                        let timeout = tokio::time::sleep(Duration::from_secs(1));
+                        let mut timeout = Box::pin(timeout);
+                        
+                        match timeout.as_mut().poll(cx) {
                             Poll::Ready(()) => {
                                 // Wow, it's been a second already? Ok then...
                                 continue;
                             }
                             Poll::Pending => {
                                 self.timeout = Some(timeout);
-                                return Poll::Pending;
-                            }
+                                return Poll::Pending
+                            },
                         }
                     } else {
                         return Poll::Ready(Err(e));
@@ -210,14 +192,15 @@ impl fmt::Debug for PlainIncoming {
         f.debug_struct("PlainIncoming")
             .field("addr", &self.addr)
             .field("sleep_on_errors", &self.sleep_on_errors)
-            .field("tcp_keepalive_timeout", &self.tcp_keepalive_timeout)
             .field("tcp_nodelay", &self.tcp_nodelay)
             .finish()
     }
 }
 
+#[pin_project::pin_project]
 #[derive(Debug)]
 pub struct PlainStream {
+    #[pin]
     inner: TcpStream,
     pub(super) remote_addr: SocketAddr,
 }
@@ -248,56 +231,40 @@ impl PlainStream {
     pub fn poll_peek(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
+        buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<usize>> {
         self.inner.poll_peek(cx, buf)
     }
 }
 
 impl AsyncRead for PlainStream {
-    unsafe fn prepare_uninitialized_buffer(
-        &self,
-        buf: &mut [std::mem::MaybeUninit<u8>],
-    ) -> bool {
-        self.inner.prepare_uninitialized_buffer(buf)
-    }
-
     #[inline]
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-
-    #[inline]
-    fn poll_read_buf<B: BufMut>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut B,
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_read_buf(cx, buf)
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.project().inner.poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for PlainStream {
     #[inline]
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        self.project().inner.poll_write(cx, buf)
     }
 
     #[inline]
-    fn poll_write_buf<B: Buf>(
-        mut self: Pin<&mut Self>,
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut B,
+        bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write_buf(cx, buf)
+        self.project().inner.poll_write_vectored(cx, bufs)
     }
 
     #[inline]
@@ -307,11 +274,17 @@ impl AsyncWrite for PlainStream {
     }
 
     #[inline]
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.project().inner.poll_shutdown(cx)
+    }
+
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        // Note that since `self.inner` is a `TcpStream`, this could
+        // *probably* be hard-coded to return `true`...but it seems more
+        // correct to ask it anyway (maybe we're on some platform without
+        // scatter-gather IO?)
+        self.inner.is_write_vectored()
     }
 }
 

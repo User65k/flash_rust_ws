@@ -8,51 +8,14 @@ use std::fs::File;
 use std::error::Error;
 use std::io::{Error as IOError, ErrorKind};
 use std::fmt;
-use crate::dispatch::fcgi::{FCGIAppPool, FCGIAddr, setup_fcgi};
+#[cfg(feature = "fcgi")]
+use crate::dispatch::fcgi::{FCGIApp, setup_fcgi};
 use hyper::header::HeaderMap;
-use log4rs::file::RawConfig as LogConfig;
+use log4rs::config::RawConfig as LogConfig;
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
 use crate::transport::tls::{TlsUserConfig, ParsedTLSConfig, TLSBuilderTrait};
 
 
-impl From<&FCGISock> for FCGIAddr {
-    fn from(addr: &FCGISock) -> FCGIAddr {
-        match addr {
-            FCGISock::TCP(s) => FCGIAddr::Inet(*s),
-            FCGISock::Unix(p) => FCGIAddr::Unix(p.to_path_buf()),
-        }
-    }
-}
-
-#[derive(Debug)]
-#[derive(Deserialize)]
-#[serde(untagged)]
-pub enum FCGISock {
-    TCP(SocketAddr),
-    Unix(PathBuf),
-}
-
-/// Information to execute a FCGI App
-#[derive(Debug)]
-#[derive(Deserialize)]
-pub struct FCGIAppExec {
-    pub path: PathBuf,
-    pub wdir: Option<PathBuf>,
-    pub environment: Option<HashMap<String, String>>,
-    pub copy_environment: Option<Vec<String>>,
-}
-
-/// A FCGI Application
-#[derive(Debug)]
-#[derive(Deserialize)]
-pub struct FCGIApp {
-    pub sock: FCGISock,
-    pub exec: Option<Vec<PathBuf>>,
-    pub script_filename: Option<bool>,
-    pub bin: Option<FCGIAppExec>,
-    #[serde(skip)]
-    pub app: Option<FCGIAppPool>
-}
 
 #[derive(Debug)]
 #[derive(Deserialize)]
@@ -71,6 +34,7 @@ pub struct WwwRoot {
     pub follow_symlinks: bool, // = false
     pub index: Option<Vec<PathBuf>>,
     pub serve: Option<Vec<PathBuf>>,
+    #[cfg(feature = "fcgi")]
     pub fcgi: Option<FCGIApp>,
     pub header: Option<HashMap<String, String>>,
     pub auth: Option<Authenticatoin>,
@@ -223,6 +187,7 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
         let addr = params.ip;
         for (mount, wwwroot) in params.paths.iter_mut() {
             //setup FCGI Apps
+            #[cfg(feature = "fcgi")]
             if let Some(fcgi_cfg) = wwwroot.fcgi.as_mut() {
                 if let Err(e) = setup_fcgi(fcgi_cfg).await {
                     errors.add(format!("FCGIApp @\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
@@ -264,11 +229,11 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if params.tls.is_some() != hcfg.tls.is_some() {
                     errors.add(format!("All vHosts on {} must be either TLS or not", addr));
-                }
-                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-                if let Some(tlscfg) = params.tls.as_ref() {
-                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(tlscfg, sni) { //safe because hcfg.tls is some at this point
-                        errors.add(format!("vHost {}:  {}", vhost, e));
+                }else{
+                    if let Some(tlscfg) = params.tls.as_ref() {
+                        if let Err(e) = hcfg.tls.as_mut().unwrap().add(tlscfg, sni) { //safe because hcfg.tls is some at this point
+                            errors.add(format!("vHost {}:  {}", vhost, e));
+                        }
                     }
                 }
                 

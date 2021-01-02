@@ -34,7 +34,7 @@ use crate::transport::tls::{TlsAcceptor, TlsStream, TLSBuilderTrait};
 /// Walk trought `listening_ifs` and create a `PlainIncoming` (TCP Listener) for each `SocketAddr`.
 /// If its config has TLS wrap the `PlainIncoming` into an `TlsAcceptor`
 async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::HostCfg>)
- -> Result<Vec<JoinHandle<Result<(), hyper::error::Error>>>, Box<dyn Error>> {
+ -> Result<Vec<JoinHandle<Result<(), hyper::Error>>>, Box<dyn Error>> {
 
     let mut handles = vec![];
     for (addr, mut cfg) in listening_ifs.drain() {

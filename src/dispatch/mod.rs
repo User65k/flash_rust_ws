@@ -1,4 +1,5 @@
 mod staticf;
+#[cfg(feature = "fcgi")]
 pub mod fcgi;
 
 use hyper::{Body, Request, Response, header, StatusCode, Version, http::Error as HTTPError}; //, Method};
@@ -96,6 +97,7 @@ async fn handle_wwwroot(req: Request<Body>,
     
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
 
+    #[cfg(feature = "fcgi")]
     if let Some(fcgi_cfg) = &wwwr.fcgi {
         if fcgi_cfg.exec.is_none() {
             //FCGI + dont check for file -> always FCGI
@@ -116,6 +118,7 @@ async fn handle_wwwroot(req: Request<Body>,
                 .expect("unable to build response"));
     }
 
+    #[cfg(feature = "fcgi")]
     if let Some(fcgi_cfg) = &wwwr.fcgi {
         //FCGI + check for file
         if ext_in_list(&fcgi_cfg.exec, &full_path) {

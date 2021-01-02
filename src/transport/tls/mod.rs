@@ -13,7 +13,7 @@ use hyper::server::accept::Accept;
 use futures_util::ready;
 use std::io;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::future::Future;
 
 use std::net::SocketAddr;
@@ -57,8 +57,8 @@ impl AsyncRead for TlsStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let pin = self.get_mut();
         match pin.state {
             State::Handshaking(ref mut accept) => match ready!(Pin::new(accept).poll(cx)) {
