@@ -104,11 +104,18 @@ pub async fn setup_fcgi(fcgi_cfg: &mut FCGIApp) -> Result<(), Box<dyn std::error
             None
         };
         tokio::spawn(async move {
-            match running_cmd.wait().await {
-                Ok(status) => error!("FCGI app exit: {}", status),
-                Err(e) => error!("FCGI app: {}", e),
+            tokio::select! {
+                ret = running_cmd.wait() => {
+                    match ret {
+                        Ok(status) => error!("FCGI app exit: {}", status),
+                        Err(e) => error!("FCGI app: {}", e),
+                    }
+                },
+                _ = tokio::signal::ctrl_c() => {info!("killing");running_cmd.kill().await.expect("kill failed");}
             }
+            
             if let Some(path) = delete_after_use {
+                info!("cleanup");
                 std::fs::remove_file(path).unwrap();
             }
         });

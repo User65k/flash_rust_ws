@@ -5,7 +5,7 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 
 */
 
-use futures_util::future::join_all;
+use futures_util::future::{select, join_all};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request};
 use log::{info, error, debug, trace};
@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
+use tokio::signal;
 
 mod config;
 mod user;
@@ -151,7 +152,21 @@ async fn main() {
             match prepare_hyper_servers(listening_ifs).await {
                 Ok(handles) => {
                     info!("serving");
-                    join_all(handles).await;
+                    let all_server = join_all(handles);
+                    tokio::select! {
+                        ret = all_server => {
+                            //print the error if hyper returned one
+                            for r in ret {
+                                if let Err(e) = r {
+                                    error!("{}", e);
+                                }
+                            }
+                        },
+                        _ = signal::ctrl_c() => {
+                            info!("ctrl+c received");
+                            //TODO wait until all cleanups are done
+                        }
+                    }
                 },
                 Err(e) => {
                     error!("{}",e);
