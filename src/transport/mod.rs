@@ -61,6 +61,7 @@ pub struct PlainIncoming {
 
 impl PlainIncoming {
     pub(super) fn from_std(std_listener: StdTcpListener) -> Result<Self, io::Error> {
+        std_listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(std_listener)?;
         let addr = listener.local_addr()?;
         Ok(PlainIncoming {
@@ -111,11 +112,8 @@ impl PlainIncoming {
             }
         }
 
-        let accept = self.listener.accept();
-        futures_util::pin_mut!(accept);
-
         loop {
-            match accept.poll_unpin(cx) {
+            match self.listener.poll_accept(cx) {
                 Poll::Ready(Ok((socket, addr))) => {
                     if let Err(e) = socket.set_nodelay(self.tcp_nodelay) {
                         trace!("error trying to set TCP nodelay: {}", e);

@@ -43,7 +43,7 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
             None => {return Err(Box::new(IoError::new(ErrorKind::Other, "could not listen")));}
         };
         let server = match PlainIncoming::from_std(l) {
-            Ok(incomming) => {
+            Ok(incoming) => {
                 info!("Bound to {}", &addr);
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 let use_tls = cfg.tls.take();
@@ -59,26 +59,26 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
                 
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if let Some(tls_cfg) = use_tls {
-                    let a = TlsAcceptor::new(tls_cfg.get_config(), incomming);
-                    let make_service = make_service_fn(move |socket: &TlsStream| {
+                    let a = TlsAcceptor::new(tls_cfg.get_config(), incoming);
+                    let new_service = make_service_fn(move |socket: &TlsStream| {
                         let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
-                    tokio::spawn(hyper::Server::builder(a).serve(make_service))
+                    tokio::spawn(hyper::Server::builder(a).executor(Exec).serve(new_service))
                 }else{
-                    let make_service = make_service_fn(move |socket: &PlainStream| {
+                    let new_service = make_service_fn(move |socket: &PlainStream| {
                         let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
-                    tokio::spawn(hyper::Server::builder(incomming).serve(make_service))
+                    tokio::spawn(hyper::Server::builder(incoming).executor(Exec).serve(new_service))
                 }
                 #[cfg(not(any(feature = "tlsrust",feature = "tlsnative")))]
                 {
-                    let make_service = make_service_fn(move |socket: &PlainStream| {
+                    let new_service = make_service_fn(move |socket: &PlainStream| {
                         let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
-                    tokio::spawn(hyper::Server::builder(incomming).serve(make_service))
+                    tokio::spawn(hyper::Server::builder(incomming).executor(Exec).serve(new_service))
                 }
             },
             Err(err) => {
@@ -89,6 +89,19 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
         handles.push(server);
     }
     Ok(handles)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Exec;
+
+impl<F> hyper::rt::Executor<F> for Exec
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send
+{
+    fn execute(&self, task: F) {
+        tokio::spawn(task);
+    }
 }
 
 #[tokio::main]
