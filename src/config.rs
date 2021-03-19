@@ -115,7 +115,7 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
     #[cfg(not(test))]
     let mut path = None;
     #[cfg(not(test))]
-    for cfg_path in ["./config.toml", "/etc/defaults/config.toml"].iter() {
+    for cfg_path in ["./config.toml", "/etc/defaults/frws.toml"].iter() {
         let p: PathBuf = cfg_path.into();
         if p.is_file() {
             path = Some(p);
@@ -124,7 +124,7 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
     }
     #[cfg(not(test))]
     if path.is_none() {
-        return Err(Box::new(IOError::new(ErrorKind::NotFound, "No config file found!")));
+        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "No config file found!")));
     }
     #[cfg(test)]
     let path = Some("./test_cfg.toml");
