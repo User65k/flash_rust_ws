@@ -27,7 +27,6 @@ use std::io;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::time::Duration;
 
-use futures_util::FutureExt as _;
 use tokio::net::TcpListener;
 
 use std::future::Future;
@@ -37,7 +36,7 @@ use std::pin::Pin;
 //use hyper::server::conn::AddrStream;
 //pub use tokio::net::TcpStream as PlainStream;
 use hyper::server::accept::Accept;
-use log::{info, error, debug, trace};
+use log::{error, debug, trace};
 use futures_util::ready;
 
 #[cfg(unix)]

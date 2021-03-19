@@ -21,8 +21,9 @@ pidfile  = "/var/run/frws.pid" # Optional: Write PID to this file
 #group = "www-data"
 
 # Optional: Change logging - See README for more
-log.appenders.stdout = {kind = "console"}
-log.root = {level = "info", appenders = ["stdout"]}
+[log]
+appenders.stdout = {kind = "console"}
+root = {level = "info", appenders = ["stdout"]}
 
 ["example.com"]
 ip = "127.0.0.1:1337"
@@ -107,7 +108,6 @@ Place the config file in one of these places:
   - [x] recomended http headers by default
   - [x] no path traversals :-)
   - [ ] only https ?
-  - [ ] lets encrypt build in ?
   - [x] avoid BEAST and CRIME
   - [x] only follow symlinks if told so
 - [ ] SCGI

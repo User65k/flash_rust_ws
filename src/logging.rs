@@ -25,7 +25,7 @@ pub fn init_file(config: RawConfig, handle: &Handle) -> Result<(), Box<dyn error
     Ok(())
 }
 fn deserialize(config: &RawConfig, deserializers: &Deserializers) ->  Result<Config, Box<dyn error::Error>> {
-    let (appenders, mut errors) = config.appenders_lossy(deserializers);
+    let (appenders, errors) = config.appenders_lossy(deserializers);
     if !errors.is_empty() {
         return Err(Box::new(errors));
     }
