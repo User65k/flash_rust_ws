@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::io::Read;
 use std::fs::File;
 use std::error::Error;
-use std::io::{Error as IOError, ErrorKind};
 use std::fmt;
 #[cfg(feature = "fcgi")]
 use crate::dispatch::fcgi::{FCGIApp, setup_fcgi};
@@ -21,7 +20,7 @@ use crate::transport::tls::{TlsUserConfig, ParsedTLSConfig, TLSBuilderTrait};
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum Authenticatoin {
-    Digest{userfile: PathBuf, realm: String},
+    Digest{userfile: PathBuf, realm: String}, //TODO check file at startup
     //FCGI{server: FCGIApp}
 }
 
@@ -35,7 +34,7 @@ pub struct WwwRoot {
     pub index: Option<Vec<PathBuf>>,
     pub serve: Option<Vec<PathBuf>>,
     #[cfg(feature = "fcgi")]
-    pub fcgi: Option<FCGIApp>,
+    pub fcgi: Option<FCGIApp>, //TODO index+fcgi needs fcgi.exec to be set
     pub header: Option<HashMap<String, String>>,
     pub auth: Option<Authenticatoin>,
 }
@@ -53,6 +52,19 @@ pub struct VHost {
     root: Option<WwwRoot>, //only in toml -> will be added to paths
     #[serde(flatten)]
     pub paths: BTreeMap<PathBuf, WwwRoot>,
+}
+
+#[cfg(test)]
+impl VHost {
+    pub fn new(ip: SocketAddr) -> VHost {
+        VHost {
+            ip,
+            tls: None,
+            validate_server_name: false,
+            root: None,
+            paths: BTreeMap::new()
+        }
+    }
 }
 
 /// Gernal configuration
@@ -256,87 +268,92 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
     }
 }
 
-#[test]
-fn config_file(){
-    use std::fs::File;
-    use std::io::prelude::*;
-    let mut file = File::create("./test_cfg.toml").expect("could not create cfg file");
-    file.write_all(b"[host]\nip = \"0.0.0.0:1337\"\ndir=\".\"").expect("could not write cfg file");
-    load_config().expect("should be a valid cfg");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    file.write_all(b"\n[host2]\nip = \"0.0.0.0:8080\"").expect("could not write cfg file");
-    assert!(load_config().is_err()); // does not serve anything
+    #[test]
+    fn config_file(){
+        use std::fs::File;
+        use std::io::prelude::*;
+        let mut file = File::create("./test_cfg.toml").expect("could not create cfg file");
+        file.write_all(b"[host]\nip = \"0.0.0.0:1337\"\ndir=\".\"").expect("could not write cfg file");
+        load_config().expect("should be a valid cfg");
+
+        file.write_all(b"\n[host2]\nip = \"0.0.0.0:8080\"").expect("could not write cfg file");
+        assert!(load_config().is_err()); // does not serve anything
 
 
-    file.write_all(b"\ndir=\"\\nonexistend\"").expect("could not write cfg file");
-    assert!(load_config().is_err()); // folder non existent
-}
-#[test]
-fn toml_to_struct() {
-    let _cfg: Configuration = toml::from_str(r#"
-pidfile = 'bar'
+        file.write_all(b"\ndir=\"\\nonexistend\"").expect("could not write cfg file");
+        assert!(load_config().is_err()); // folder non existent
+    }
+    #[test]
+    fn toml_to_struct() {
+        let _cfg: Configuration = toml::from_str(r#"
+    pidfile = 'bar'
 
-your.ip = "[::1]:1234" # hah
-your.dir = "~"
-[host]
-ip = "0.0.0.0:1337"
-[host.path]
-dir = "/var/www/"
-index = ["index.html", "index.htm"]
-"#).expect("parse err");
-    //print(&cfg);
-}
+    your.ip = "[::1]:1234" # hah
+    your.dir = "~"
+    [host]
+    ip = "0.0.0.0:1337"
+    [host.path]
+    dir = "/var/www/"
+    index = ["index.html", "index.htm"]
+    "#).expect("parse err");
+        //print(&cfg);
+    }
 
-#[tokio::test]
-async fn vhost_conflict() {
-    let mut cfg: Configuration = toml::from_str(r#"
-[host]
-ip = "0.0.0.0:1337"
-[another]
-ip = "0.0.0.0:1337"
-"#).expect("parse err");
-    assert!(group_config(&mut cfg).await.is_err());
-}
-#[tokio::test]
-async fn bad_header() {
-    let mut cfg: Configuration = toml::from_str(r#"
-[host]
-ip = "0.0.0.0:1338"
-[host."/"]
-dir = ""
-header = {test = "bad\u0000header"}
-"#).expect("parse err");
-    assert!(group_config(&mut cfg).await.is_err());
-    let mut cfg: Configuration = toml::from_str(r#"
-[host]
-ip = "0.0.0.0:1339"
-[host."/"]
-dir = ""
-header = {"test\n" = "1"}
-"#).expect("parse err");
-    assert!(group_config(&mut cfg).await.is_err());
-}
+    #[tokio::test]
+    async fn vhost_conflict() {
+        let mut cfg: Configuration = toml::from_str(r#"
+    [host]
+    ip = "0.0.0.0:1337"
+    [another]
+    ip = "0.0.0.0:1337"
+    "#).expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+    }
+    #[tokio::test]
+    async fn bad_header() {
+        let mut cfg: Configuration = toml::from_str(r#"
+    [host]
+    ip = "0.0.0.0:1338"
+    [host."/"]
+    dir = ""
+    header = {test = "bad\u0000header"}
+    "#).expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+        let mut cfg: Configuration = toml::from_str(r#"
+    [host]
+    ip = "0.0.0.0:1339"
+    [host."/"]
+    dir = ""
+    header = {"test\n" = "1"}
+    "#).expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+    }
 
-#[tokio::test]
-async fn cant_listen() {
-    let mut cfg: Configuration = toml::from_str(r#"
-[host]
-ip = "8.8.8.8:22"
-"#).expect("parse err");
-    assert!(group_config(&mut cfg).await.is_err());
-}
+    #[tokio::test]
+    async fn cant_listen() {
+        let mut cfg: Configuration = toml::from_str(r#"
+    [host]
+    ip = "8.8.8.8:22"
+    "#).expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+    }
 
-#[cfg(feature = "tlsrust")]
-#[tokio::test]
-async fn tls_plain_mix() {
-    let mut cfg: Configuration = toml::from_str(r#"
-[host]
-ip = "8.8.8.8:22"
-[[host.tls.host]]
-cert_file = ""
-key_file = ""
-[host2]
-ip = "8.8.8.8:22"
-"#).expect("parse err");
-    assert!(group_config(&mut cfg).await.is_err());
+    #[cfg(feature = "tlsrust")]
+    #[tokio::test]
+    async fn tls_plain_mix() {
+        let mut cfg: Configuration = toml::from_str(r#"
+    [host]
+    ip = "8.8.8.8:22"
+    [[host.tls.host]]
+    cert_file = ""
+    key_file = ""
+    [host2]
+    ip = "8.8.8.8:22"
+    "#).expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+    }
 }

@@ -177,6 +177,101 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost, remote_addr: Sock
     Err(IoError::new(ErrorKind::PermissionDenied,"not a mount path"))
 }
 
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+    fn create_wwwroot(dir: &str) -> config::WwwRoot {
+        config::WwwRoot {
+            dir: PathBuf::from(dir),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+            fcgi: None,
+            header: None,
+            auth: None,
+        }
+    }
+    #[tokio::test]
+    async fn no_mounts() {
+        let req = Request::new(Body::empty());
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let cfg = config::VHost::new(sa);
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res: IoError = res.unwrap_err();
+        assert_eq!(res.into_inner().unwrap().to_string(),"not a mount path");
+    }
+    #[tokio::test]
+    async fn full_folder_names_as_mounts() {
+        let req = Request::get("/aa").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from(""), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from("aaa"), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res = res.unwrap();
+        assert_eq!(res.status(),301);
+        assert_eq!(res.headers().get("location").unwrap(),"/aa/");
+    }
+    #[tokio::test]
+    async fn longest_mount() {
+        let req = Request::get("/aa/a").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from("aa/a"), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res = res.unwrap();
+        assert_eq!(res.status(),301);
+        assert_eq!(res.headers().get("location").unwrap(),"/aa/a/");
+    }
+    #[tokio::test]
+    async fn uri_encode() {
+        let req = Request::get("/aa%2Fa").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from("aa/a"), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res = res.unwrap();
+        assert_eq!(res.status(),301);
+        assert_eq!(res.headers().get("location").unwrap(),"/aa%2Fa/");
+    }
+    #[tokio::test]
+    async fn root() {
+        let req = Request::get("/a/../b").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from("a"), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let _res = res.unwrap_err();
+    }
+    #[test]
+    fn abs_path() {
+        let wwwr = create_wwwroot("test");
+        // 1. /a is not part of /aa
+        let req = PathBuf::from("aa");
+        let mount = PathBuf::from("a");
+        get_full_path(&wwwr,&req,&mount).unwrap_err();
+        // 2. /a is part of /a/a
+        let req = PathBuf::from("a/a");
+        let mount = PathBuf::from("a");
+        assert_eq!(get_full_path(&wwwr,&req,&mount).unwrap(),PathBuf::from("test/a"));
+    }
+    #[test]
+    fn normalize() {
+        let req = PathBuf::from("a/../b");
+        assert_eq!(normalize_path(&req),PathBuf::from("b"));
+        let req = PathBuf::from("../../");
+        assert_eq!(normalize_path(&req),PathBuf::from(""));
+    }
+}
+
 /// return the Host header
 fn get_host(req: &Request<Body>) -> Option<&str> {
     match req.version() {
@@ -212,6 +307,67 @@ async fn dispatch_to_vhost(req: Request<Body>, cfg :Arc<config::HostCfg>, remote
         return handle_vhost(req, hcfg, remote_addr).await;
     }
     Err(IoError::new(ErrorKind::PermissionDenied,"no vHost found"))
+}
+
+#[cfg(test)]
+mod vhost_tests {
+    use super::*;
+    #[tokio::test]
+    async fn unknown_vhost() {
+        let req = Request::new(Body::empty());
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut map: HashMap<String, config::VHost> = HashMap::new();
+        map.insert("1".to_string(), config::VHost::new(sa));
+
+        let cfg = Arc::new(config::HostCfg {
+            default_host: None,
+            vhosts: map,
+            listener: None,
+            tls: None,
+        });
+        let res = dispatch_to_vhost(req, cfg, sa).await;
+        let res: IoError = res.unwrap_err();
+        assert_eq!(res.into_inner().unwrap().to_string(),"no vHost found");
+    }
+    #[tokio::test]
+    async fn specific_vhost() {
+        let mut req = Request::new(Body::empty());
+        req.headers_mut().insert("Host", header::HeaderValue::from_static("1:8080"));
+
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut map: HashMap<String, config::VHost> = HashMap::new();
+        map.insert("1".to_string(), config::VHost::new(sa));
+
+        let cfg = Arc::new(config::HostCfg {
+            default_host: None,
+            vhosts: map,
+            listener: None,
+            tls: None,
+        });
+
+        let res = dispatch_to_vhost(req, cfg, sa).await;
+        let res: IoError = res.unwrap_err();
+        assert_eq!(res.into_inner().unwrap().to_string(),"not a mount path");
+    }
+    #[tokio::test]
+    async fn default_vhost() {
+        let req = Request::new(Body::empty());
+        let sa = "127.0.0.1:8080".parse().unwrap();
+        let map: HashMap<String, config::VHost> = HashMap::new();
+
+        let cfg = Arc::new(config::HostCfg {
+            default_host: Some(config::VHost::new(sa)),
+            vhosts: map,
+            listener: None,
+            tls: None,
+        });
+
+        let res = dispatch_to_vhost(req, cfg, sa).await;
+        let res: IoError = res.unwrap_err();
+        assert_eq!(res.into_inner().unwrap().to_string(),"not a mount path");
+    }
 }
 
 /// new request on a `SocketAddr`.
