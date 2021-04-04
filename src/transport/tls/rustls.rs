@@ -6,6 +6,7 @@ use tokio_rustls::rustls::internal::pemfile;
 use tokio_rustls::rustls::{SupportedCipherSuite, ALL_CIPHERSUITES, ProtocolVersion};
 use tokio_rustls::rustls::{ClientHello, ResolvesServerCert};
 use tokio_rustls::rustls::sign::{CertifiedKey, RSASigningKey, any_ecdsa_type, any_eddsa_type};
+use rustls_acme::{acme::ACME_TLS_ALPN_NAME, ResolvesServerCertUsingAcme};
 
 use std::vec::Vec;
 use std::sync::Arc;
@@ -182,12 +183,24 @@ impl ResolveServerCert {
     }
 }
 
+/*
+    let resolver = ResolvesServerCertUsingAcme::new();
+    let config = ServerConfig::new(NoClientAuth::new());
+    let acceptor = TlsAcceptor::new(config, resolver.clone());
+
+    let directory_url = directory_url.as_ref().to_string();
+    let cache_dir = cache_dir.map(|p| p.as_ref().to_path_buf());
+    spawn(async move {
+        resolver.run(directory_url, domains, cache_dir).await;
+    });
+*/
+
 impl ResolvesServerCert for ResolveServerCert {
     fn resolve(&self, client_hello: ClientHello) -> Option<CertifiedKey> {
         //client_hello.alpn() -> Option<&'a [&'a [u8]]>
         client_hello.alpn().and_then(|a|{
             for alp in a {
-                if alp==b"acme-tls/1" {
+                if alp==ACME_TLS_ALPN_NAME {
                     return Some(())
                 }
             }
