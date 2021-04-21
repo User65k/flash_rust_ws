@@ -13,7 +13,9 @@ use hyper::header::HeaderMap;
 use log4rs::config::RawConfig as LogConfig;
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
 use crate::transport::tls::{TlsUserConfig, ParsedTLSConfig, TLSBuilderTrait};
-
+use serde::de::{Deserializer, Visitor, MapAccess, Error as SerdeError};
+#[cfg(feature = "websocket")]
+use crate::dispatch::websocket::Websocket;
 
 
 #[derive(Debug)]
@@ -24,17 +26,35 @@ pub enum Authenticatoin {
     //FCGI{server: FCGIApp}
 }
 
-/// A single directory
 #[derive(Debug)]
 #[derive(Deserialize)]
-pub struct WwwRoot {
+pub struct StaticFiles {
     pub dir: PathBuf,
     #[serde(default)]
     pub follow_symlinks: bool, // = false
     pub index: Option<Vec<PathBuf>>,
     pub serve: Option<Vec<PathBuf>>,
+}
+
+
+#[derive(Debug)]
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum UseCase {
     #[cfg(feature = "fcgi")]
-    pub fcgi: Option<FCGIApp>, //TODO index+fcgi needs fcgi.exec to be set
+    FCGI{fcgi: FCGIApp, #[serde(flatten)] static_files: Option<StaticFiles>},
+    StaticFiles(StaticFiles),
+    #[cfg(feature = "websocket")]
+    Websocket(Websocket),
+    //Proxy{host: String, path: String},
+}
+
+/// A single directory
+#[derive(Debug)]
+#[derive(Deserialize)]
+pub struct WwwRoot {
+    #[serde(flatten)]
+    pub mount: UseCase,
     pub header: Option<HashMap<String, String>>,
     pub auth: Option<Authenticatoin>,
 }
@@ -51,6 +71,7 @@ pub struct VHost {
     #[serde(flatten)]
     root: Option<WwwRoot>, //only in toml -> will be added to paths
     #[serde(flatten)]
+    #[serde(deserialize_with = "ignore_all_but_wwwroot")]
     pub paths: BTreeMap<PathBuf, WwwRoot>,
 }
 
@@ -144,10 +165,24 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
             vhost.paths.insert(PathBuf::new(), r);
         }
         for (k, v) in vhost.paths.iter() {
-            if !v.dir.is_dir() {
-                errors.add(format!("{:?} (in \"{}/{}\") ist not a directory", v.dir, host_name, k.to_string_lossy()));
+            match &v.mount {
+                #[cfg(feature = "fcgi")]
+                UseCase::FCGI { static_files, .. } => {
+                    if let Some(sf) = static_files {
+                        if !sf.dir.is_dir() {
+                            errors.add(format!("{:?} (in \"{}/{}\") ist not a directory", sf.dir, host_name, k.to_string_lossy()));
+                        }
+                        info!("\t {:?} => {:?}", k, sf.dir );
+                    }
+                },
+                UseCase::StaticFiles(sf) => {
+                    if !sf.dir.is_dir() {
+                        errors.add(format!("{:?} (in \"{}/{}\") ist not a directory", sf.dir, host_name, k.to_string_lossy()));
+                    }
+                    info!("\t {:?} => {:?}", k, sf.dir );
+                },
+                _ => {}
             }
-            info!("\t {:?} => {:?}", k, v.dir );
         }
         if vhost.paths.len()==0 {
             errors.add(format!("vHost \"{}\" does not serve anything", host_name));
@@ -200,8 +235,8 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
         for (mount, wwwroot) in params.paths.iter_mut() {
             //setup FCGI Apps
             #[cfg(feature = "fcgi")]
-            if let Some(fcgi_cfg) = wwwroot.fcgi.as_mut() {
-                if let Err(e) = setup_fcgi(fcgi_cfg).await {
+            if let UseCase::FCGI{ref mut fcgi, ref static_files} = wwwroot.mount {
+                if let Err(e) = setup_fcgi(fcgi, static_files).await {
                     errors.add(format!("FCGIApp @\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
                 }
             }
@@ -268,6 +303,41 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
     }
 }
 
+fn ignore_all_but_wwwroot<'de, D>(deserializer: D) -> Result<BTreeMap<PathBuf, WwwRoot>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StringOrStruct();
+
+    impl<'de> Visitor<'de> for StringOrStruct
+    {
+        type Value = BTreeMap<PathBuf, WwwRoot>;
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("string or map")
+        }
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut mounts = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                match map.next_value() {
+                    Ok(r) => {
+                        mounts.insert(PathBuf::from(&key),r);
+                    },
+                    Err(e) => {
+                        if !e.to_string().starts_with("invalid type") {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            Ok(mounts)
+        }
+    }
+    deserializer.deserialize_any(StringOrStruct())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,18 +389,28 @@ mod tests {
     [host]
     ip = "0.0.0.0:1338"
     [host."/"]
-    dir = ""
+    dir = "."
     header = {test = "bad\u0000header"}
     "#).expect("parse err");
         assert!(group_config(&mut cfg).await.is_err());
+
         let mut cfg: Configuration = toml::from_str(r#"
     [host]
     ip = "0.0.0.0:1339"
     [host."/"]
-    dir = ""
+    dir = "."
     header = {"test\n" = "1"}
     "#).expect("parse err");
         assert!(group_config(&mut cfg).await.is_err());
+
+        let mut cfg: Configuration = toml::from_str(r#"
+    [host]
+    ip = "0.0.0.0:1339"
+    [host."/"]
+    dir = "."
+    header = {"X-ok" = "1"}
+    "#).expect("parse err");
+        assert!(group_config(&mut cfg).await.is_ok());
     }
 
     #[tokio::test]

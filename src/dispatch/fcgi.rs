@@ -17,7 +17,7 @@ pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
 
 
-pub async fn fcgi_call(fcgi_cfg: &FCGIApp, req: Request<Body>, full_path: &PathBuf, remote_addr: SocketAddr)
+pub async fn fcgi_call(fcgi_cfg: &FCGIApp, req: Request<Body>, full_path: &Path, remote_addr: SocketAddr)
             -> Result<Response<Body>, IoError> {
     if let Some(app) = &fcgi_cfg.app {
 
@@ -75,7 +75,16 @@ fn path_to_bytes<P: AsRef<Path>>(path: P) -> Bytes {
     BytesMut::from(path.as_ref().to_string_lossy().to_string().as_bytes()).freeze()
 }
 
-pub async fn setup_fcgi(fcgi_cfg: &mut FCGIApp) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn setup_fcgi(fcgi_cfg: &mut FCGIApp, staticf: &Option<crate::config::StaticFiles>) -> Result<(), Box<dyn std::error::Error>> {
+
+    if fcgi_cfg.exec.is_some() && staticf.is_none() {
+        //need a dir to check files
+        return Err(Box::new(IoError::new(ErrorKind::Other,"dir must be specified, if exec filter is used")));
+    }
+    if fcgi_cfg.exec.is_none() && staticf.is_some() {
+        //warn that dir will not be used
+        return Err(Box::new(IoError::new(ErrorKind::Other,"reqests will always go to FCGI app. File checks will not be used - remove them")));
+    }
 
     let sock: FCGIAddr = (&fcgi_cfg.sock).into();
 
