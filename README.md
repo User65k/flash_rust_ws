@@ -65,6 +65,9 @@ fcgi.sock = "/tmp/py.sock" # Unix Socket
 fcgi.sock = "/var/run/php/php7.4-fpm.sock"
 fcgi.script_filename = true
 
+["example.com".ws] # /ws is a websocket...
+assock = "127.0.0.1:1337" # that connects to a TCP socket
+forward_header = true # and forwards the HTTP header from the request
 ```
 Place the config file in one of these places:
 
@@ -89,9 +92,9 @@ Place the config file in one of these places:
 - [x] HTTP2
 - [ ] WebDAV
 - [ ] Reverse-Proxy
-- [ ] Websocket
+- [x] Websocket
   - [ ] Reverse-Proxy
-  - [ ] to normal Socket (SCGI Style)
+  - [x] to normal Socket (SCGI Style)
 - [x] Customizable Logging
   - [ ] to journald
   - [ ] to Windows Event Log?
