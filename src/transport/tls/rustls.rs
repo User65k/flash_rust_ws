@@ -1,19 +1,31 @@
-pub use tokio_rustls::{server::TlsStream as UnderlyingTLSStream, Accept as UnderlyingAccept};
-pub use tokio_rustls::rustls::ServerConfig as TLSConfig;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::{Certificate, PrivateKey, NoClientAuth, SignatureScheme};
-use tokio_rustls::rustls::internal::pemfile;
-use tokio_rustls::rustls::{SupportedCipherSuite, ALL_CIPHERSUITES, ProtocolVersion};
-use tokio_rustls::rustls::{ClientHello, ResolvesServerCert};
-use tokio_rustls::rustls::sign::{CertifiedKey, RSASigningKey, any_ecdsa_type, any_eddsa_type};
-use rustls_acme::{acme::ACME_TLS_ALPN_NAME, ResolvesServerCertUsingAcme};
+pub use tokio_rustls::{
+    server::TlsStream as UnderlyingTLSStream,
+    Accept as UnderlyingAccept,
+    rustls::ServerConfig as TLSConfig
+};
+use tokio_rustls::TlsAcceptor as RustlsAcceptor;
+use tokio_rustls::rustls::{
+    Certificate, PrivateKey, NoClientAuth, SignatureScheme,
+    internal::pemfile,
+    SupportedCipherSuite, ALL_CIPHERSUITES, ProtocolVersion,
+    ClientHello, ResolvesServerCert,
+    sign::{CertifiedKey, RSASigningKey, any_ecdsa_type, any_eddsa_type}
+};
+use super::PlainIncoming;
+
+use rustls_acme::acme::{ACME_TLS_ALPN_NAME, AcmeError};
+use std::sync::RwLock;
+use std::sync::Weak;
+use tokio::time::sleep;
+use super::rustls_acme_api::{order, duration_until_renewal_attempt};
 
 use std::vec::Vec;
 use std::sync::Arc;
 use std::{fs, io};
 use serde::Deserialize;
 use std::path::PathBuf;
-use log::{debug, trace};
+use log::{debug, trace, info, error};
+use std::collections::HashMap;
 
 use super::{PlainStream, TLSBuilderTrait};
 
@@ -29,6 +41,15 @@ pub struct TlsUserConfig {
     pub host: Vec<KeySet>,
     pub ciphersuites: Option<Vec<String>>,
     pub versions: Option<Vec<String>>,
+    pub acme: Option<ACME>,
+}
+#[derive(Debug)]
+#[derive(Deserialize)]
+pub struct ACME {
+    pub uri: String,
+    pub contact: Vec<String>, //email?
+    pub cache_dir: Option<PathBuf>,
+    pub dns_names: Option<Vec<String>>,
 }
 
 pub struct ParsedTLSConfig {
@@ -36,16 +57,17 @@ pub struct ParsedTLSConfig {
     certres: ResolveServerCert,
     own_cipher: bool,
     own_vers: bool,
+    acmes: Vec<AcmeTaskRunner>
 }
 
 impl TLSBuilderTrait for ParsedTLSConfig {
-    fn get_accept_feature(config: Arc<TLSConfig>, stream: PlainStream) -> UnderlyingAccept<PlainStream> {
-        TlsAcceptor::from(config).accept(stream)
+    fn get_accept_feature(accept: &super::TlsAcceptor, stream: PlainStream) -> UnderlyingAccept<PlainStream> {
+        RustlsAcceptor::from(accept.config.clone()).accept(stream)
     }
 
     fn new(config: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut cfg = TLSConfig::new(NoClientAuth::new());
-        cfg.set_protocols(&[b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()]);
+        cfg.set_protocols(&[b"h2".to_vec(), b"http/1.1".to_vec(), ACME_TLS_ALPN_NAME.to_vec()]);
 
         let mut own_cipher = false;
         let mut own_vers = false;
@@ -59,11 +81,18 @@ impl TLSBuilderTrait for ParsedTLSConfig {
         }
         let mut certres = ResolveServerCert::new();
         certres.add(sni, &config.host)?;
+
+        let mut acmes = Vec::new();
+        if let Some(acme) = &config.acme {
+            Self::prep_acme(&mut acmes, acme, sni)?;
+        }
+
         Ok(ParsedTLSConfig {
             cfg,
             certres,
             own_cipher,
             own_vers,
+            acmes
         })
     }
     fn add(&mut self, config: &TlsUserConfig, sni: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -92,12 +121,64 @@ impl TLSBuilderTrait for ParsedTLSConfig {
 
         self.certres.add(sni, &config.host)?;
 
+        if let Some(acme) = &config.acme {
+            Self::prep_acme(&mut self.acmes, acme, sni)?;
+        }
+
         Ok(())
     }
-    fn get_config(mut self) -> TLSConfig {
-        self.cfg.cert_resolver = Arc::new(self.certres);
-        self.cfg
+    fn get_acceptor(self, incoming: PlainIncoming) -> super::TlsAcceptor {
+        let certres = Arc::new(self.certres);
+        for acme in self.acmes {
+            acme.start(&certres);
+        }
+        let mut config = self.cfg;
+        config.cert_resolver = certres;
+        super::TlsAcceptor::new(config, incoming)
     }
+}
+impl ParsedTLSConfig {
+    fn prep_acme(acmes: &mut Vec<AcmeTaskRunner>,acme: &ACME, sni: Option<&str>) -> Result<(), io::Error>{
+        let dns_names = match &acme.dns_names
+        {
+            Some(a) => a.clone(),
+            None => match sni {
+                Some(s) => vec![s.to_string()],
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "ACME needs either an enforced vHost or dns_names specified"
+                    ));
+                }
+            }
+        };
+        let has_name = sni.map(|s|s.to_string());
+        acmes.push(AcmeTaskRunner {
+            uri: acme.uri.clone(),
+            contact: acme.contact.clone(),
+            cache_dir: acme.cache_dir.clone(),
+            dns_names,
+            certres: Weak::new(),
+            has_name
+        });
+        Ok(())
+    }
+}
+
+struct AcmeTaskRunner {
+    /// resolver to update with a new cert
+    certres: Weak<ResolveServerCert>,
+    /// what to update
+    has_name: Option<String>,
+    /// acme register to use
+    uri: String,
+    /// for acme request
+    contact: Vec<String>,
+    /// to store acme auth (and certs)
+    cache_dir: Option<PathBuf>,
+    /// dns to proof
+    /// all but has_name will end up with the default server name
+    dns_names: Vec<String>,
 }
 
 struct CertKeys {
@@ -107,38 +188,37 @@ struct CertKeys {
 }
 
 pub struct ResolveServerCert {
-    by_name: std::collections::HashMap<String, CertKeys>,
-    default: Option<CertKeys>
+    /// certs by sni
+    by_name: RwLock<HashMap<String, CertKeys>>,
+    /// cert that is used by all other sni
+    default: RwLock<Option<CertKeys>>,
+    /// temp for acme challange
+    acme_keys: RwLock<HashMap<String, CertifiedKey>>,
 }
 
 impl ResolveServerCert {
     /// Create a new and empty (ie, knows no certificates) resolver.
     pub fn new() -> ResolveServerCert {
-        ResolveServerCert { by_name: std::collections::HashMap::new(), default: None }
+        ResolveServerCert {
+            by_name: RwLock::new(HashMap::new()),
+            default: RwLock::new(None),
+            acme_keys: RwLock::new(HashMap::new())
+        }
     }
 
-    /// Add a new `CertifiedKey` to be used for the given SNI `name`.
+    /// Add a new `KeySet` (One Certificate with Key for each Keytype) to be used for the given `sni`.
     ///
-    /// This function fails if `name` is not a valid DNS name, or if
-    /// it's not valid for the supplied certificate, or if the certificate
-    /// chain is syntactically faulty.
+    /// This function fails if the certificate chain is syntactically faulty
+    /// or if `sni` is given but not a valid DNS name, or if
+    /// it's not valid for the supplied certificate.
     pub fn add(&mut self, sni: Option<&str>,
                 keyset: &Vec<KeySet>) -> Result<(), tokio_rustls::rustls::TLSError> {
-        
-        let ident = if let Some(name) = sni {
-            self.by_name.insert(name.into(), CertKeys{rsa:None,ec:None, ed:None});
-            self.by_name.get_mut(name.into()).unwrap()
-        }else{
-            if self.default.is_some() {
-                return Err( tokio_rustls::rustls::TLSError::General("More than one default Cert/Key".into()) );
-            }
-            self.default = Some(CertKeys{rsa:None,ec:None, ed:None});
-            self.default.as_mut().unwrap()
-        };
+
+        let mut ident = CertKeys{rsa:None,ec:None, ed:None};
         for set in keyset {
             let k = load_private_key(&set.key_file).map_err(|_| tokio_rustls::rustls::TLSError::General("Bad Key file".into()))?;
             let chain = load_certs(&set.cert_file).map_err(|_| tokio_rustls::rustls::TLSError::General("Bad Cert file".into()))?;
-            
+
             if let Ok(rsa) = RSASigningKey::new(&k) {
                 if ident.rsa.is_some() {
                     return Err(tokio_rustls::rustls::TLSError::General("More than one RSA key".into()));
@@ -150,7 +230,7 @@ impl ResolveServerCert {
             }else if let Ok(key) = any_ecdsa_type(&k) {
                 if ident.ec.is_some() {
                     return Err(tokio_rustls::rustls::TLSError::General("More than one EC key".into()));
-                }                
+                }
                 let ck = CertifiedKey::new(chain, Arc::new(key));
                 debug!("added EC Cert");
                 ident.ec = Some(ck);
@@ -179,33 +259,119 @@ impl ResolveServerCert {
                 ck.cross_check_end_entity_cert(Some(checked_name))?;
             }
         }
+        if let Some(name) = sni {
+            let mut name_map = self.by_name.write().unwrap();
+            name_map.insert(name.into(), ident);
+        }else{
+            let mut default = self.default.write().unwrap();
+            if default.is_some() {
+                return Err( tokio_rustls::rustls::TLSError::General("More than one default Cert/Key".into()) );
+            }
+            *default = Some(ident);
+        }
         Ok(())
     }
 }
 
-/*
-    let resolver = ResolvesServerCertUsingAcme::new();
-    let config = ServerConfig::new(NoClientAuth::new());
-    let acceptor = TlsAcceptor::new(config, resolver.clone());
+/// ACME
+impl AcmeTaskRunner {
+    pub fn start(self, certres: &Arc<ResolveServerCert>) {
+        let mut task = self;
+        task.certres  = Arc::downgrade(certres);
+        tokio::spawn(async move {
+            task.acme_watcher().await;
+        });
+    }
 
-    let directory_url = directory_url.as_ref().to_string();
-    let cache_dir = cache_dir.map(|p| p.as_ref().to_path_buf());
-    spawn(async move {
-        resolver.run(directory_url, domains, cache_dir).await;
-    });
-*/
+    async fn acme_watcher(&self) {
+        let mut err_cnt = 0usize;
+        loop {
+            let d = match self.certres.upgrade() {
+                None => {
+                    //ResolveServerCert is gone (and so is the TlsAcceptor)
+                    break;
+                }
+                Some(resolver) => {
+                    //check how long the current cert is still valid
+                    let maybe = if let Some(k) = &self.has_name {
+                        let by_name = resolver.by_name.read().unwrap();
+                        by_name.get(k).map(|key| duration_until_renewal_attempt(key.ec.as_ref(), err_cnt))
+                    }else{
+                        let default = resolver.default.read().unwrap();
+                        default.as_ref().map(|key| duration_until_renewal_attempt(key.ec.as_ref(), err_cnt))
+                    };
+                    maybe.unwrap_or_else(||duration_until_renewal_attempt(None, err_cnt))
+                }
+            };
+            if d.as_secs() != 0 {
+                info!("next renewal attempt in {}s", d.as_secs());
+                sleep(d).await;
+            }
+            match order(
+                |k,v|self.set_auth_key(k,v),
+                &self.uri,
+                &self.dns_names,
+                self.cache_dir.as_ref(),
+                &self.contact).await {
+                Err(e) => {
+                    error!("ACME {}", e);
+                    err_cnt += 1;
+                },
+                Ok(cert_key) => {
+                    //let pk_pem = cert.serialize_private_key_pem();
+                    //Self::save_certified_key(cache_dir, file_name, pk_pem, acme_cert_pem).await;
+
+                    match self.certres.upgrade() {
+                        None => {
+                            //ResolveServerCert is gone (and so is the TlsAcceptor)
+                            break;
+                        }
+                        Some(resolver) => {
+                            let v = CertKeys{
+                                rsa: None,
+                                ec: Some(cert_key),
+                                ed: None
+                            };
+                            if let Some(k) = &self.has_name {
+                                resolver.by_name.write().unwrap().insert(k.to_owned(), v);
+                            }else{
+                                resolver.default.write().unwrap().replace(v);
+                            }
+                        }
+                    }
+                    err_cnt = 0;
+                }
+            }
+        }
+    }
+    fn set_auth_key(&self, key: String, cert: CertifiedKey) -> Result<(),AcmeError> {
+        match self.certres.upgrade() {
+            Some(resolver) => {
+                resolver.acme_keys.write().unwrap().insert(key, cert);
+                Ok(())
+            },
+            None => Err(std::io::Error::new(io::ErrorKind::BrokenPipe,"TLS shut down").into())
+        }
+    }
+}
 
 impl ResolvesServerCert for ResolveServerCert {
     fn resolve(&self, client_hello: ClientHello) -> Option<CertifiedKey> {
         //client_hello.alpn() -> Option<&'a [&'a [u8]]>
-        client_hello.alpn().and_then(|a|{
-            for alp in a {
-                if alp==ACME_TLS_ALPN_NAME {
-                    return Some(())
+        if client_hello.alpn() == Some(&[ACME_TLS_ALPN_NAME]) {
+            //return a not yet signed cert
+            return match client_hello.server_name() {
+                None => {
+                    debug!("client did not supply SNI");
+                    None
+                }
+                Some(domain) => {
+                    let domain = domain.to_owned();
+                    let domain: String = AsRef::<str>::as_ref(&domain).to_string();
+                    self.acme_keys.read().unwrap().get(&domain).cloned()
                 }
             }
-            None
-        });
+        };
         let mut ed = false;
         let mut ec = false;
         let mut rsa = false;
@@ -241,8 +407,10 @@ impl ResolvesServerCert for ResolveServerCert {
         }
         trace!("ec: {}, ed: {}, rsa: {} - {:?}", ec, ed, rsa, client_hello.sigschemes());
 
-        let ks = client_hello.server_name().and_then(|name|self.by_name.get(name.into()))
-                                    .or(self.default.as_ref());
+        let by_name = self.by_name.read().unwrap();
+        let default = self.default.read().unwrap();
+        let ks = client_hello.server_name().and_then(|name| by_name.get(name.into()))
+                                    .or(default.as_ref());
 
         //this kinda impacts the chiper order - maybe coordinate with sess.config.ignore_client_order?
         if let Some(ks) = ks {
@@ -335,6 +503,7 @@ fn todo(){
         host: vec![ks],
         ciphersuites: None,
         versions: None,
+        acme: None,
     };
     let p = ParsedTLSConfig::new(&u1, None);
 }

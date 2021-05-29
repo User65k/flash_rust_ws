@@ -73,11 +73,13 @@ impl PlainIncoming {
     }
 
     /// Get the local address bound to this listener.
+    #[allow(dead_code)]
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
     }
 
     /// Set the value of `TCP_NODELAY` option for accepted connections.
+    #[allow(dead_code)]
     pub fn set_nodelay(&mut self, enabled: bool) -> &mut Self {
         self.tcp_nodelay = enabled;
         self
@@ -98,6 +100,7 @@ impl PlainIncoming {
     /// this option to `false` will allow that.
     ///
     /// Default is `true`.
+    #[allow(dead_code)]
     pub fn set_sleep_on_errors(&mut self, val: bool) {
         self.sleep_on_errors = val;
     }
@@ -218,6 +221,7 @@ impl PlainStream {
 
     /// Consumes the PlainStream and returns the underlying IO object
     #[inline]
+    #[allow(dead_code)]
     pub fn into_inner(self) -> TcpStream {
         self.inner
     }
@@ -225,6 +229,7 @@ impl PlainStream {
     /// Attempt to receive data on the socket, without removing that data
     /// from the queue, registering the current task for wakeup if data is
     /// not yet available.
+    #[allow(dead_code)]
     pub fn poll_peek(
         &mut self,
         cx: &mut Context<'_>,
