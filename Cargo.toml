@@ -35,7 +35,12 @@ async-fcgi = {version = "0.3", features = ["app_start"], optional = true}
 #hyper-reverse-proxy = "0.4"
 #https:
 tokio-rustls = { version = "0.22.0", optional = true }
-rustls-acme = { version = "0.1.4", optional = true }
+rustls-acme = { version = "0.1.6", optional = true }
+rcgen = { version = "0.8", default-features = false, optional = true}
+thiserror = { version = "1.0", optional = true}
+async-std = { version = "1.8", optional = true}
+chrono = { version = "0.4", optional = true}
+x509-parser = { version = "0.9", default-features = false, optional = true}
 #acme-client         # auto hyper_native_tls
 
 #async_compression  # in no BREACH / TIME cases?
@@ -59,7 +64,7 @@ libsystemd = "0.3"
 
 [features]
 default = ["tlsrust", "fcgi", "webdav"]
-tlsrust = ["tokio-rustls", "rustls-acme"]
+tlsrust = ["tokio-rustls", "rustls-acme", "rcgen", "thiserror","async-std","chrono", "x509-parser"]
 logrot = ["log4rs/background_rotation"]
 fcgi = ["async-fcgi"]
 websocket = ["websocket-codec", "tokio-util", "futures-util/sink"]

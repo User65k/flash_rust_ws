@@ -28,7 +28,7 @@ mod auth;
 
 use transport::{PlainIncoming, PlainStream};
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-use crate::transport::tls::{TlsAcceptor, TlsStream, TLSBuilderTrait};
+use crate::transport::tls::{TlsStream, TLSBuilderTrait};
 
 /// Set up each `SocketAddr` and return the `JoinHandle`s
 ///
@@ -60,7 +60,7 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
                 
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if let Some(tls_cfg) = use_tls {
-                    let a = TlsAcceptor::new(tls_cfg.get_config(), incoming);
+                    let a = tls_cfg.get_acceptor(incoming);
                     let new_service = make_service_fn(move |socket: &TlsStream| {
                         let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
