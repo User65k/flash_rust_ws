@@ -1,6 +1,8 @@
 mod staticf;
 #[cfg(feature = "fcgi")]
 pub mod fcgi;
+#[cfg(feature = "websocket")]
+pub mod websocket;
 
 use hyper::{Body, Request, Response, header, StatusCode, Version, http::Error as HTTPError}; //, Method};
 use std::io::{Error as IoError, ErrorKind};
@@ -81,7 +83,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 /// - returning a static file
 async fn handle_wwwroot(req: Request<Body>,
     wwwr: &config::WwwRoot,
-    full_path: &PathBuf,
+    req_path: &Path,
     remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
 
     debug!("working root {:?}", wwwr);
@@ -94,21 +96,34 @@ async fn handle_wwwroot(req: Request<Body>,
     }
 
     //hyper_reverse_proxy::call(remote_addr.ip(), "http://127.0.0.1:13901", req)
-    
-    let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
 
-    #[cfg(feature = "fcgi")]
-    if let Some(fcgi_cfg) = &wwwr.fcgi {
-        if fcgi_cfg.exec.is_none() {
-            //FCGI + dont check for file -> always FCGI
-            return fcgi::fcgi_call(&fcgi_cfg, req, full_path, remote_addr).await;
+    let sf = match &wwwr.mount {
+        config::UseCase::StaticFiles(sf) => sf,
+        #[cfg(feature = "fcgi")]
+        config::UseCase::FCGI { fcgi, static_files} => {
+            if fcgi.exec.is_none() {
+                //FCGI + dont check for file -> always FCGI
+                return fcgi::fcgi_call(&fcgi, req, req_path, remote_addr).await;
+            }
+            match static_files {
+                Some(sf) => sf,
+                None => return Err(IoError::new(ErrorKind::PermissionDenied,"no dir to serve"))
+            }
+        },
+        #[cfg(feature = "websocket")]
+        config::UseCase::Websocket(ws) => {
+            return websocket::upgrade(req, ws, req_path, remote_addr).await;
         }
-    }
+    };
 
-    let (full_path, resolved_file) = staticf::resolve_path(full_path,
+    let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
+    let full_path = sf.dir.join(req_path);
+    trace!("full_path {:?}", full_path.canonicalize());
+
+    let (full_path, resolved_file) = staticf::resolve_path(&full_path,
                                                     is_dir_request,
-                                                    &wwwr.index,
-                                                    wwwr.follow_symlinks).await?;
+                                                    &sf.index,
+                                                    sf.follow_symlinks).await?;
 
     if let ResolveResult::IsDirectory = resolved_file {
         //request for a file that is a directory
@@ -119,14 +134,14 @@ async fn handle_wwwroot(req: Request<Body>,
     }
 
     #[cfg(feature = "fcgi")]
-    if let Some(fcgi_cfg) = &wwwr.fcgi {
+    if let config::UseCase::FCGI{fcgi, ..} = &wwwr.mount {
         //FCGI + check for file
-        if ext_in_list(&fcgi_cfg.exec, &full_path) {
-            return fcgi::fcgi_call(&fcgi_cfg, req, &full_path, remote_addr).await;
+        if ext_in_list(&fcgi.exec, &full_path) {
+            return fcgi::fcgi_call(&fcgi, req, &full_path, remote_addr).await;
         }
     }
 
-    if ext_in_list(&wwwr.serve, &full_path) {
+    if ext_in_list(&sf.serve, &full_path) {
         staticf::return_file(&req, resolved_file).await
     }else{
         Err(IoError::new(ErrorKind::PermissionDenied,"bad file extension"))
@@ -134,29 +149,9 @@ async fn handle_wwwroot(req: Request<Body>,
 
 }
 
-/// get the full path of a requested resource
-/// or return an error if the request_path is not part of this wwwroot
-/// Note: /a is not part of /aa (but of /a/a and /a)
-fn get_full_path(
-    wwwr: &config::WwwRoot,
-    req_path: &Path,
-    mount_path: &Path) -> Result<PathBuf, ()> {
-
-    match req_path.strip_prefix(mount_path) {
-        Ok(req_path) => {
-            let full_path = wwwr.dir.join(req_path);
-            trace!("full_path {:?}", full_path.canonicalize());
-            Ok(full_path)
-        },
-        Err(_e) => {
-            Err(())
-        }
-    }
-
-}
-
 /// new request on a particular vHost.
 /// picks the matching WwwRoot and calls `handle_wwwroot`
+/// Note: /a is not part of /aa (but of /a/a and /a)
 async fn handle_vhost(req: Request<Body>, cfg: &config::VHost, remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
     let request_path = PathBuf::from(decode_percents(&req.uri().path()));
 
@@ -167,8 +162,8 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost, remote_addr: Sock
     //BTreeMap is sorted from small to big
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
-        if let Ok(full_path) = get_full_path(&wwwr, &req_path, &mount_path) {
-            let mut resp = handle_wwwroot(req, &wwwr, &full_path, remote_addr).await?;
+        if let Ok(full_path) = req_path.strip_prefix(mount_path) {
+            let mut resp = handle_wwwroot(req, &wwwr, full_path, remote_addr).await?;
             insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
             return Ok(resp);
         }
@@ -181,12 +176,15 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost, remote_addr: Sock
 mod mount_tests {
     use super::*;
     fn create_wwwroot(dir: &str) -> config::WwwRoot {
-        config::WwwRoot {
+        let sf = config::StaticFiles{
             dir: PathBuf::from(dir),
             follow_symlinks: false,
             index: None,
             serve: None,
-            fcgi: None,
+
+        };
+        config::WwwRoot {
+            mount: config::UseCase::StaticFiles(sf),
             header: None,
             auth: None,
         }
@@ -250,18 +248,6 @@ mod mount_tests {
         cfg.paths.insert(PathBuf::from("a"), create_wwwroot("."));
         let res = handle_vhost(req, &cfg, sa).await;
         let _res = res.unwrap_err();
-    }
-    #[test]
-    fn abs_path() {
-        let wwwr = create_wwwroot("test");
-        // 1. /a is not part of /aa
-        let req = PathBuf::from("aa");
-        let mount = PathBuf::from("a");
-        get_full_path(&wwwr,&req,&mount).unwrap_err();
-        // 2. /a is part of /a/a
-        let req = PathBuf::from("a/a");
-        let mount = PathBuf::from("a");
-        assert_eq!(get_full_path(&wwwr,&req,&mount).unwrap(),PathBuf::from("test/a"));
     }
     #[test]
     fn normalize() {
