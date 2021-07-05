@@ -28,6 +28,7 @@ pub enum Authenticatoin {
 
 #[derive(Debug)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StaticFiles {
     pub dir: PathBuf,
     #[serde(default)]
@@ -326,6 +327,7 @@ where
                         mounts.insert(PathBuf::from(&key),r);
                     },
                     Err(e) => {
+                        log::warn!("Not so sure about config: {}",e);
                         if !e.to_string().starts_with("invalid type") {
                             return Err(e);
                         }
