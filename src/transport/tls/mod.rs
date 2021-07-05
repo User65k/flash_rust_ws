@@ -20,9 +20,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 
 #[cfg(feature = "tlsrust")]
-use rustls_acme::acme::ACME_TLS_ALPN_NAME;
-#[cfg(feature = "tlsrust")]
-mod rustls_acme_api;
+use async_acme::acme::ACME_TLS_ALPN_NAME;
 
 #[cfg(all(feature = "tlsrust", feature = "tlsnative"))]
 compile_error!("feature \"tlsrust\" and feature \"tlsnative\" cannot be enabled at the same time");
@@ -74,6 +72,7 @@ impl AsyncRead for TlsStream {
         match pin.state {
             State::Handshaking(ref mut accept) => match ready!(Pin::new(accept).poll(cx)) {
                 Ok(mut stream) => {
+                    #[cfg(feature = "tlsrust")]
                     if stream.get_ref().1.get_alpn_protocol() == Some(ACME_TLS_ALPN_NAME) {
                         log::debug!("completed acme-tls/1 handshake");
                         return Pin::new(&mut stream).poll_shutdown(cx);
