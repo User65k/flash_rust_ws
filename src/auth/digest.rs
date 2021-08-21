@@ -25,8 +25,13 @@ lazy_static! {
     };
 }
 
-fn create_resp_needs_auth(realm: &String) -> Response<Body> {
-    let p = format!("Digest realm=\"{}\",nonce=\"{}\",qop=\"auth\"", realm, create_nonce());
+fn create_resp_needs_auth(realm: &String, stale: bool) -> Response<Body> {
+    let str_stale = if stale {
+        "stale=true,"
+    }else{
+        ""
+    };
+    let p = format!("Digest realm=\"{}\",nonce=\"{}\",{}qop=\"auth\"", realm, create_nonce(), str_stale);
 
     let b = Response::builder()
         .status(StatusCode::UNAUTHORIZED)
@@ -75,6 +80,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool,()> {
                 let h = format!("{:x}", h.compute());
                 if h[..26] == n[8..34] {
                     return Ok(dur < 300) // from the last 5min
+                    //Authentication-Info ?
                 }
             }
         }
@@ -86,7 +92,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
     match req.headers().get(header::AUTHORIZATION)
           .and_then(|h| strip_prefix(h.as_bytes(), b"Digest ")) {
         None => {
-            Ok(Some(create_resp_needs_auth(realm)))
+            Ok(Some(create_resp_needs_auth(realm, false)))
         },
         Some(header) => {
             if let Ok(user_vals) = get_map_from_header(header) {
@@ -111,7 +117,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                     #[cfg(not(test))]
                     match validate_nonce(nonce) {
                         Ok(true) => {}, // good
-                        Ok(false) => return Ok(Some(create_resp_needs_auth(realm))), // old
+                        Ok(false) => return Ok(Some(create_resp_needs_auth(realm, true))), // old
                         Err(()) => return Err(IoError::new(ErrorKind::PermissionDenied,"Invalid Nonce")), // strange
                     }
 
@@ -204,7 +210,7 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                     }else{
                         info!("user {} auth failed {}!={:?}", username, correct_response, Bytes::copy_from_slice(*user_response));
                         // wrong PW
-                        Ok(Some(create_resp_needs_auth(realm)))
+                        Ok(Some(create_resp_needs_auth(realm, false)))
                     };
                 }
             }

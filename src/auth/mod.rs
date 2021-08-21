@@ -45,24 +45,24 @@ fn get_map_from_header(header: &[u8]) -> Result<HashMap<&[u8], &[u8]>,()> {
 
     i = 0;
     let mut ret = HashMap::new();
-    for (k, a) in sep.iter().zip(asign.iter()) {
+    for (&k, &a) in sep.iter().zip(asign.iter()) {
         while header[i] == b' ' {
             i += 1;
         }
-        if *a <= i || *k <= 1+*a {
+        if a <= i || k <= 1+a {
             //keys and vals must contain one char
             return Err(());
         }
-        let key = &header[i..*a];
+        let key = &header[i..a];
         let val = 
-        if header[1+*a] == b'"' && header[*k-1] == b'"' {
+        if header[1+a] == b'"' && header[k-1] == b'"' {
             //escaped
-            &header[2+*a..*k-1]
+            &header[2+a..k-1]
         }else{
             //not escaped
-            &header[1+*a..*k]
+            &header[1+a..k]
         };
-        i = 1+*k;
+        i = 1+k;
         ret.insert(key, val);
     }
     Ok(ret)
