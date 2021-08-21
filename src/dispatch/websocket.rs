@@ -25,11 +25,11 @@ pub async fn upgrade(req: Request<Body>,
     //update the request
     let mut res = Response::new(Body::empty());
 
-    let wscfg = match ws {
+    let wscfg = match ws {/*
         Websocket::Proxy { forward } => {
             *res.status_mut() = StatusCode::NOT_IMPLEMENTED;
             return Ok(res);
-        },
+        },*/
         Websocket::Unwraped(wscfg) => wscfg
     };
 
@@ -129,7 +129,7 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
                                 /*match &wscfg.encoding {
                                     None => {*/
                                         error!("websocket without encoding got text");break
-                                    /* },
+                                   /* },
                                     Some(enc) => {
                                         //TODO encode to bytes
                                     }
@@ -185,15 +185,18 @@ pub enum WSSock {
 #[derive(Debug)]
 #[derive(Deserialize)]
 #[serde(untagged)]
+#[serde(deny_unknown_fields)]
 pub enum Websocket {
-    Proxy{forward: String},
+//    Proxy{forward: String},
     Unwraped(UnwrapedWS),
 }
 
 #[derive(Debug)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnwrapedWS {
     assock: WSSock,
-    forward_header: bool,
-    //encoding: Option<String>
+    #[serde(default)]
+    forward_header: bool, // = false
+    encoding: Option<String>
 }

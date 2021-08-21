@@ -162,6 +162,7 @@ pub enum FCGISock {
 /// Information to execute a FCGI App
 #[derive(Debug)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FCGIAppExec {
     pub path: PathBuf,
     pub wdir: Option<PathBuf>,
@@ -172,6 +173,7 @@ pub struct FCGIAppExec {
 /// A FCGI Application
 #[derive(Debug)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FCGIApp {
     pub sock: FCGISock,
     pub exec: Option<Vec<PathBuf>>,
