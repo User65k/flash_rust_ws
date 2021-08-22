@@ -373,7 +373,7 @@ mod tests {
     }
     #[test]
     fn toml_to_struct() {
-        let _cfg: Configuration = toml::from_str(r#"
+        let cfg: Result<Configuration, toml::de::Error> = toml::from_str(r#"
     pidfile = 'bar'
 
     your.ip = "[::1]:1234" # hah
@@ -383,19 +383,34 @@ mod tests {
     [host.path]
     dir = "/var/www/"
     index = ["index.html", "index.htm"]
-    "#).expect("parse err");
-        //print(&cfg);
+    "#);
+        assert!(cfg.is_ok());
     }
     #[tokio::test]
     async fn root_mount() {
-        let mut cfg: Configuration = toml::from_str(r#"
+        let cfg: Result<Configuration, toml::de::Error> = toml::from_str(r#"
     [host]
     ip = "0.0.0.0:1337"
     dir = "."
     [host.a]
     dir = ".."
+    "#);
+        assert!(cfg.is_ok());
+    }
+    #[tokio::test]
+    async fn keyword_mount() {
+        let mut cfg: Configuration = toml::from_str(r#"
+    [host]
+    ip = "0.0.0.0:1337"
+    dir = "."
+    [host."`a"]
+    dir = ".."
+    [host."``b"]
+    dir = ".."
     "#).expect("parse err");
-        assert!(group_config(&mut cfg).await.is_ok());
+        let mounts: Vec<PathBuf> = cfg.hosts.remove("host").unwrap().paths.into_keys().collect();
+        //eprintln!("{:?}", mounts);
+        assert!(mounts==[PathBuf::from(""),PathBuf::from("`b"),PathBuf::from("a")]);
     }
 
     #[tokio::test]
