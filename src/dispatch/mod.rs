@@ -3,6 +3,8 @@ mod staticf;
 pub mod fcgi;
 #[cfg(feature = "websocket")]
 pub mod websocket;
+#[cfg(feature = "webdav")]
+pub mod dav;
 
 use hyper::{Body, Request, Response, header, StatusCode, Version, http::Error as HTTPError}; //, Method};
 use std::io::{Error as IoError, ErrorKind};
@@ -84,6 +86,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 async fn handle_wwwroot(req: Request<Body>,
     wwwr: &config::WwwRoot,
     req_path: &Path,
+    web_mount: &Path,
     remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
 
     debug!("working root {:?}", wwwr);
@@ -113,6 +116,10 @@ async fn handle_wwwroot(req: Request<Body>,
         #[cfg(feature = "websocket")]
         config::UseCase::Websocket(ws) => {
             return websocket::upgrade(req, ws, req_path, remote_addr).await;
+        },
+        #[cfg(feature = "webdav")]
+        config::UseCase::Webdav(dav) => {
+            return dav::do_dav(req, req_path, dav, web_mount, remote_addr).await;
         }
     };
 
@@ -163,7 +170,7 @@ async fn handle_vhost(req: Request<Body>, cfg: &config::VHost, remote_addr: Sock
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
         if let Ok(full_path) = req_path.strip_prefix(mount_path) {
-            let mut resp = handle_wwwroot(req, &wwwr, full_path, remote_addr).await?;
+            let mut resp = handle_wwwroot(req, &wwwr, full_path, mount_path, remote_addr).await?;
             insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
             return Ok(resp);
         }
@@ -364,6 +371,16 @@ pub(crate) async fn handle_request(req: Request<Body>, cfg :Arc<config::HostCfg>
 
     dispatch_to_vhost(req, cfg, remote_addr).await.or_else(|err| {
         error!("{}", err);
+        if let Some(cause) = err.get_ref() {
+            let mut e: &dyn Error = cause;
+            loop {
+                error!("{}", e);
+                e = match e.source() {
+                    Some(e) => {error!("caused by:");e},
+                    None => break,
+                }
+            }
+        }
         match err.kind() {
             ErrorKind::NotFound => {
                 Response::builder()
