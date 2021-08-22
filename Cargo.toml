@@ -46,8 +46,11 @@ tokio-util = { version = "0.6", features=["codec"], optional = true }
 #inspirations:
 #hyperdav-server = "0.1"	# webdav + insecure
 
+anyhow = "1.0"
+
 [target.'cfg(unix)'.dependencies]
 users = "0.11.0"
+libsystemd = "0.3"
 
 [features]
 default = ["tlsrust", "fcgi"]

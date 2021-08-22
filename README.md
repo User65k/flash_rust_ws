@@ -45,10 +45,11 @@ dir = "/var/www/"
 - [ ] Reverse-Proxy
 - [x] [Websocket](https://github.com/User65k/flash_rust_ws/wiki/websocket)
 - [x] Customizable [Logging](https://github.com/User65k/flash_rust_ws/wiki/logging)
-  - [ ] to journald
+  - [x] to [journald](https://github.com/User65k/flash_rust_ws/wiki/systemd#journal)
   - [ ] to Windows Event Log?
 - [ ] Security
   - [x] [HTTP user auth](https://github.com/User65k/flash_rust_ws/wiki/authentication): Digest - (MD5 because FireFox, but better that nothing)
+  - [x] [Systemd Socket Activation](https://github.com/User65k/flash_rust_ws/wiki/systemd#socket-activation)
   - [ ] DoS protection
     - [x] Don't be affected by Sloloris
     - [ ] limit connection count ?
