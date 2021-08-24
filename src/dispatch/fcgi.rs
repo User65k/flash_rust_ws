@@ -1,6 +1,6 @@
 
 use std::{net::SocketAddr, io::{Error as IoError, ErrorKind}};
-use log::{error, trace, info};
+use log::{error, trace, info, debug, log_enabled, Level};
 use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
 use hyper::{Body, Request, Response};
@@ -54,7 +54,15 @@ pub async fn fcgi_call(fcgi_cfg: &FCGIApp, req: Request<Body>, full_path: &Path,
         trace!("to FCGI: {:?}", &params);
         match timeout(Duration::from_secs(3), app.forward(req, params)).await {
             Err(_) => Err(IoError::new(ErrorKind::TimedOut,"FCGI app did not respond")),
-            Ok(val) => Ok(val?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
+            Ok(val) => {
+                if log_enabled!(Level::Debug) {
+                    match &val {
+                        Ok(resp) => debug!("FCGI response: {:?} {:?}", resp.status(), resp.headers()),
+                        Err(err) => debug!("FCGI response: {:?}", err),
+                    }
+                }
+                Ok(val?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
+            }
         }
         //Ok(app.forward(req, params).await?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
     }else{
