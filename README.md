@@ -41,7 +41,7 @@ dir = "/var/www/"
   - [x] Cert per Keytype (EC, ED, RSA)
   - [ ] ACME-TLS
 - [x] HTTP2
-- [ ] WebDAV
+- [x] [WebDAV](https://github.com/User65k/flash_rust_ws/wiki/webdav)
 - [ ] Reverse-Proxy
 - [x] [Websocket](https://github.com/User65k/flash_rust_ws/wiki/websocket)
 - [x] Customizable [Logging](https://github.com/User65k/flash_rust_ws/wiki/logging)

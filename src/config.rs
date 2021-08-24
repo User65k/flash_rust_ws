@@ -16,6 +16,8 @@ use crate::transport::tls::{TlsUserConfig, ParsedTLSConfig, TLSBuilderTrait};
 use serde::de::{Deserializer, Visitor, MapAccess};
 #[cfg(feature = "websocket")]
 use crate::dispatch::websocket::Websocket;
+#[cfg(feature = "webdav")]
+use crate::dispatch::dav::Config as webdav;
 
 
 #[derive(Debug)]
@@ -48,6 +50,8 @@ pub enum UseCase {
     #[cfg(feature = "websocket")]
     Websocket(Websocket),
     //Proxy{host: String, path: String},
+    #[cfg(feature = "webdav")]
+    Webdav(webdav)
 }
 
 /// A single directory
@@ -176,6 +180,13 @@ pub fn load_config() -> anyhow::Result<Configuration> {
                         errors.add(format!("{:?} (in \"{}/{}\") ist not a directory", sf.dir, host_name, k.to_string_lossy()));
                     }
                     info!("\t {:?} => {:?}", k, sf.dir );
+                },
+                #[cfg(feature = "webdav")]
+                UseCase::Webdav(dav) => {
+                    if !dav.root.is_dir() {
+                        errors.add(format!("{:?} (in \"{}/{}\") ist not a directory", dav.root, host_name, k.to_string_lossy()));
+                    }
+                    info!("\t {:?} => {:?} (DAV)", k, dav.root );
                 },
                 #[allow(unreachable_patterns)]
                 _ => {}
