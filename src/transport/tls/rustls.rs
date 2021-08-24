@@ -49,7 +49,7 @@ pub struct TlsUserConfig {
 pub struct ACME {
     pub uri: String,
     pub contact: Vec<String>, //email?
-    pub cache_dir: Option<PathBuf>,
+    pub cache_dir: Option<PathBuf>, //TODO cache Certs as well
     pub dns_names: Option<Vec<String>>,
 }
 
@@ -305,7 +305,7 @@ impl AcmeTaskRunner {
                 }
             };
             if d.as_secs() != 0 {
-                info!("next renewal attempt in {}s", d.as_secs());
+                info!("ACME: next attempt for {:?} in {}s", self.dns_names, d.as_secs());
                 sleep(d).await;
             }
             match order(
@@ -319,7 +319,8 @@ impl AcmeTaskRunner {
                     err_cnt += 1;
                 },
                 Ok(cert_key) => {
-                    //let pk_pem = cert.serialize_private_key_pem();
+                    //let crt_pem = cert_key.cert.get(0).unwrap().as_slice();
+                    //let pk_pem = cert_key.serialize_private_key_pem(); //get priv key?!?!
                     //Self::save_certified_key(cache_dir, file_name, pk_pem, acme_cert_pem).await;
 
                     match self.certres.upgrade() {
