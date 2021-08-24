@@ -16,6 +16,7 @@ log4rs = { version = "1.0.0", default-features = false, features = ["all_compone
 #config:
 toml = "0.5"        # config files in toml
 serde = { version = "1.0", features = ["derive"] }
+serde-value = "0.7"
 
 #main:
 tokio = {version = "1.6.0", features = ["fs", "macros", "time", "rt", "rt-multi-thread", "net", "signal", "sync"]}

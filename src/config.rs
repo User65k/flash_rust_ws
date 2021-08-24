@@ -13,11 +13,12 @@ use hyper::header::HeaderMap;
 use log4rs::config::RawConfig as LogConfig;
 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
 use crate::transport::tls::{TlsUserConfig, ParsedTLSConfig, TLSBuilderTrait};
-use serde::de::{Deserializer, Visitor, MapAccess};
+use serde::de::{Deserializer, Visitor, MapAccess, Error as DeError};
 #[cfg(feature = "websocket")]
 use crate::dispatch::websocket::Websocket;
 #[cfg(feature = "webdav")]
 use crate::dispatch::dav::Config as webdav;
+use serde_value::Value as SerdeContent;
 
 
 #[derive(Debug)]
@@ -355,15 +356,14 @@ where
         }
         fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
         where
-            M: MapAccess<'de>,
+            M: MapAccess<'de>
         {
             let mut mounts = BTreeMap::new();
             let mut lefties = HashMap::new();
             
             while let Some(key) = map.next_key::<String>()? {
-                let content: serde::__private::de::Content = map.next_value()?;
-                let de =
-                    serde::__private::de::ContentRefDeserializer::<M::Error>::new(&content);
+                let content: SerdeContent = map.next_value()?;
+                let de = content.clone();
                 match WwwRoot::deserialize(de) {
                     Ok(r) => {
                         let k = if let Some(skey) = key.strip_prefix("`") {
@@ -379,12 +379,11 @@ where
                     }
                 }
             }
-
+            
             if !lefties.is_empty() {
-                let iter = lefties.into_iter()
-                    .map(|(k,v)|(k,serde::__private::de::ContentDeserializer::new(v)));
+                let iter = lefties.into_iter();
                 let mapde = serde::de::value::MapDeserializer::new(iter);
-                mounts.insert(PathBuf::new(), WwwRoot::deserialize(mapde)?);
+                mounts.insert(PathBuf::new(), WwwRoot::deserialize(mapde).map_err(DeError::custom)?);
             }
 
             Ok(mounts)
