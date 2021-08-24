@@ -361,9 +361,9 @@ where
             let mut lefties = HashMap::new();
             
             while let Some(key) = map.next_key::<String>()? {
-                let content: serde::private::de::Content = map.next_value()?;
+                let content: serde::__private::de::Content = map.next_value()?;
                 let de =
-                    serde::private::de::ContentRefDeserializer::<M::Error>::new(&content);
+                    serde::__private::de::ContentRefDeserializer::<M::Error>::new(&content);
                 match WwwRoot::deserialize(de) {
                     Ok(r) => {
                         let k = if let Some(skey) = key.strip_prefix("`") {
@@ -382,7 +382,7 @@ where
 
             if !lefties.is_empty() {
                 let iter = lefties.into_iter()
-                    .map(|(k,v)|(k,serde::private::de::ContentDeserializer::new(v)));
+                    .map(|(k,v)|(k,serde::__private::de::ContentDeserializer::new(v)));
                 let mapde = serde::de::value::MapDeserializer::new(iter);
                 mounts.insert(PathBuf::new(), WwwRoot::deserialize(mapde)?);
             }
