@@ -129,8 +129,26 @@ pub fn init_stderr_logging() -> Handle {
     }else{
         LevelFilter::Warn
     };
+
+    #[cfg(unix)]
+    let def_appender = {
+        let mut invoked_by_systemd = false;
+        if let Ok(level) = std::env::var("SYSTEMD_EXEC_PID") {
+            if level == std::process::id().to_string() {
+                invoked_by_systemd = true;
+            }
+        }
+        if invoked_by_systemd {
+            Appender::builder().build("stderr", Box::new(systemd::JournalAppender::new()))
+        }else{
+            create_console_logger(Target::Stderr)
+        }
+    };
+    #[cfg(not(unix))]
+    let def_appender = create_console_logger(Target::Stderr);
+
     let config = Config::builder()
-        .appender(create_console_logger(Target::Stderr))
+        .appender(def_appender)
         .logger(Logger::builder().build("flash_rust_ws", root_level))
         .logger(Logger::builder().build("hyper", root_level))
         .logger(Logger::builder().build("async_fcgi", root_level))
