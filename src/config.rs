@@ -5,7 +5,7 @@ use log::info;
 use std::path::PathBuf;
 use std::io::Read;
 use std::fs::File;
-use std::error::Error;
+use anyhow::{Result, Context};
 use std::fmt;
 #[cfg(feature = "fcgi")]
 use crate::dispatch::fcgi::{FCGIApp, setup_fcgi};
@@ -125,35 +125,36 @@ impl fmt::Display for CFGError {
         Ok(())
     }
 }
-impl Error for CFGError {
+impl std::error::Error for CFGError {
 
 }
 
 /// load and verify configuration options
-pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
+pub fn load_config() -> anyhow::Result<Configuration> {
     #[cfg(not(test))]
-    let mut path = None;
-    #[cfg(not(test))]
-    for cfg_path in ["./config.toml", "/etc/defaults/frws.toml"].iter() {
-        let p: PathBuf = cfg_path.into();
-        if p.is_file() {
-            path = Some(p);
-            break;
+    let path = {
+        let mut path = None;
+        for cfg_path in ["./config.toml", "/etc/defaults/frws.toml"].iter() {
+            let p: PathBuf = cfg_path.into();
+            if p.is_file() {
+                path = Some(p);
+                break;
+            }
         }
-    }
-    #[cfg(not(test))]
-    if path.is_none() {
-        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "No config file found!")));
-    }
+        match path {
+            Some(p) => p,
+            None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No config file found!").into())
+        }
+    };
     #[cfg(test)]
-    let path = Some("./test_cfg.toml");
+    let path = "./test_cfg.toml";
 
-    let mut f = File::open(path.unwrap())?;
+    let mut f = File::open(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
     //.metadata()?.len()
     let mut buffer = Vec::new();
 
     // read the whole file
-    f.read_to_end(&mut buffer)?;
+    f.read_to_end(&mut buffer).with_context(|| format!("Failed to read config from {:?}", path))?;
 
     let mut cfg = toml::from_slice::<Configuration>(&buffer)?;
     let mut errors = CFGError::new();
@@ -185,7 +186,7 @@ pub fn load_config() -> Result<Configuration, Box<dyn Error>> {
         }
     }
     if errors.has_errors() {
-        Err(Box::new(errors))
+        Err(errors.into())
     }else{
         Ok(cfg)
     }
@@ -223,9 +224,11 @@ impl fmt::Debug for HostCfg {
 /// - binds on the `SocketAddr`s,
 /// - executes and connects to FCGI servers
 /// - setup TLS config
-pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr, HostCfg>, Box<dyn Error>> {
+pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<SocketAddr, HostCfg>> {
     let mut listening_ifs = HashMap::new();
     let mut errors = CFGError::new();
+    #[cfg(unix)]
+    let mut systemd_sockets = do_tcp_socket_activation();
     for (vhost, mut params) in cfg.hosts.drain() {
         let addr = params.ip;
         for (mount, wwwroot) in params.paths.iter_mut() {
@@ -253,7 +256,15 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
         //group vHosts by IP
         match listening_ifs.get_mut(&addr) {
             None => {
-                let mut hcfg = HostCfg::new(TcpListener::bind(addr)?);
+                #[cfg(unix)]
+                let listener = {
+                    systemd_sockets.remove(&addr)
+                        .ok_or(())
+                        .or_else(|_| TcpListener::bind(addr)).with_context(|| format!("Failed to bind to {}", addr))?
+                };
+                #[cfg(not(unix))]
+                let listener = TcpListener::bind(addr).with_context(|| format!("Failed to bind to {}", addr))?;
+                let mut hcfg = HostCfg::new(listener);
                 #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
                 if let Some(tlscfg) = params.tls.as_ref() {
                     match ParsedTLSConfig::new(tlscfg, sni) {
@@ -293,10 +304,29 @@ pub async fn group_config(cfg: &mut Configuration) -> Result<HashMap<SocketAddr,
         }
     }
     if errors.has_errors() {
-        Err(Box::new(errors))
+        Err(errors.into())
     }else{
         Ok(listening_ifs)
     }
+}
+#[cfg(unix)]
+fn do_tcp_socket_activation() -> HashMap<SocketAddr, TcpListener> {
+    use libsystemd::activation::IsType;
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::io::IntoRawFd;
+    let mut ret = HashMap::new();
+    if let Ok(fds) = libsystemd::activation::receive_descriptors(false) {
+        for fd in fds {
+            if fd.is_inet() {
+                let l = unsafe{ TcpListener::from_raw_fd(fd.into_raw_fd())};
+                if let Ok(addr) = l.local_addr() {
+                    info!("{:?} was passed via socket activation", addr);
+                    ret.insert(addr,l);
+                }
+            }
+        }
+    }
+    ret
 }
 
 
