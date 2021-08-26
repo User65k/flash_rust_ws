@@ -1,6 +1,6 @@
 
 use std::{net::SocketAddr, io::{Error as IoError, ErrorKind}};
-use log::{error, trace, info, debug, log_enabled, Level};
+use log::{error, trace, info, debug};
 use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
 use hyper::{Body, Request, Response};
@@ -17,54 +17,92 @@ pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
 
 
-pub async fn fcgi_call(fcgi_cfg: &FCGIApp, req: Request<Body>, full_path: &Path, remote_addr: SocketAddr)
+pub async fn fcgi_call(fcgi_cfg: &FCGIApp, req: Request<Body>, full_path: &Path, web_mount: &Path, remote_addr: SocketAddr)
             -> Result<Response<Body>, IoError> {
     if let Some(app) = &fcgi_cfg.app {
 
         let mut params = HashMap::new();
-        params.insert( // must CGI/1.1  4.1.13, everybody cares
-            Bytes::from(&b"SCRIPT_NAME"[..]),
-            path_to_bytes(full_path),
-        );
+        if fcgi_cfg.exec.is_none() { //no local FS
+            //just take the mount. that seems to be what lighttpd does
+            let mut abs_web_mount = PathBuf::from("/");
+            abs_web_mount.push(web_mount);
+            params.insert( // must CGI/1.1  4.1.13, everybody cares
+                Bytes::from(&b"SCRIPT_NAME"[..]),
+                path_to_bytes(abs_web_mount),
+            );
+            let mut abs_path = PathBuf::new();
+            abs_path.push("/");
+            abs_path.push(full_path);
+            params.insert( // opt CGI/1.1   4.1.5
+                Bytes::from(&b"PATH_INFO"[..]),
+                path_to_bytes(abs_path),
+            );
+        }else{
+            params.insert( // must CGI/1.1  4.1.13, everybody cares
+                Bytes::from(&b"SCRIPT_NAME"[..]),
+                path_to_bytes(full_path),
+            );
+            // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
+            //PATH_TRANSLATED is PATH_INFO mapped to the server FS
+            /*params.insert(  // SHOULD CGI/1.1  4.1.17
+                Bytes::from(&b"PATH_TRANSLATED"[..]),
+                path_to_bytes(full_path),
+            );*/
+        }
+        
         params.insert( // must CGI/1.1  4.1.14, flup cares for this
             Bytes::from(&b"SERVER_NAME"[..]),
-            Bytes::from(&b"FRWS"[..]),
+            Bytes::from(super::get_host(&req).unwrap_or_default().to_string()),
         );
         params.insert( // must CGI/1.1  4.1.15, flup cares for this
             Bytes::from(&b"SERVER_PORT"[..]),
-            Bytes::from(&b"80"[..]),
+            Bytes::from(req.uri().port().map(|p|p.to_string()).unwrap_or("80".to_string())),
         );
         params.insert(  // must CGI/1.1  4.1.16, flup cares for this
             Bytes::from(&b"SERVER_PROTOCOL"[..]),
-            Bytes::from(&b"HTTP"[..]),
+            Bytes::from(format!("{:?}", req.version())),
         );
         params.insert(  // must CGI/1.1  4.1.8
             Bytes::from(&b"REMOTE_ADDR"[..]),
-            Bytes::from(remote_addr.to_string()),
+            Bytes::from(remote_addr.ip().to_string()),
         );
-        // - SERVER_SOFTWARE   must CGI/1.1  4.1.17
-        // - GATEWAY_INTERFACE must CGI/1.1  4.1.4
-
-        if Some(true) == fcgi_cfg.script_filename {
+        params.insert(  // must CGI/1.1  4.1.4
+            Bytes::from(&b"GATEWAY_INTERFACE"[..]),
+            Bytes::from(&b"CGI/1.1"[..]),
+        );
+        params.insert(  // must CGI/1.1  4.1.17
+            Bytes::from(&b"SERVER_SOFTWARE"[..]),
+            Bytes::from(&b"frws"[..]),
+        );
+        if fcgi_cfg.set_request_uri {
+            params.insert(  // REQUEST_URI common
+                Bytes::from(&b"REQUEST_URI"[..]),
+                Bytes::from(req.uri().path().to_string()),
+            );
+        }
+        if fcgi_cfg.set_script_filename {
             params.insert( // PHP cares for this
                 Bytes::from(&b"SCRIPT_FILENAME"[..]),
                 path_to_bytes(full_path),
             );
         }
         trace!("to FCGI: {:?}", &params);
-        match timeout(Duration::from_secs(3), app.forward(req, params)).await {
-            Err(_) => Err(IoError::new(ErrorKind::TimedOut,"FCGI app did not respond")),
-            Ok(val) => {
-                if log_enabled!(Level::Debug) {
-                    match &val {
-                        Ok(resp) => debug!("FCGI response: {:?} {:?}", resp.status(), resp.headers()),
-                        Err(err) => debug!("FCGI response: {:?}", err),
-                    }
+        let resp = match fcgi_cfg.timeout {
+            0 => app.forward(req, params).await,
+            secs => {
+                match timeout(Duration::from_secs(secs), app.forward(req, params)).await {
+                    Err(_) => return Err(IoError::new(ErrorKind::TimedOut,"FCGI app did not respond")),
+                    Ok(resp) => resp
                 }
-                Ok(val?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
             }
-        }
-        //Ok(app.forward(req, params).await?.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
+        }?;
+        debug!("FCGI response: {:?} {:?}", resp.status(), resp.headers());
+        //return types:
+        //doc: MUST return a Content-Type header
+        //TODO fetch local resource: Location header, MUST NOT return any other header fields or a message-body
+        //TODO 302Found: Abs Location header, MUST NOT return any other header fields
+     
+        Ok(resp.map(|bod|Body::wrap_stream(FCGIBody::from(bod))))
     }else{
         error!("FCGI app not set");
         Err(IoError::new(ErrorKind::NotConnected,"FCGI app not available"))
@@ -185,8 +223,14 @@ pub struct FCGIAppExec {
 pub struct FCGIApp {
     pub sock: FCGISock,
     pub exec: Option<Vec<PathBuf>>,
-    pub script_filename: Option<bool>,
+    #[serde(default)]
+    pub set_script_filename: bool,
+    #[serde(default)]
+    pub set_request_uri: bool,
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
     pub bin: Option<FCGIAppExec>,
     #[serde(skip)]
     pub app: Option<FCGIAppPool>
 }
+fn default_timeout() -> u64 {20}
