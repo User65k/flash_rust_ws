@@ -106,7 +106,9 @@ async fn handle_wwwroot(req: Request<Body>,
         config::UseCase::FCGI { fcgi, static_files} => {
             if fcgi.exec.is_none() {
                 //FCGI + dont check for file -> always FCGI
-                return fcgi::fcgi_call(&fcgi, req, req_path, web_mount, remote_addr).await;
+                return fcgi::fcgi_call(&fcgi, req,
+                    req_path, web_mount, None,
+                    remote_addr).await;
             }
             match static_files {
                 Some(sf) => sf,
@@ -144,7 +146,9 @@ async fn handle_wwwroot(req: Request<Body>,
     if let config::UseCase::FCGI{fcgi, ..} = &wwwr.mount {
         //FCGI + check for file
         if ext_in_list(&fcgi.exec, &full_path) {
-            return fcgi::fcgi_call(&fcgi, req, &full_path, web_mount, remote_addr).await;
+            return fcgi::fcgi_call(&fcgi, req, 
+                &full_path, web_mount, Some(&sf.dir),
+                remote_addr).await;
         }
     }
 
