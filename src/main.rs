@@ -79,7 +79,7 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
                         let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
-                    tokio::spawn(hyper::Server::builder(incomming).executor(Exec).serve(new_service))
+                    tokio::spawn(hyper::Server::builder(incoming).executor(Exec).serve(new_service))
                 }
             },
             Err(err) => {
