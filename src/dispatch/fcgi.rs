@@ -16,6 +16,18 @@ use crate::body::FCGIBody;
 pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
 
+const SCRIPT_NAME: &'static [u8] = b"SCRIPT_NAME";
+const PATH_INFO: &'static [u8] = b"PATH_INFO";
+const SERVER_NAME: &'static [u8] = b"SERVER_NAME";
+const SERVER_PORT: &'static [u8] = b"SERVER_PORT";
+const SERVER_PROTOCOL: &'static [u8] = b"SERVER_PROTOCOL";
+const REMOTE_ADDR: &'static [u8] = b"REMOTE_ADDR";
+const GATEWAY_INTERFACE: &'static [u8] = b"GATEWAY_INTERFACE";
+const CGI_VERS: &'static [u8] = b"CGI/1.1";
+const SERVER_SOFTWARE: &'static [u8] = b"SERVER_SOFTWARE";
+const REQUEST_URI: &'static [u8] = b"REQUEST_URI";
+const SCRIPT_FILENAME: &'static [u8] = b"SCRIPT_FILENAME";
+
 
 pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
     req: Request<Body>,
@@ -35,9 +47,12 @@ pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
     if let Some(root_dir) = fs_root {
         //req_path is completely resolved (to get index files)
         if let Ok(rel) = req_path.strip_prefix(root_dir) {
+            let mut abs_name = PathBuf::from("/");
+            abs_name.push(web_mount);
+            abs_name.push(rel);
             params.insert( // must CGI/1.1  4.1.13, everybody cares
-                Bytes::from(&b"SCRIPT_NAME"[..]),
-                path_to_bytes(rel),
+                Bytes::from(SCRIPT_NAME),
+                path_to_bytes(abs_name),
             );
         }else{
             return Err(IoError::new(ErrorKind::PermissionDenied,
@@ -50,7 +65,7 @@ pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
         let mut abs_web_mount = PathBuf::from("/");
         abs_web_mount.push(web_mount);
         params.insert( // must CGI/1.1  4.1.13, everybody cares
-            Bytes::from(&b"SCRIPT_NAME"[..]),
+            Bytes::from(SCRIPT_NAME),
             path_to_bytes(abs_web_mount),
         );
         //... so everything inside it is PATH_INFO
@@ -58,45 +73,45 @@ pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
         abs_path.push("/");
         abs_path.push(req_path);
         params.insert( // opt CGI/1.1   4.1.5
-            Bytes::from(&b"PATH_INFO"[..]),
+            Bytes::from(PATH_INFO),
             path_to_bytes(abs_path),
         );
         //this matches what lighttpd does without check_local
     }        
     
     params.insert( // must CGI/1.1  4.1.14, flup cares for this
-        Bytes::from(&b"SERVER_NAME"[..]),
+        Bytes::from(SERVER_NAME),
         Bytes::from(super::get_host(&req).unwrap_or_default().to_string()),
     );
     params.insert( // must CGI/1.1  4.1.15, flup cares for this
-        Bytes::from(&b"SERVER_PORT"[..]),
+        Bytes::from(SERVER_PORT),
         Bytes::from(req.uri().port().map(|p|p.to_string()).unwrap_or("80".to_string())),
     );
     params.insert(  // must CGI/1.1  4.1.16, flup cares for this
-        Bytes::from(&b"SERVER_PROTOCOL"[..]),
+        Bytes::from(SERVER_PROTOCOL),
         Bytes::from(format!("{:?}", req.version())),
     );
     params.insert(  // must CGI/1.1  4.1.8
-        Bytes::from(&b"REMOTE_ADDR"[..]),
+        Bytes::from(REMOTE_ADDR),
         Bytes::from(remote_addr.ip().to_string()),
     );
     params.insert(  // must CGI/1.1  4.1.4
-        Bytes::from(&b"GATEWAY_INTERFACE"[..]),
-        Bytes::from(&b"CGI/1.1"[..]),
+        Bytes::from(GATEWAY_INTERFACE),
+        Bytes::from(CGI_VERS),
     );
     params.insert(  // must CGI/1.1  4.1.17
-        Bytes::from(&b"SERVER_SOFTWARE"[..]),
+        Bytes::from(SERVER_SOFTWARE),
         Bytes::from(&b"frws"[..]),
     );
     if fcgi_cfg.set_request_uri {
         params.insert(  // REQUEST_URI common
-            Bytes::from(&b"REQUEST_URI"[..]),
+            Bytes::from(REQUEST_URI),
             Bytes::from(req.uri().path().to_string()),
         );
     }
     if fcgi_cfg.set_script_filename {
         params.insert( // PHP cares for this
-            Bytes::from(&b"SCRIPT_FILENAME"[..]),
+            Bytes::from(SCRIPT_FILENAME),
             path_to_bytes(req_path),
         );
     }
