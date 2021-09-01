@@ -18,7 +18,7 @@ Create a config file and execute the binary :relaxed:
 
 See the [Wiki](https://github.com/User65k/flash_rust_ws/wiki) for some help with the config file.
 
-You will need at least a single [Host](https://github.com/User65k/flash_rust_ws/wiki/virtual-host) containing [Mount Path](https://github.com/User65k/flash_rust_ws/wiki/mount-path).
+You will need at least a single [Host](https://github.com/User65k/flash_rust_ws/wiki/virtual-host) containing a [Mount Path](https://github.com/User65k/flash_rust_ws/wiki/mount-path).
 Minimal Example:
 
 ```toml
@@ -56,10 +56,11 @@ dir = "/var/www/"
     - [ ] rate ?
     - [ ] min speed ?
   - [x] no default files
-  - [ ] no DAV without users
+  - [ ] no DAV without users?
   - [x] no folder listings (except DAV)
   - [x] recomended http headers by default
   - [x] no path traversals :-)
+  - [x] only use filters based on allowed values
   - [ ] only https ?
   - [x] avoid BEAST and CRIME
   - [x] only follow symlinks if told so
