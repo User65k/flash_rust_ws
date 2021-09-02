@@ -105,11 +105,9 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                     trace!("from header: {:?}", h);
                 }
 
-                if let (Ok(username), Some(nonce), Some(user_response)) =
-                    (std::str::from_utf8(
-                        user_vals.get(b"username".as_ref())
-                        .unwrap_or(&b"\xff".as_ref())
-                    )
+                if let (Some(username), Some(nonce), Some(user_response)) =
+                    (user_vals.get(b"username".as_ref())
+                       .and_then(|b|std::str::from_utf8(*b).ok())
                     ,user_vals.get(b"nonce".as_ref())
                     ,user_vals.get(b"response".as_ref()))
                 {
@@ -131,7 +129,8 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
                         if file.read_line(&mut buf).await? < 1 {
                             //user not found
                             info!("user not found");
-                            return Err(IoError::new(ErrorKind::PermissionDenied,"User not found"));
+                            //don't return to avaid timing attacks
+                            break "USERNOTFOUND".to_string();
                         }
                         if buf.starts_with(username) {
                             //user:realm:H1
@@ -290,7 +289,7 @@ mod tests {
         assert!(e.is_none());
     }
     #[tokio::test]
-    async fn auth_fail() {
+    async fn auth_wrong_pw() {
         init_stderr_logging();
         let path = PathBuf::from(r"/tmp/auth_fail");
         let mut file = File::create(&path).expect("could not create htdigest file");
@@ -307,8 +306,8 @@ mod tests {
         file.write_all(b"daniel:a realm:109c7da4a649a1da4a35843583146140").expect("could not write cfg file");
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::PermissionDenied);
+        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap().unwrap();
+        assert_eq!(e.status(), StatusCode::UNAUTHORIZED);
     }
     #[tokio::test]
     async fn auth_wrong_realm() {
@@ -317,8 +316,8 @@ mod tests {
         file.write_all(b"dani:another realm:1a30634ead89d6934aa82b933863acf3").expect("could not write cfg file");
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::PermissionDenied);
+        let e = check_digest(&path, &h, &String::from("a realm")).await.unwrap().unwrap();
+        assert_eq!(e.status(), StatusCode::UNAUTHORIZED);
     }
     #[tokio::test]
     async fn auth_error() {
