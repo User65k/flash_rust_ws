@@ -73,7 +73,7 @@ impl AcmeTaskRunner {
             = (load_private_key(&filename), load_certs(&filename)) {
 
             if let Ok(key) = any_ecdsa_type(&k) {
-                let ck = CertifiedKey::new(chain, Arc::new(key));
+                let ck = CertifiedKey::new(chain, key);
                 let v = CertKeys::ec(ck);
             
                 certres.update_cert(task.has_name.clone(), v);
