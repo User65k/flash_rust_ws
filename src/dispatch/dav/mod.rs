@@ -36,14 +36,16 @@ pub async fn do_dav(req: Request<Body>, req_path: &Path, config: &Config, web_mo
         "MKCOL" if config.read_only==false => handle_mkdir(req, &full_path).await,
         "PUT"|"COPY"|"MOVE"|"DELETE"|"MKCOL"
             => Err(IoError::new(ErrorKind::PermissionDenied,"read only")),
-        _ => Err(IoError::new(ErrorKind::InvalidData,"wrong method"))
+        _ => Ok(Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(Body::empty())
+            .expect("unable to build response"))
     }
 }
 async fn handle_get(req: Request<Body>, full_path: &Path)
 -> Result<Response<Body>, IoError> {
     let follow_symlinks = false;
     let (_, file_lookup) = resolve_path(full_path, false, &None, follow_symlinks).await?;
-    // TODO: byte ranges (Accept-Ranges: bytes)
     return_file(&req, file_lookup).await
 }
 async fn handle_delete(_: Request<Body>, full_path: &Path)
