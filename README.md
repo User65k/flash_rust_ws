@@ -19,12 +19,22 @@ Create a config file and execute the binary :relaxed:
 See the [Wiki](https://github.com/User65k/flash_rust_ws/wiki) for some help with the config file.
 
 You will need at least a single [Host](https://github.com/User65k/flash_rust_ws/wiki/virtual-host) containing a [Mount Path](https://github.com/User65k/flash_rust_ws/wiki/mount-path).
+
 Minimal Example:
 
 ```toml
 ["example.com"]
 ip = "127.0.0.1:80"
 dir = "/var/www/"
+```
+
+Let's Encrypt Example:
+```toml
+["example.com"]
+ip = "[::]:443"
+validate_server_name = true
+dir = "/var/www/"
+tls.host.ACME = {uri="https://acme-staging-v02.api.letsencrypt.org/directory",cache_dir=".",contact=["mailto:admin@example.com"]}
 ```
 
 # Goals
