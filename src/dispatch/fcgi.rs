@@ -3,7 +3,7 @@ use std::{net::SocketAddr, io::{Error as IoError, ErrorKind}};
 use log::{error, trace, info, debug};
 use std::collections::HashMap;
 use bytes::{Bytes, BytesMut};
-use hyper::{Body, Request, Response};
+use hyper::{Body, Request, Response, body::HttpBody};
 use std::path::PathBuf;
 use std::path::Path;
 use tokio::time::timeout;
@@ -43,6 +43,15 @@ pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
         return Err(IoError::new(ErrorKind::NotConnected,
             "FCGI app not available"));
     };
+    
+    if req.body().size_hint().exact().is_none() {
+
+        return Ok(Response::builder()
+        .status(hyper::StatusCode::LENGTH_REQUIRED)
+        .body(Body::empty())
+        .expect("unable to build response"));
+    }
+
     let mut params = HashMap::new();
     if let Some(root_dir) = fs_root {
         //req_path is completely resolved (to get index files)
