@@ -18,16 +18,19 @@ pub async fn return_file(req: &Request<Body>,
     resolved_file: ResolveResult) -> Result<Response<Body>, IoError> {
     // Handle only `GET`/`HEAD` and absolute paths.
     match *req.method() {
-        Method::HEAD | Method::GET => {},/*
+        Method::HEAD | Method::GET => {},
         Method::OPTIONS => {
             return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(header::ALLOW, "GET,HEAD,OPTIONS")
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::ALLOW, "GET,HEAD,OPTIONS")
             .body(Body::empty())
             .expect("unable to build response"))
-        },*/
+        },
         _ => {
-            return Err(IoError::new(IoErrorKind::InvalidData, "MethodNotMatched"));
+            return Ok(Response::builder()
+            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+            .body(Body::empty())
+            .expect("unable to build response"));
         }
     }
 
