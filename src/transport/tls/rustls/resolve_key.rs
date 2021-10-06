@@ -54,7 +54,7 @@ impl ResolveServerCert {
     #[inline]
     pub fn read_ec_cert<T, F>(&self, sni: Option<&str>, func: F) -> Option<T>
     where F: FnOnce(Option<&CertifiedKey>) -> T {
-        self.read_cert(sni, |key|func(key.ec.as_ref()))
+        self.read_cert(sni, |key|func(key.ec.as_ref()), false)
     }
 }
 impl ResolveServerCert {
@@ -134,15 +134,18 @@ impl ResolveServerCert {
         Ok(())
     }
     ///perform read only operation with a key/cert pair
-    fn read_cert<T, F>(&self, sni: Option<&str>, func: F) -> Option<T>
+    fn read_cert<T, F>(&self, sni: Option<&str>, func: F, fallback: bool) -> Option<T>
     where F: FnOnce(&CertKeys) -> T {
         if let Some(k) = sni {
-            let by_name = self.by_name.read().unwrap();
-            by_name.get(k).map(func)
-        }else{
-            let default = self.default.read().unwrap();
-            default.as_ref().map(func)
+            if let Some(v) = self.by_name.read().unwrap().get(k) {
+                return Some(func(v));
+            }
+            if !fallback {
+                return None;
+            }
+            //SNI set but we don't know it -> use default
         }
+        self.default.read().unwrap().as_ref().map(func)
     }
 }
 
@@ -197,13 +200,8 @@ impl ResolvesServerCert for ResolveServerCert {
         }
         trace!("ec: {}, ed: {}, rsa: {} - {:?}", ec, ed, rsa, client_hello.sigschemes());
 
-        //SNI set but we don't know it -> use default
-        let mut lookup_name = client_hello.server_name().map(|dns|dns.into());
-        if let Some(name) = lookup_name {
-            if !self.by_name.read().unwrap().contains_key(name) {
-                lookup_name = None;
-            }
-        }
+        
+        let lookup_name = client_hello.server_name().map(|dns|dns.into());
         
         //this kinda impacts the chiper order - maybe coordinate with sess.config.ignore_client_order?
         self.read_cert(
@@ -215,7 +213,8 @@ impl ResolvesServerCert for ResolveServerCert {
                     (_, _, Some(k), _, _, true) => Some(k.clone()), //rsa
                     _ => None
                 }
-            }
+            },
+            true
         ).flatten()
     }
 }
