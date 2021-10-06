@@ -197,9 +197,17 @@ impl ResolvesServerCert for ResolveServerCert {
         }
         trace!("ec: {}, ed: {}, rsa: {} - {:?}", ec, ed, rsa, client_hello.sigschemes());
 
+        //SNI set but we don't know it -> use default
+        let mut lookup_name = client_hello.server_name().map(|dns|dns.into());
+        if let Some(name) = lookup_name {
+            if !self.by_name.read().unwrap().contains_key(name) {
+                lookup_name = None;
+            }
+        }
+        
         //this kinda impacts the chiper order - maybe coordinate with sess.config.ignore_client_order?
         self.read_cert(
-            client_hello.server_name().map(|dns|dns.into()),
+            lookup_name,
             |ks|{
                 match (ks.ec.as_ref(), ks.ed.as_ref(), ks.rsa.as_ref(), ec, ed, rsa) {
                     (Some(k), _, _, true, _, _) => Some(k.clone()), //ec
