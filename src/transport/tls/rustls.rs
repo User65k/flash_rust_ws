@@ -5,52 +5,49 @@ pub use tokio_rustls::{
 };
 use tokio_rustls::TlsAcceptor as RustlsAcceptor;
 use tokio_rustls::rustls::{
-    Certificate, PrivateKey, NoClientAuth, SignatureScheme,
+    Certificate, PrivateKey, NoClientAuth,
     internal::pemfile,
-    SupportedCipherSuite, ALL_CIPHERSUITES, ProtocolVersion,
-    ClientHello, ResolvesServerCert,
-    sign::{CertifiedKey, RSASigningKey, any_ecdsa_type, any_eddsa_type}
+    SupportedCipherSuite, ALL_CIPHERSUITES, ProtocolVersion
 };
 use super::PlainIncoming;
 
-use async_acme::acme::{ACME_TLS_ALPN_NAME, AcmeError};
-use std::sync::RwLock;
-use std::sync::Weak;
-use tokio::time::sleep;
-
-use async_acme::rustls_helper::{order, duration_until_renewal_attempt};
+use async_acme::acme::ACME_TLS_ALPN_NAME;
 
 use std::vec::Vec;
 use std::sync::Arc;
 use std::{fs, io};
 use serde::Deserialize;
 use std::path::PathBuf;
-use log::{debug, trace, info, error};
-use std::collections::HashMap;
 
 use super::{PlainStream, TLSBuilderTrait};
 
+mod acme;
+use acme::{AcmeTaskRunner, ACME};
+mod resolve_key;
+use resolve_key::ResolveServerCert;
+
 #[derive(Debug)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeySet {
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
+
+#[derive(Debug)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum KeyMaterial {
+    Files(Vec<KeySet>),
+    ACME(ACME),
 }
 #[derive(Debug)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsUserConfig {
-    pub host: Vec<KeySet>,
+    pub host: KeyMaterial,
     pub ciphersuites: Option<Vec<String>>,
     pub versions: Option<Vec<String>>,
-    pub acme: Option<ACME>,
-}
-#[derive(Debug)]
-#[derive(Deserialize)]
-pub struct ACME {
-    pub uri: String,
-    pub contact: Vec<String>, //email?
-    pub cache_dir: Option<PathBuf>, //TODO cache Certs as well
-    pub dns_names: Option<Vec<String>>,
 }
 
 pub struct ParsedTLSConfig {
@@ -81,11 +78,11 @@ impl TLSBuilderTrait for ParsedTLSConfig {
             own_vers = true;
         }
         let mut certres = ResolveServerCert::new();
-        certres.add(sni, &config.host)?;
-
         let mut acmes = Vec::new();
-        if let Some(acme) = &config.acme {
-            Self::prep_acme(&mut acmes, acme, sni)?;
+
+        match &config.host {
+            KeyMaterial::Files(keyset) => certres.add(sni, keyset)?,
+            KeyMaterial::ACME(acme) => AcmeTaskRunner::add_new(&mut acmes, acme, sni)?,
         }
 
         Ok(ParsedTLSConfig {
@@ -119,11 +116,9 @@ impl TLSBuilderTrait for ParsedTLSConfig {
                 self.own_vers = true;
             }
         }
-
-        self.certres.add(sni, &config.host)?;
-
-        if let Some(acme) = &config.acme {
-            Self::prep_acme(&mut self.acmes, acme, sni)?;
+        match &config.host {
+            KeyMaterial::Files(keyset) => self.certres.add(sni, keyset)?,
+            KeyMaterial::ACME(acme) => AcmeTaskRunner::add_new(&mut self.acmes, acme, sni)?,
         }
 
         Ok(())
@@ -138,295 +133,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
         super::TlsAcceptor::new(config, incoming)
     }
 }
-impl ParsedTLSConfig {
-    fn prep_acme(acmes: &mut Vec<AcmeTaskRunner>,acme: &ACME, sni: Option<&str>) -> Result<(), io::Error>{
-        let dns_names = match &acme.dns_names
-        {
-            Some(a) => a.clone(),
-            None => match sni {
-                Some(s) => vec![s.to_string()],
-                None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "ACME needs either an enforced vHost or dns_names specified"
-                    ));
-                }
-            }
-        };
-        let has_name = sni.map(|s|s.to_string());
-        acmes.push(AcmeTaskRunner {
-            uri: acme.uri.clone(),
-            contact: acme.contact.clone(),
-            cache_dir: acme.cache_dir.clone(),
-            dns_names,
-            certres: Weak::new(),
-            has_name
-        });
-        Ok(())
-    }
-}
 
-struct AcmeTaskRunner {
-    /// resolver to update with a new cert
-    certres: Weak<ResolveServerCert>,
-    /// what to update
-    has_name: Option<String>,
-    /// acme register to use
-    uri: String,
-    /// for acme request
-    contact: Vec<String>,
-    /// to store acme auth (and certs)
-    cache_dir: Option<PathBuf>,
-    /// dns to proof
-    /// all but has_name will end up with the default server name
-    dns_names: Vec<String>,
-}
-
-struct CertKeys {
-    rsa: Option<CertifiedKey>,
-    ec: Option<CertifiedKey>,
-    ed: Option<CertifiedKey>
-}
-
-pub struct ResolveServerCert {
-    /// certs by sni
-    by_name: RwLock<HashMap<String, CertKeys>>,
-    /// cert that is used by all other sni
-    default: RwLock<Option<CertKeys>>,
-    /// temp for acme challange
-    acme_keys: RwLock<HashMap<String, CertifiedKey>>,
-}
-
-impl ResolveServerCert {
-    /// Create a new and empty (ie, knows no certificates) resolver.
-    pub fn new() -> ResolveServerCert {
-        ResolveServerCert {
-            by_name: RwLock::new(HashMap::new()),
-            default: RwLock::new(None),
-            acme_keys: RwLock::new(HashMap::new())
-        }
-    }
-
-    /// Add a new `KeySet` (One Certificate with Key for each Keytype) to be used for the given `sni`.
-    ///
-    /// This function fails if the certificate chain is syntactically faulty
-    /// or if `sni` is given but not a valid DNS name, or if
-    /// it's not valid for the supplied certificate.
-    pub fn add(&mut self, sni: Option<&str>,
-                keyset: &Vec<KeySet>) -> Result<(), tokio_rustls::rustls::TLSError> {
-
-        let mut ident = CertKeys{rsa:None,ec:None, ed:None};
-        for set in keyset {
-            let k = load_private_key(&set.key_file).map_err(|_| tokio_rustls::rustls::TLSError::General("Bad Key file".into()))?;
-            let chain = load_certs(&set.cert_file).map_err(|_| tokio_rustls::rustls::TLSError::General("Bad Cert file".into()))?;
-
-            if let Ok(rsa) = RSASigningKey::new(&k) {
-                if ident.rsa.is_some() {
-                    return Err(tokio_rustls::rustls::TLSError::General("More than one RSA key".into()));
-                }
-                let key = Box::new(rsa);
-                let ck = CertifiedKey::new(chain, Arc::new(key));
-                debug!("added RSA Cert");
-                ident.rsa = Some(ck);
-            }else if let Ok(key) = any_ecdsa_type(&k) {
-                if ident.ec.is_some() {
-                    return Err(tokio_rustls::rustls::TLSError::General("More than one EC key".into()));
-                }
-                let ck = CertifiedKey::new(chain, Arc::new(key));
-                debug!("added EC Cert");
-                ident.ec = Some(ck);
-            }else if let Ok(key) = any_eddsa_type(&k) {
-                if ident.ed.is_some() {
-                    return Err(tokio_rustls::rustls::TLSError::General("More than one ED key".into()));
-                }
-                let ck = CertifiedKey::new(chain, Arc::new(key));
-                debug!("added ED Cert");
-                ident.ed = Some(ck);
-            }else{
-                return Err(tokio_rustls::rustls::TLSError::General("Bad key type".into()));
-            }
-        }
-        // check if all certs are usable with the vHost
-        if let Some(name) = sni {
-            let checked_name = tokio_rustls::webpki::DNSNameRef::try_from_ascii_str(name)
-                .map_err(|_| tokio_rustls::rustls::TLSError::General("Bad DNS name".into()))?;
-            if let Some(ck) = &ident.rsa {
-                ck.cross_check_end_entity_cert(Some(checked_name))?;
-            }
-            if let Some(ck) = &ident.ec {
-                ck.cross_check_end_entity_cert(Some(checked_name))?;
-            }
-            if let Some(ck) = &ident.ed {
-                ck.cross_check_end_entity_cert(Some(checked_name))?;
-            }
-        }
-        if let Some(name) = sni {
-            let mut name_map = self.by_name.write().unwrap();
-            name_map.insert(name.into(), ident);
-        }else{
-            let mut default = self.default.write().unwrap();
-            if default.is_some() {
-                return Err( tokio_rustls::rustls::TLSError::General("More than one default Cert/Key".into()) );
-            }
-            *default = Some(ident);
-        }
-        Ok(())
-    }
-}
-
-/// ACME
-impl AcmeTaskRunner {
-    pub fn start(self, certres: &Arc<ResolveServerCert>) {
-        let mut task = self;
-        task.certres  = Arc::downgrade(certres);
-        tokio::spawn(async move {
-            task.acme_watcher().await;
-        });
-    }
-
-    async fn acme_watcher(&self) {
-        let mut err_cnt = 0usize;
-        loop {
-            let d = match self.certres.upgrade() {
-                None => {
-                    //ResolveServerCert is gone (and so is the TlsAcceptor)
-                    break;
-                }
-                Some(resolver) => {
-                    //check how long the current cert is still valid
-                    let maybe = if let Some(k) = &self.has_name {
-                        let by_name = resolver.by_name.read().unwrap();
-                        by_name.get(k).map(|key| duration_until_renewal_attempt(key.ec.as_ref(), err_cnt))
-                    }else{
-                        let default = resolver.default.read().unwrap();
-                        default.as_ref().map(|key| duration_until_renewal_attempt(key.ec.as_ref(), err_cnt))
-                    };
-                    maybe.unwrap_or_else(||duration_until_renewal_attempt(None, err_cnt))
-                }
-            };
-            if d.as_secs() != 0 {
-                info!("ACME: next attempt for {:?} in {}s", self.dns_names, d.as_secs());
-                sleep(d).await;
-            }
-            match order(
-                |k,v|self.set_auth_key(k,v),
-                &self.uri,
-                &self.dns_names,
-                self.cache_dir.as_ref(),
-                &self.contact).await {
-                Err(e) => {
-                    error!("ACME {}", e);
-                    err_cnt += 1;
-                },
-                Ok(cert_key) => {
-                    //let crt_pem = cert_key.cert.get(0).unwrap().as_slice();
-                    //let pk_pem = cert_key.serialize_private_key_pem(); //get priv key?!?!
-                    //Self::save_certified_key(cache_dir, file_name, pk_pem, acme_cert_pem).await;
-
-                    match self.certres.upgrade() {
-                        None => {
-                            //ResolveServerCert is gone (and so is the TlsAcceptor)
-                            break;
-                        }
-                        Some(resolver) => {
-                            let v = CertKeys{
-                                rsa: None,
-                                ec: Some(cert_key),
-                                ed: None
-                            };
-                            if let Some(k) = &self.has_name {
-                                resolver.by_name.write().unwrap().insert(k.to_owned(), v);
-                            }else{
-                                resolver.default.write().unwrap().replace(v);
-                            }
-                        }
-                    }
-                    err_cnt = 0;
-                }
-            }
-        }
-    }
-    fn set_auth_key(&self, key: String, cert: CertifiedKey) -> Result<(),AcmeError> {
-        match self.certres.upgrade() {
-            Some(resolver) => {
-                resolver.acme_keys.write().unwrap().insert(key, cert);
-                Ok(())
-            },
-            None => Err(std::io::Error::new(io::ErrorKind::BrokenPipe,"TLS shut down").into())
-        }
-    }
-}
-
-impl ResolvesServerCert for ResolveServerCert {
-    fn resolve(&self, client_hello: ClientHello) -> Option<CertifiedKey> {
-        //client_hello.alpn() -> Option<&'a [&'a [u8]]>
-        if client_hello.alpn() == Some(&[ACME_TLS_ALPN_NAME]) {
-            //return a not yet signed cert
-            return match client_hello.server_name() {
-                None => {
-                    debug!("client did not supply SNI");
-                    None
-                }
-                Some(domain) => {
-                    let domain = domain.to_owned();
-                    let domain: String = AsRef::<str>::as_ref(&domain).to_string();
-                    self.acme_keys.read().unwrap().get(&domain).cloned()
-                }
-            }
-        };
-        let mut ed = false;
-        let mut ec = false;
-        let mut rsa = false;
-        for s in client_hello.sigschemes() {
-            match s {
-                SignatureScheme::ECDSA_SHA1_Legacy |
-                SignatureScheme::ECDSA_NISTP256_SHA256 |
-                SignatureScheme::ECDSA_NISTP384_SHA384 |
-                SignatureScheme::ECDSA_NISTP521_SHA512 => {
-                    ec = true;
-                    if rsa && ed {
-                        break;
-                    }
-                },
-                SignatureScheme::ED25519 |
-                SignatureScheme::ED448 => {
-                    ed = true;
-                    if rsa && ec {
-                        break;
-                    }
-                },
-                SignatureScheme::RSA_PKCS1_SHA1 |
-                SignatureScheme::RSA_PKCS1_SHA256 |
-                SignatureScheme::RSA_PKCS1_SHA384 |
-                SignatureScheme::RSA_PKCS1_SHA512 => {
-                    rsa = true;
-                    if ec && ed {
-                        break;
-                    }
-                },
-                _ => {},
-            }
-        }
-        trace!("ec: {}, ed: {}, rsa: {} - {:?}", ec, ed, rsa, client_hello.sigschemes());
-
-        let by_name = self.by_name.read().unwrap();
-        let default = self.default.read().unwrap();
-        let ks = client_hello.server_name().and_then(|name| by_name.get(name.into()))
-                                    .or(default.as_ref());
-
-        //this kinda impacts the chiper order - maybe coordinate with sess.config.ignore_client_order?
-        if let Some(ks) = ks {
-            match (ks.ec.as_ref(), ks.ed.as_ref(), ks.rsa.as_ref(), ec, ed, rsa) {
-                (Some(k), _, _, true, _, _) => Some(k.clone()), //ec
-                (_, Some(k), _, _, true, _) => Some(k.clone()), //ed
-                (_, _, Some(k), _, _, true) => Some(k.clone()), //rsa
-                _ => None
-            }
-        }else{
-            None
-        }
-    }
-}
 
 // Load public certificate from file.
 fn load_certs(filename: &PathBuf) -> Result<Vec<Certificate>,io::Error> {
@@ -498,14 +205,13 @@ fn lookup_versions(versions: &Vec<String>) -> Result<Vec<ProtocolVersion>, io::E
 #[test]
 fn todo(){
     let ks = KeySet {
-        cert_file: PathBuf::from("./test_cert.der"),
-        key_file: PathBuf::from("./test_key.der")
+        cert: PathBuf::from("./test_cert.der"),
+        key: PathBuf::from("./test_key.der")
     };
     let u1 = TlsUserConfig {
-        host: vec![ks],
+        host: KeyMaterial::Files(vec![ks]),
         ciphersuites: None,
         versions: None,
-        acme: None,
     };
     let p = ParsedTLSConfig::new(&u1, None);
 }
