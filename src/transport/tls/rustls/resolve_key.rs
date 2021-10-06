@@ -9,6 +9,7 @@ use tokio_rustls::rustls::{
     sign::{CertifiedKey, RSASigningKey, any_ecdsa_type, any_eddsa_type}
 };
 use super::{load_private_key, load_certs, KeySet};
+#[cfg(feature = "tlsrust_acme")]
 use async_acme::acme::ACME_TLS_ALPN_NAME;
 
 pub struct CertKeys {
@@ -23,9 +24,10 @@ pub struct ResolveServerCert {
     /// cert that is used by all other sni
     default: RwLock<Option<CertKeys>>,
     /// temp for acme challange
+    #[cfg(feature = "tlsrust_acme")]
     acme_keys: RwLock<HashMap<String, CertifiedKey>>,
 }
-//for ACME
+#[cfg(feature = "tlsrust_acme")]
 impl CertKeys {
     pub fn ec(ck: CertifiedKey) -> CertKeys {
         CertKeys{
@@ -35,7 +37,7 @@ impl CertKeys {
         }
     }
 }
-//for ACME
+#[cfg(feature = "tlsrust_acme")]
 impl ResolveServerCert {
     #[inline]
     pub fn update_cert(&self, mut sni: Option<String>, cert: CertKeys) {
@@ -61,6 +63,7 @@ impl ResolveServerCert {
         ResolveServerCert {
             by_name: RwLock::new(HashMap::new()),
             default: RwLock::new(None),
+            #[cfg(feature = "tlsrust_acme")]
             acme_keys: RwLock::new(HashMap::new())
         }
     }
@@ -145,6 +148,7 @@ impl ResolveServerCert {
 
 impl ResolvesServerCert for ResolveServerCert {
     fn resolve(&self, client_hello: ClientHello) -> Option<CertifiedKey> {
+        #[cfg(feature = "tlsrust_acme")]
         if client_hello.alpn() == Some(&[ACME_TLS_ALPN_NAME]) {
             //return a not yet signed cert
             return match client_hello.server_name() {

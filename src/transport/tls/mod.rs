@@ -11,6 +11,7 @@ use core::task::{Context, Poll};
 use std::pin::Pin;
 use hyper::server::accept::Accept;
 use futures_util::ready;
+#[cfg(feature = "tlsrust_acme")]
 use tokio_rustls::rustls::Session;
 use std::io;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use std::future::Future;
 
 use std::net::SocketAddr;
 
-#[cfg(feature = "tlsrust")]
+#[cfg(feature = "tlsrust_acme")]
 use async_acme::acme::ACME_TLS_ALPN_NAME;
 
 #[cfg(all(feature = "tlsrust", feature = "tlsnative"))]
@@ -72,7 +73,7 @@ impl AsyncRead for TlsStream {
         match pin.state {
             State::Handshaking(ref mut accept) => match ready!(Pin::new(accept).poll(cx)) {
                 Ok(mut stream) => {
-                    #[cfg(feature = "tlsrust")]
+                    #[cfg(feature = "tlsrust_acme")]
                     if stream.get_ref().1.get_alpn_protocol() == Some(ACME_TLS_ALPN_NAME) {
                         log::debug!("completed acme-tls/1 handshake");
                         return Pin::new(&mut stream).poll_shutdown(cx);

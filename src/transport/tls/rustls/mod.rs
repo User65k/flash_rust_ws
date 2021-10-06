@@ -11,6 +11,7 @@ use tokio_rustls::rustls::{
 };
 use super::PlainIncoming;
 
+#[cfg(feature = "tlsrust_acme")]
 use async_acme::acme::ACME_TLS_ALPN_NAME;
 
 use std::vec::Vec;
@@ -21,7 +22,9 @@ use std::path::PathBuf;
 
 use super::{PlainStream, TLSBuilderTrait};
 
+#[cfg(feature = "tlsrust_acme")]
 mod acme;
+#[cfg(feature = "tlsrust_acme")]
 use acme::{AcmeTaskRunner, ACME};
 mod resolve_key;
 use resolve_key::ResolveServerCert;
@@ -39,6 +42,7 @@ pub struct KeySet {
 #[serde(deny_unknown_fields)]
 pub enum KeyMaterial {
     Files(Vec<KeySet>),
+    #[cfg(feature = "tlsrust_acme")]
     ACME(ACME),
 }
 #[derive(Debug)]
@@ -55,6 +59,7 @@ pub struct ParsedTLSConfig {
     certres: ResolveServerCert,
     own_cipher: bool,
     own_vers: bool,
+    #[cfg(feature = "tlsrust_acme")]
     acmes: Vec<AcmeTaskRunner>
 }
 
@@ -65,7 +70,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
 
     fn new(config: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut cfg = TLSConfig::new(NoClientAuth::new());
-        cfg.set_protocols(&[b"h2".to_vec(), b"http/1.1".to_vec(), ACME_TLS_ALPN_NAME.to_vec()]);
+        cfg.set_protocols(&[b"h2".to_vec(), b"http/1.1".to_vec(),#[cfg(feature = "tlsrust_acme")] ACME_TLS_ALPN_NAME.to_vec()]);
 
         let mut own_cipher = false;
         let mut own_vers = false;
@@ -78,10 +83,12 @@ impl TLSBuilderTrait for ParsedTLSConfig {
             own_vers = true;
         }
         let mut certres = ResolveServerCert::new();
+        #[cfg(feature = "tlsrust_acme")]
         let mut acmes = Vec::new();
 
         match &config.host {
             KeyMaterial::Files(keyset) => certres.add(sni, keyset)?,
+            #[cfg(feature = "tlsrust_acme")]
             KeyMaterial::ACME(acme) => AcmeTaskRunner::add_new(&mut acmes, acme, sni)?,
         }
 
@@ -90,6 +97,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
             certres,
             own_cipher,
             own_vers,
+            #[cfg(feature = "tlsrust_acme")]
             acmes
         })
     }
@@ -118,6 +126,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
         }
         match &config.host {
             KeyMaterial::Files(keyset) => self.certres.add(sni, keyset)?,
+            #[cfg(feature = "tlsrust_acme")]
             KeyMaterial::ACME(acme) => AcmeTaskRunner::add_new(&mut self.acmes, acme, sni)?,
         }
 
@@ -125,6 +134,7 @@ impl TLSBuilderTrait for ParsedTLSConfig {
     }
     fn get_acceptor(self, incoming: PlainIncoming) -> super::TlsAcceptor {
         let certres = Arc::new(self.certres);
+        #[cfg(feature = "tlsrust_acme")]
         for acme in self.acmes {
             acme.start(&certres);
         }
