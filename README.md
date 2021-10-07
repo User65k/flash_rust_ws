@@ -39,7 +39,7 @@ dir = "/var/www/"
 - [x] [HTTPS](https://github.com/User65k/flash_rust_ws/wiki/TLS)
   - [x] Cert per vHost / SNI
   - [x] Cert per Keytype (EC, ED, RSA)
-  - [ ] ACME-TLS
+  - [x] ACME-TLS
 - [x] HTTP2
 - [x] [WebDAV](https://github.com/User65k/flash_rust_ws/wiki/webdav)
 - [ ] Reverse-Proxy

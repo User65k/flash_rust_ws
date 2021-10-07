@@ -2,15 +2,17 @@
 mod rustls;
 
 #[cfg(feature = "tlsrust")]
-use self::rustls::{UnderlyingTLSStream, UnderlyingAccept};
+use self::rustls::{UnderlyingTLSStream, UnderlyingAccept, TLSConfig};
 #[cfg(feature = "tlsrust")]
-pub use self::rustls::{TlsUserConfig, TLSConfig, ParsedTLSConfig};
+pub use self::rustls::{TlsUserConfig, ParsedTLSConfig};
 
 use super::{PlainIncoming, PlainStream};
 use core::task::{Context, Poll};
 use std::pin::Pin;
 use hyper::server::accept::Accept;
 use futures_util::ready;
+#[cfg(feature = "tlsrust_acme")]
+use tokio_rustls::rustls::Session;
 use std::io;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -18,16 +20,24 @@ use std::future::Future;
 
 use std::net::SocketAddr;
 
+#[cfg(feature = "tlsrust_acme")]
+use async_acme::acme::ACME_TLS_ALPN_NAME;
+
+#[cfg(all(feature = "tlsrust", feature = "tlsnative"))]
+compile_error!("feature \"tlsrust\" and feature \"tlsnative\" cannot be enabled at the same time");
+
 enum State {
     Handshaking(UnderlyingAccept<PlainStream>),
     Streaming(UnderlyingTLSStream<PlainStream>),
 }
 
 pub(crate) trait TLSBuilderTrait {
+    /// called by first vHost that wants TLS
     fn new(c: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> where Self: std::marker::Sized;
+    /// called by all but the first vHost on one socket
     fn add(&mut self, c: &TlsUserConfig, sni: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    fn get_config(self) -> TLSConfig;
-    fn get_accept_feature(config: Arc<TLSConfig>, stream: PlainStream) -> UnderlyingAccept<PlainStream>;
+    fn get_accept_feature(accept: &TlsAcceptor, stream: PlainStream) -> UnderlyingAccept<PlainStream>;
+    fn get_acceptor(self, incoming: PlainIncoming) -> TlsAcceptor;
 }
 
 // tokio_rustls::server::TlsStream doesn't expose constructor methods,
@@ -39,9 +49,9 @@ pub(crate) struct TlsStream {
 }
 
 impl TlsStream {
-    fn new(stream: PlainStream, config: Arc<TLSConfig>) -> TlsStream {
+    fn new(stream: PlainStream, accept: &TlsAcceptor) -> TlsStream {
         let remote_addr = stream.remote_addr();
-        let accept = ParsedTLSConfig::get_accept_feature(config, stream);
+        let accept = ParsedTLSConfig::get_accept_feature(accept, stream);
         TlsStream {
             state: State::Handshaking(accept),
             remote_addr,
@@ -63,6 +73,13 @@ impl AsyncRead for TlsStream {
         match pin.state {
             State::Handshaking(ref mut accept) => match ready!(Pin::new(accept).poll(cx)) {
                 Ok(mut stream) => {
+                    #[cfg(feature = "tlsrust_acme")]
+                    if stream.get_ref().1.get_alpn_protocol() == Some(ACME_TLS_ALPN_NAME) {
+                        log::debug!("completed acme-tls/1 handshake");
+                        return Pin::new(&mut stream).poll_shutdown(cx);
+                        //EOF
+                    }
+
                     let result = Pin::new(&mut stream).poll_read(cx, buf);
                     pin.state = State::Streaming(stream);
                     result
@@ -133,7 +150,7 @@ impl Accept for TlsAcceptor {
     ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
         let pin = self.get_mut();
         match ready!(Pin::new(&mut pin.incoming).poll_accept(cx)) {
-            Some(Ok(sock)) => Poll::Ready(Some(Ok(TlsStream::new(sock, pin.config.clone())))),
+            Some(Ok(sock)) => Poll::Ready(Some(Ok(TlsStream::new(sock, pin)))),
             Some(Err(e)) => Poll::Ready(Some(Err(e))),
             None => Poll::Ready(None),
         }

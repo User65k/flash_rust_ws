@@ -508,9 +508,9 @@ mod tests {
         let mut cfg: Configuration = toml::from_str(r#"
     [host]
     ip = "8.8.8.8:22"
-    [[host.tls.host]]
-    cert_file = ""
-    key_file = ""
+    [[host.tls.host.Files]]
+    cert = ""
+    key = ""
     [host2]
     ip = "8.8.8.8:22"
     "#).expect("parse err");
