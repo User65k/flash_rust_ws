@@ -159,17 +159,7 @@ fn path_to_bytes<P: AsRef<Path>>(path: P) -> Bytes {
     BytesMut::from(path.as_ref().to_string_lossy().to_string().as_bytes()).freeze()
 }
 
-pub async fn setup_fcgi(fcgi_cfg: &mut FCGIApp, staticf: &Option<crate::config::StaticFiles>) -> Result<(), Box<dyn std::error::Error>> {
-
-    if fcgi_cfg.exec.is_some() && staticf.is_none() {
-        //need a dir to check files
-        return Err(Box::new(IoError::new(ErrorKind::Other,"dir must be specified, if exec filter is used")));
-    }
-    if fcgi_cfg.exec.is_none() && staticf.is_some() {
-        //warn that dir will not be used
-        return Err(Box::new(IoError::new(ErrorKind::Other,"reqests will always go to FCGI app. File checks will not be used - remove them")));
-    }
-
+pub async fn setup_fcgi_connection(fcgi_cfg: &mut FCGIApp) -> Result<(), Box<dyn std::error::Error>> {
     let sock: FCGIAddr = (&fcgi_cfg.sock).into();
 
     if let Some(bin) = fcgi_cfg.bin.as_ref() {
@@ -280,4 +270,23 @@ pub struct FcgiMnt {
     pub fcgi: FCGIApp,
     #[serde(flatten)]
     pub static_files: Option<StaticFiles>,
+}
+impl FcgiMnt {
+    pub async fn setup(&mut self) -> Result<(),String> {
+        if self.fcgi.exec.is_some() && self.static_files.is_none() {
+            //need a dir to check files
+            return Err("dir must be specified, if exec filter is used".to_string());
+        }
+        if self.fcgi.exec.is_none() && self.static_files.is_some() {
+            //warn that dir will not be used
+            return Err("reqests will always go to FCGI app. File checks will not be used - remove them".to_string());
+        }
+        if let Some(sf) = &self.static_files {
+            let _ = sf.setup().await?;
+        }
+        if let Err(e) = setup_fcgi_connection(&mut self.fcgi).await {
+            return Err(format!("{}",e));
+        }
+        Ok(())
+    }
 }

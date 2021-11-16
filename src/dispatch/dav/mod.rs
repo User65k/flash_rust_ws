@@ -161,3 +161,11 @@ pub struct Config {
     pub root: PathBuf,
     pub read_only: bool
 }
+impl Config {
+    pub async fn setup(&self) -> Result<(),String> {
+        if !self.root.is_dir() {
+            return Err(format!("{:?} ist not a directory", self.root));
+        }
+        Ok(())
+    }
+}

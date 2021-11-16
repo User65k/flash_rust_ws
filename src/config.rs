@@ -1,7 +1,7 @@
 #[cfg(feature = "webdav")]
 use crate::dispatch::dav::Config as webdav;
 #[cfg(feature = "fcgi")]
-use crate::dispatch::fcgi::{setup_fcgi, FcgiMnt};
+use crate::dispatch::fcgi::FcgiMnt;
 #[cfg(feature = "websocket")]
 use crate::dispatch::websocket::Websocket;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
@@ -35,6 +35,14 @@ pub struct StaticFiles {
     pub follow_symlinks: bool, // = false
     pub index: Option<Vec<PathBuf>>,
     pub serve: Option<Vec<PathBuf>>,
+}
+impl StaticFiles {
+    pub async fn setup(&self) -> Result<(),String> {
+        if !self.dir.is_dir() {
+            return Err(format!("{:?} ist not a directory", self.dir));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -194,61 +202,13 @@ pub fn load_config() -> anyhow::Result<Configuration> {
         .with_context(|| format!("Failed to read config from {:?}", path))?;
 
     let mut cfg = toml::from_slice::<Configuration>(&buffer)?;
-    let mut errors = CFGError::new();
     for (host_name, vhost) in cfg.hosts.iter_mut() {
         info!("host: {} @ {}", host_name, vhost.ip);
-        for (k, v) in vhost.paths.iter() {
-            match &v.mount {
-                #[cfg(feature = "fcgi")]
-                UseCase::FCGI(FcgiMnt{ static_files, fcgi }) => {
-                    if let Some(sf) = static_files {
-                        if !sf.dir.is_dir() {
-                            errors.add(format!(
-                                "{:?} (in \"{}/{}\") ist not a directory",
-                                sf.dir,
-                                host_name,
-                                k.to_string_lossy()
-                            ));
-                        }
-                        info!("\t {:?} => {:?} / {:?}", k, fcgi.sock, sf.dir);
-                    }
-                }
-                UseCase::StaticFiles(sf) => {
-                    if !sf.dir.is_dir() {
-                        errors.add(format!(
-                            "{:?} (in \"{}/{}\") ist not a directory",
-                            sf.dir,
-                            host_name,
-                            k.to_string_lossy()
-                        ));
-                    }
-                    info!("\t {:?} => {:?}", k, sf.dir);
-                }
-                #[cfg(feature = "webdav")]
-                UseCase::Webdav(dav) => {
-                    if !dav.root.is_dir() {
-                        errors.add(format!(
-                            "{:?} (in \"{}/{}\") ist not a directory",
-                            dav.root,
-                            host_name,
-                            k.to_string_lossy()
-                        ));
-                    }
-                    info!("\t {:?} => {:?} (DAV)", k, dav.root);
-                }
-                #[allow(unreachable_patterns)]
-                _ => {}
-            }
-        }
         if vhost.paths.len() == 0 {
-            errors.add(format!("vHost \"{}\" does not serve anything", host_name));
+            anyhow::bail!("vHost \"{}\" does not serve anything", host_name);
         }
     }
-    if errors.has_errors() {
-        Err(errors.into())
-    } else {
-        Ok(cfg)
-    }
+    Ok(cfg)
 }
 
 pub struct HostCfg {
@@ -291,21 +251,21 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
     for (vhost, mut params) in cfg.hosts.drain() {
         let addr = params.ip;
         for (mount, wwwroot) in params.paths.iter_mut() {
-            //setup FCGI Apps
-            #[cfg(feature = "fcgi")]
-            if let UseCase::FCGI(FcgiMnt{
-                ref mut fcgi,
-                ref static_files,
-            }) = wwwroot.mount
-            {
-                if let Err(e) = setup_fcgi(fcgi, static_files).await {
-                    errors.add(format!(
-                        "FCGIApp @\"{}/{}\": {}",
-                        vhost,
-                        mount.to_string_lossy(),
-                        e
-                    ));
-                }
+            if let Err(e) = match &mut wwwroot.mount {
+                #[cfg(feature = "fcgi")]
+                UseCase::FCGI(fcgi) => fcgi.setup().await,
+                #[cfg(feature = "webdav")]
+                UseCase::Webdav(dav) => dav.setup().await,
+                #[cfg(feature = "websocket")]
+                UseCase::Websocket(f) => f.setup().await,
+                UseCase::StaticFiles(sf) => sf.setup().await,
+            } {
+                errors.add(format!(
+                    "\"{}/{}\": {}",
+                    vhost,
+                    mount.to_string_lossy(),
+                    e
+                ));
             }
             //check if header are parseable
             if wwwroot.header.is_none() {
@@ -483,10 +443,6 @@ mod tests {
         file.write_all(b"\n[host2]\nip = \"0.0.0.0:8080\"")
             .expect("could not write cfg file");
         assert!(load_config().is_err()); // does not serve anything
-
-        file.write_all(b"\ndir=\"\\nonexistend\"")
-            .expect("could not write cfg file");
-        assert!(load_config().is_err()); // folder non existent
     }
     #[test]
     fn toml_to_struct() {
@@ -505,8 +461,8 @@ mod tests {
         );
         assert!(cfg.is_ok());
     }
-    #[tokio::test]
-    async fn root_mount() {
+    #[test]
+    fn root_mount() {
         let cfg: Result<Configuration, toml::de::Error> = toml::from_str(
             r#"
     [host]
@@ -518,8 +474,8 @@ mod tests {
         );
         assert!(cfg.is_ok());
     }
-    #[tokio::test]
-    async fn keyword_mount() {
+    #[test]
+    fn keyword_mount() {
         let mut cfg: Configuration = toml::from_str(
             r#"
     [host]
@@ -543,6 +499,18 @@ mod tests {
         assert!(mounts == [PathBuf::from(""), PathBuf::from("`b"), PathBuf::from("a")]);
     }
 
+    #[tokio::test]
+    async fn dir_nonexistent() {
+        let mut cfg: Configuration = toml::from_str(
+            r#"
+    [host]
+    ip = "0.0.0.0:1337"
+    dir = "blablahui"
+    "#,
+        )
+        .expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+    }
     #[tokio::test]
     async fn vhost_conflict() {
         let mut cfg: Configuration = toml::from_str(
@@ -614,14 +582,60 @@ mod tests {
             r#"
     [host]
     ip = "8.8.8.8:22"
-    [[host.tls.host]]
-    cert_file = ""
-    key_file = ""
+    [[host.tls.host.Files]]
+    cert = ""
+    key = ""
     [host2]
     ip = "8.8.8.8:22"
     "#,
         )
         .expect("parse err");
         assert!(group_config(&mut cfg).await.is_err());
+    }
+    #[test]
+    fn wwwroot_parsing() {
+        toml::from_str::<Configuration>(
+            r#"
+    [host]
+    ip = "8.8.8.8:22"
+    unused = 1
+    "#,
+        )
+        .expect_err("should fail - no main key");
+        toml::from_str::<Configuration>(
+            r#"
+    [host]
+    ip = "8.8.8.8:22"
+    dir = ""
+    unused = 1
+    "#,
+        )
+        .expect_err("should fail - unused key");
+        toml::from_str::<Configuration>(
+            r#"
+    [host]
+    ip = "8.8.8.8:22"
+    dir = 1
+    "#,
+        )
+        .expect_err("should fail - dir expects path");
+        toml::from_str::<Configuration>(
+            r#"
+    [host]
+    ip = "8.8.8.8:22"
+    dir = "."
+    header = {Referrer-Policy = "strict-origin-when-cross-origin", Feature-Policy = "microphone 'none'; geolocation 'none'"}
+        "#,
+        )
+        .expect("should be ok");
+        toml::from_str::<Configuration>(
+            r#"
+    [host]
+    ip = "8.8.8.8:22"
+    [host.mnt]
+    dir = "."
+        "#,
+        )
+        .expect("should be ok");
     }
 }

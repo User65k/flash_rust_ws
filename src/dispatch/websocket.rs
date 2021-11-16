@@ -210,3 +210,8 @@ pub struct UnwrapedWS {
     forward_header: bool, // = false
     encoding: Option<String>
 }
+impl Websocket {
+    pub async fn setup(&self) -> Result<(),String> {
+        Ok(())
+    }
+}
