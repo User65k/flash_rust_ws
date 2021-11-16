@@ -8,7 +8,6 @@ use websocket_codec::{ClientRequest, MessageCodec, Message, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}};
 use futures_util::{SinkExt, StreamExt};
-use async_fcgi::stream::{Stream, FCGIAddr};
 use serde::Deserialize;
 
 
@@ -24,6 +23,17 @@ pub async fn upgrade(req: Request<Body>,
 
     //update the request
     let mut res = Response::new(Body::empty());
+    match *req.method() {
+        hyper::Method::GET => {},
+        hyper::Method::OPTIONS => {
+            res.headers_mut().insert(header::ALLOW, header::HeaderValue::from_static("GET"));
+            return Ok(res);
+        },
+        _ => {
+            *res.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+            return Ok(res);
+        }
+    }
 
     let wscfg = match ws {/*
         Websocket::Proxy { forward } => {

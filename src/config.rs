@@ -352,7 +352,7 @@ where
     {
         type Value = BTreeMap<PathBuf, WwwRoot>;
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("string or map")
+            formatter.write_str("mountpoint must be a map")
         }
         fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
         where
@@ -362,7 +362,8 @@ where
             let mut lefties = HashMap::new();
             
             while let Some(key) = map.next_key::<String>()? {
-                let content: SerdeContent = map.next_value()?;
+                let content: SerdeContent = map.next_value()
+                    .map_err(|e|DeError::custom(format!("{}: {}",&key,e)))?;
                 let de = content.clone();
                 match WwwRoot::deserialize(de) {
                     Ok(r) => {
@@ -379,11 +380,12 @@ where
                     }
                 }
             }
-            
+
             if !lefties.is_empty() {
                 let iter = lefties.into_iter();
                 let mapde = serde::de::value::MapDeserializer::new(iter);
-                mounts.insert(PathBuf::new(), WwwRoot::deserialize(mapde).map_err(DeError::custom)?);
+                mounts.insert(PathBuf::new(), WwwRoot::deserialize(mapde)
+                    .map_err(|e|DeError::custom(format!("webroot: {}",e)))?);
             }
 
             Ok(mounts)
