@@ -11,7 +11,7 @@ use tokio::task::yield_now;
 use std::time::Duration;
 use serde::Deserialize;
 
-use crate::body::FCGIBody;
+use crate::{body::FCGIBody, config::StaticFiles};
 
 pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
@@ -273,3 +273,11 @@ pub struct FCGIApp {
     pub app: Option<FCGIAppPool>
 }
 fn default_timeout() -> u64 {20}
+
+#[cfg(feature = "fcgi")]
+#[derive(Debug, Deserialize)]
+pub struct FcgiMnt {
+    pub fcgi: FCGIApp,
+    #[serde(flatten)]
+    pub static_files: Option<StaticFiles>,
+}
