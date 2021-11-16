@@ -5,9 +5,8 @@ pub use tokio_rustls::{
 };
 use tokio_rustls::TlsAcceptor as RustlsAcceptor;
 use tokio_rustls::rustls::{
-    Certificate, PrivateKey, NoClientAuth,
-    internal::pemfile,
-    SupportedCipherSuite, ALL_CIPHERSUITES, ProtocolVersion
+    Certificate, PrivateKey, Error,
+    SupportedCipherSuite, ALL_CIPHER_SUITES, version, SupportedProtocolVersion
 };
 use super::PlainIncoming;
 
@@ -55,10 +54,9 @@ pub struct TlsUserConfig {
 }
 
 pub struct ParsedTLSConfig {
-    cfg: TLSConfig,
     certres: ResolveServerCert,
-    own_cipher: bool,
-    own_vers: bool,
+    ciphersuites: Option<Vec<SupportedCipherSuite>>,
+    versions: Option<Vec<&'static SupportedProtocolVersion>>,
     #[cfg(feature = "tlsrust_acme")]
     acmes: Vec<AcmeTaskRunner>
 }
@@ -69,19 +67,18 @@ impl TLSBuilderTrait for ParsedTLSConfig {
     }
 
     fn new(config: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut cfg = TLSConfig::new(NoClientAuth::new());
-        cfg.set_protocols(&[b"h2".to_vec(), b"http/1.1".to_vec(),#[cfg(feature = "tlsrust_acme")] ACME_TLS_ALPN_NAME.to_vec()]);
-
-        let mut own_cipher = false;
-        let mut own_vers = false;
+        let ciphersuites = 
         if let Some(suites) = config.ciphersuites.as_ref() {
-            cfg.ciphersuites = lookup_suites(suites)?;
-            own_cipher = true;
-        }
+            Some(lookup_suites(suites)?)
+        }else{
+            None
+        };
+        let versions = 
         if let Some(versions) = config.versions.as_ref() {
-            cfg.versions = lookup_versions(versions)?;
-            own_vers = true;
-        }
+            Some(lookup_versions(versions)?)
+        }else{
+            None
+        };
         let mut certres = ResolveServerCert::new();
         #[cfg(feature = "tlsrust_acme")]
         let mut acmes = Vec::new();
@@ -93,10 +90,9 @@ impl TLSBuilderTrait for ParsedTLSConfig {
         }
 
         Ok(ParsedTLSConfig {
-            cfg,
             certres,
-            own_cipher,
-            own_vers,
+            ciphersuites,
+            versions,
             #[cfg(feature = "tlsrust_acme")]
             acmes
         })
@@ -104,24 +100,22 @@ impl TLSBuilderTrait for ParsedTLSConfig {
     fn add(&mut self, config: &TlsUserConfig, sni: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(suites) = config.ciphersuites.as_ref() {
             let new = lookup_suites(suites)?;
-            if self.own_cipher {
-                if new != self.cfg.ciphersuites {
-                    return Err(Box::new( tokio_rustls::rustls::TLSError::General("Single IF can only have one set of ciphers".into()) ))
+            if let Some(suites) = self.ciphersuites.as_ref() {
+                if new.ne(suites) {
+                    return Err(Box::new( Error::General("Single IF can only have one set of ciphers".into()) ))
                 }
             }else{
-                self.cfg.ciphersuites = new;
-                self.own_cipher = true;
+                self.ciphersuites = Some(new);
             }
         }
         if let Some(versions) = config.versions.as_ref() {
             let new = lookup_versions(versions)?;
-            if self.own_vers {
-                if new != self.cfg.versions {
-                    return Err(Box::new( tokio_rustls::rustls::TLSError::General("Single IF can only have one set of versions".into()) ))
+            if let Some(versions) = self.versions.as_ref() {
+                if new.ne(versions) {
+                    return Err(Box::new( Error::General("Single IF can only have one set of versions".into()) ))
                 }
             }else{
-                self.cfg.versions = new;
-                self.own_vers = true;
+                self.versions = Some(new);
             }
         }
         match &config.host {
@@ -138,8 +132,23 @@ impl TLSBuilderTrait for ParsedTLSConfig {
         for acme in self.acmes {
             acme.start(&certres);
         }
-        let mut config = self.cfg;
-        config.cert_resolver = certres;
+    
+        let config = TLSConfig::builder();
+        let config = if let Some(cipher_suites) = self.ciphersuites {
+            config.with_cipher_suites(cipher_suites.as_slice())
+        }else{
+            config.with_safe_default_cipher_suites()
+        };
+        let config = config.with_safe_default_kx_groups();
+        let mut config =  if let Some(versions) = self.versions {
+            config.with_protocol_versions(versions.as_slice())
+        }else{
+            config.with_safe_default_protocol_versions()
+        }.unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(certres);
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec(),#[cfg(feature = "tlsrust_acme")] ACME_TLS_ALPN_NAME.to_vec()];
+        
         super::TlsAcceptor::new(config, incoming)
     }
 }
@@ -152,41 +161,32 @@ fn load_certs(filename: &PathBuf) -> Result<Vec<Certificate>,io::Error> {
     let mut reader = io::BufReader::new(certfile);
 
     // Load and return certificate.
-    pemfile::certs(&mut reader).map_err(|_|io::Error::new(io::ErrorKind::InvalidData, "could not parse cert"))
+    let chain = rustls_pemfile::certs(&mut reader)?
+        .drain(..).map(|v|Certificate(v)).collect();
+    Ok(chain)
 }
 
 // Load private key from file.
 fn load_private_key(filename: &PathBuf) -> Result<PrivateKey,io::Error> {
-    let rsa_keys = {
-        let keyfile = fs::File::open(filename)?;
-        let mut reader = io::BufReader::new(keyfile);
-        pemfile::rsa_private_keys(&mut reader).map_err(|_|io::Error::new(io::ErrorKind::InvalidData, "could not parse rsa priv key"))?
-    };
+    let keyfile = fs::File::open(filename)?;
+    let mut reader = io::BufReader::new(keyfile);
 
-    let pkcs8_keys = {
-        let keyfile = fs::File::open(filename)?;
-        let mut reader = io::BufReader::new(keyfile);
-        pemfile::pkcs8_private_keys(&mut reader).map_err(|_|io::Error::new(io::ErrorKind::InvalidData, "could not parse pkcs8 priv key"))?
-    };
-
-    // Load and return a single private key.
-    let keys = if pkcs8_keys.len()>0 {
-        pkcs8_keys
-    }else{
-        rsa_keys
-    };
-    if keys.len() != 1 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a single private key"));
+    loop {
+        match rustls_pemfile::read_one(&mut reader).map_err(|_|io::Error::new(io::ErrorKind::InvalidData, "cannot parse private key .pem file"))? {
+            Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(PrivateKey(key)),
+            Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(PrivateKey(key)),
+            None => break,
+            _ => {}
+        }
     }
-    Ok(keys[0].clone())
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a single private key"));
 }
-
-fn lookup_suites(suites: &Vec<String>) -> Result<Vec<&'static SupportedCipherSuite>, io::Error> {
+fn lookup_suites(suites: &Vec<String>) -> Result<Vec<SupportedCipherSuite>, io::Error> {
     let mut out = Vec::new();
 
     'cpr: for csname in suites {
-        for suite in &ALL_CIPHERSUITES {
-            let sname = format!("{:?}", suite.suite).to_lowercase();
+        for suite in ALL_CIPHER_SUITES {
+            let sname = format!("{:?}", suite).to_lowercase();
             if sname == csname.to_lowercase() {
                 out.push(*suite);
                 continue 'cpr;
@@ -198,13 +198,13 @@ fn lookup_suites(suites: &Vec<String>) -> Result<Vec<&'static SupportedCipherSui
 }
 
 /// Make a vector of protocol versions named in `versions`
-fn lookup_versions(versions: &Vec<String>) -> Result<Vec<ProtocolVersion>, io::Error> {
+fn lookup_versions(versions: &Vec<String>) -> Result<Vec<&'static SupportedProtocolVersion>, io::Error> {
     let mut out = Vec::new();
 
     for vname in versions {
         let version = match vname.as_ref() {
-            "1.2" => ProtocolVersion::TLSv1_2,
-            "1.3" => ProtocolVersion::TLSv1_3,
+            "1.2" => &version::TLS12,
+            "1.3" => &version::TLS13,
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "TLS Version not supported. Pick 1.2 or 1.3")),
         };
         out.push(version);
@@ -223,5 +223,5 @@ fn todo(){
         ciphersuites: None,
         versions: None,
     };
-    let p = ParsedTLSConfig::new(&u1, None);
+    let _p = ParsedTLSConfig::new(&u1, None);
 }
