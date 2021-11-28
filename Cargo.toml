@@ -56,6 +56,7 @@ anyhow = "1.0"
 [target.'cfg(unix)'.dependencies]
 users = "0.11.0"
 libsystemd = "0.4"
+libc = "0.2"
 
 [features]
 default = ["tlsrust", "tlsrust_acme", "fcgi", "webdav"]

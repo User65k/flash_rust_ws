@@ -355,7 +355,14 @@ fn do_tcp_socket_activation() -> HashMap<SocketAddr, TcpListener> {
     if let Ok(fds) = libsystemd::activation::receive_descriptors(false) {
         for fd in fds {
             if fd.is_inet() {
-                let l = unsafe { TcpListener::from_raw_fd(fd.into_raw_fd()) };
+                let fd = fd.into_raw_fd();
+                
+                //close FD on EXEC / when starting FCGI apps
+                if -1 == unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } {
+                    log::warn!("counld not set CLOEXEC");
+                };
+
+                let l = unsafe { TcpListener::from_raw_fd(fd) };
                 if let Ok(addr) = l.local_addr() {
                     info!("{:?} was passed via socket activation", addr);
                     ret.insert(addr, l);
