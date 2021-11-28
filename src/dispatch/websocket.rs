@@ -1,6 +1,6 @@
 use bytes::BytesMut;
 use hyper::{header, upgrade::Upgraded, Body, HeaderMap, Request, Response, StatusCode};
-use log::{debug, error, info, trace};
+use log::error;
 use std::net::SocketAddr;
 use std::{
     io::{Error as IoError, ErrorKind},
@@ -12,15 +12,16 @@ pub type AsyncClient = Framed<Upgraded, MessageCodec>;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use async_fcgi::stream::{Stream, FCGIAddr};
 
 pub async fn upgrade(
     req: Request<Body>,
     ws: &Websocket,
     req_path: &Path,
-    remote_addr: SocketAddr,
+    _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     //check if path is deeper than it should -> 404
-    if req_path.as_os_str().len() != 0 {
+    if !req_path.as_os_str().is_empty() {
         return Err(IoError::new(ErrorKind::NotFound, "WS mount had path"));
     }
 
@@ -118,7 +119,7 @@ async fn send_header(backend: &mut Stream, header: HeaderMap) -> Result<(), IoEr
     ];
     //append all HTTP headers
     for (key, value) in header.iter() {
-        if skip.iter().find(|x| x == key).is_some() {
+        if skip.iter().any(|x| x == key) {
             continue;
         }
         backend.write_all(key.as_str().as_bytes()).await?;

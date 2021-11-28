@@ -130,6 +130,7 @@ impl VHost {
     pub fn new(ip: SocketAddr) -> VHost {
         VHost {
             ip,
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
             tls: None,
             validate_server_name: false,
             paths: BTreeMap::new(),

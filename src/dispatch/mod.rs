@@ -328,6 +328,7 @@ mod vhost_tests {
             default_host: None,
             vhosts: map,
             listener: None,
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
             tls: None,
         });
         let res = dispatch_to_vhost(req, cfg, sa).await;
@@ -349,6 +350,7 @@ mod vhost_tests {
             default_host: None,
             vhosts: map,
             listener: None,
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
             tls: None,
         });
 
@@ -366,6 +368,7 @@ mod vhost_tests {
             default_host: Some(config::VHost::new(sa)),
             vhosts: map,
             listener: None,
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
             tls: None,
         });
 
