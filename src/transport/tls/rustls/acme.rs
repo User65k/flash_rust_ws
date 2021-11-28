@@ -97,7 +97,7 @@ impl AcmeTaskRunner {
                 Some(resolver) => {
                     //check how long the current cert is still valid
                     resolver.read_ec_cert(
-                        self.has_name.as_ref().map(|s|s.as_str()),
+                        self.has_name.as_deref(),
                         |key|duration_until_renewal_attempt(key, err_cnt)
                     ).unwrap_or_else(||duration_until_renewal_attempt(None, err_cnt))
                 }

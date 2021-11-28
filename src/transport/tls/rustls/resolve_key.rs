@@ -74,7 +74,7 @@ impl ResolveServerCert {
     /// or if `sni` is given but not a valid DNS name, or if
     /// it's not valid for the supplied certificate.
     pub fn add(&mut self, sni: Option<&str>,
-                keyset: &Vec<KeySet>) -> Result<(), Error> {
+                keyset: &[KeySet]) -> Result<(), Error> {
 
         let mut ident = CertKeys{rsa:None,ec:None, ed:None};
         for set in keyset {
@@ -146,7 +146,7 @@ impl ResolvesServerCert for ResolveServerCert {
                     None
                 }
                 Some(domain) => {
-                    self.acme_keys.read().unwrap().get(domain.into()).cloned()
+                    self.acme_keys.read().unwrap().get(domain).cloned()
                 }
             }
         };
@@ -185,13 +185,10 @@ impl ResolvesServerCert for ResolveServerCert {
             }
         }
         trace!("ec: {}, ed: {}, rsa: {} - {:?}", ec, ed, rsa, client_hello.signature_schemes());
-
-        
-        let lookup_name = client_hello.server_name().map(|dns|dns.into());
-        
+                
         //this kinda impacts the chiper order - maybe coordinate with sess.config.ignore_client_order?
         self.read_cert(
-            lookup_name,
+            client_hello.server_name(),
             |ks|{
                 match (ks.ec.as_ref(), ks.ed.as_ref(), ks.rsa.as_ref(), ec, ed, rsa) {
                     (Some(k), _, _, true, _, _) => Some(k.clone()), //ec

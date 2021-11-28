@@ -6,7 +6,7 @@ use users::{get_user_by_name, get_group_by_name};
 use std::io::{Error as IOError, ErrorKind};
 
 #[cfg(unix)]
-pub fn switch_user(user: &String) -> std::io::Result<()> {
+pub fn switch_user(user: &str) -> std::io::Result<()> {
     match get_user_by_name(user) {
         Some(user) => {
             let id = user.uid();
@@ -17,7 +17,7 @@ pub fn switch_user(user: &String) -> std::io::Result<()> {
     }
 }
 #[cfg(unix)]
-pub fn switch_group(group: &String) -> std::io::Result<()> {
+pub fn switch_group(group: &str) -> std::io::Result<()> {
     match get_group_by_name(group) {
         Some(group) => {
             let id = group.gid();

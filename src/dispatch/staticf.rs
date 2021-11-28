@@ -36,7 +36,7 @@ pub async fn return_file(req: &Request<Body>,
 
     debug!("resolved to {:?}", resolved_file);
     Ok(FileResponseBuilder::new()
-        .request(&req)
+        .request(req)
         .cache_headers(Some(500))
         .build(resolved_file)
         .expect("unable to build response"))
@@ -98,21 +98,16 @@ pub async fn resolve_path(
         for index_file in ifiles {
             let full_path_index = full_path.join(index_file);
             debug!("checking for {:?}",full_path_index);
-            match open_with_metadata(&full_path_index, follow_symlinks).await {
-                Ok((file, metadata)) => {
+            if let Ok((file, metadata)) = open_with_metadata(&full_path_index, follow_symlinks).await {
 
-                    // The directory index cannot itself be a directory.
-                    if metadata.is_dir() {
-                        return Err(IoError::new(IoErrorKind::NotFound, ""));
-                    }
+                // The directory index cannot itself be a directory.
+                if metadata.is_dir() {
+                    return Err(IoError::new(IoErrorKind::NotFound, ""));
+                }
 
-                    // Serve this file.
-                    let mime = MimeGuess::from_path(&full_path_index).first_or_octet_stream();
-                    return Ok((full_path_index, ResolveResult::Found(file, metadata, mime)))
-                },
-                _ => {
-                    //try nex index file
-                },
+                // Serve this file.
+                let mime = MimeGuess::from_path(&full_path_index).first_or_octet_stream();
+                return Ok((full_path_index, ResolveResult::Found(file, metadata, mime)))
             }
         }
     }

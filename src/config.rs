@@ -83,13 +83,13 @@ impl<'de> Deserialize<'de> for UseCase {
                     #[cfg(not(feature = "webdav"))]
                     return Err(DeError::custom("webdav support is disabled"));
                 }else if tree.contains_key(&SerdeContent::String("dir".to_string())) {
-                    return Ok(UseCase::StaticFiles(StaticFiles::deserialize(content).map_err(DeError::custom)?));
+                    Ok(UseCase::StaticFiles(StaticFiles::deserialize(content).map_err(DeError::custom)?))
                 }else{
-                    return Err(DeError::custom("Missing one of fcgi, assock, root, dir. Expected struct WwwRoot"));
+                    Err(DeError::custom("Missing one of fcgi, assock, root, dir. Expected struct WwwRoot"))
                 }
                 
             },
-            _ => return Err(DeError::custom("Invalid type. Expected struct WwwRoot")),
+            _ => Err(DeError::custom("Invalid type. Expected struct WwwRoot")),
         }
     }
 }
@@ -153,7 +153,7 @@ impl CFGError {
         self.errors.push(s);
     }
     fn has_errors(&self) -> bool {
-        self.errors.len() > 0
+        !self.errors.is_empty()
     }
 }
 impl fmt::Display for CFGError {
@@ -204,7 +204,7 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     let mut cfg = toml::from_slice::<Configuration>(&buffer)?;
     for (host_name, vhost) in cfg.hosts.iter_mut() {
         info!("host: {} @ {}", host_name, vhost.ip);
-        if vhost.paths.len() == 0 {
+        if vhost.paths.is_empty() {
             anyhow::bail!("vHost \"{}\" does not serve anything", host_name);
         }
     }
@@ -316,26 +316,22 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if params.tls.is_some() != hcfg.tls.is_some() {
                     errors.add(format!("All vHosts on {} must be either TLS or not", addr));
-                } else {
-                    if let Some(tlscfg) = params.tls.as_ref() {
-                        if let Err(e) = hcfg.tls.as_mut().unwrap().add(tlscfg, sni) {
-                            //safe because hcfg.tls is some at this point
-                            errors.add(format!("vHost {}:  {}", vhost, e));
-                        }
+                } else if let Some(tlscfg) = params.tls.as_ref() {
+                    if let Err(e) = hcfg.tls.as_mut().unwrap().add(tlscfg, sni) {
+                        //safe because hcfg.tls is some at this point
+                        errors.add(format!("vHost {}:  {}", vhost, e));
                     }
                 }
 
                 if params.validate_server_name {
                     hcfg.vhosts.insert(vhost, params);
+                } else if hcfg.default_host.is_none() {
+                    hcfg.default_host = Some(params);
                 } else {
-                    if hcfg.default_host.is_none() {
-                        hcfg.default_host = Some(params);
-                    } else {
-                        errors.add(format!(
-                            "{} is the second host on {} that does not validate the server name",
-                            vhost, addr
-                        ));
-                    }
+                    errors.add(format!(
+                        "{} is the second host on {} that does not validate the server name",
+                        vhost, addr
+                    ));
                 }
             }
         }
@@ -398,7 +394,7 @@ where
                 let de = content.clone();
                 match WwwRoot::deserialize(de) {
                     Ok(r) => {
-                        let k = if let Some(skey) = key.strip_prefix("`") {
+                        let k = if let Some(skey) = key.strip_prefix('`') {
                             //should not be in a URL, use to allow keywords (like ip) as well
                             skey
                         } else {

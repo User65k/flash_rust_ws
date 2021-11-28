@@ -1,6 +1,6 @@
 use hyper::{Body, Response, Request, header, StatusCode};
 use std::io::{Error as IoError, ErrorKind};
-use std::path::PathBuf;
+use std::path::Path;
 use crate::auth::{strip_prefix, get_map_from_header};
 use tokio::fs::File;
 use tokio::io::{BufReader, AsyncBufReadExt};
@@ -25,7 +25,7 @@ lazy_static! {
     };
 }
 
-fn create_resp_needs_auth(realm: &String, stale: bool) -> Response<Body> {
+fn create_resp_needs_auth(realm: &str, stale: bool) -> Response<Body> {
     let str_stale = if stale {
         "stale=true,"
     }else{
@@ -49,7 +49,7 @@ fn create_resp_needs_auth(realm: &String, stale: bool) -> Response<Body> {
 /// time+md5(rnd+pid+time)
 fn create_nonce() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)
-        .expect(&"creating nonces from before UNIX epoch not supported".to_string());
+        .expect("creating nonces from before UNIX epoch not supported");
     let secs = now.as_secs() as u32;
     let mut h = NONCESTARTHASH.clone();
     h.consume(secs.to_be_bytes());
@@ -70,7 +70,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool,()> {
         if let Ok(secs_nonce) = u32::from_str_radix(&n[..8], 16) {
             //check time
             let now = SystemTime::now().duration_since(UNIX_EPOCH)
-            .expect(&"creating nonces from before UNIX epoch not supported".to_string());
+            .expect("creating nonces from before UNIX epoch not supported");
             let secs_now = now.as_secs() as u32;
 
             if let Some(dur) = secs_now.checked_sub(secs_nonce) {
@@ -88,7 +88,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool,()> {
     Err(())
 }
 
-pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &String) -> Result<Option<Response<Body>>, IoError> {
+pub async fn check_digest(auth_file: &Path, req: &Request<Body>, realm: &str) -> Result<Option<Response<Body>>, IoError> {
     match req.headers().get(header::AUTHORIZATION)
           .and_then(|h| strip_prefix(h.as_bytes(), b"Digest ")) {
         None => {
@@ -98,10 +98,9 @@ pub async fn check_digest(auth_file: &PathBuf, req: &Request<Body>, realm: &Stri
             if let Ok(user_vals) = get_map_from_header(header) {
                 
                 if log_enabled!(Trace) {
-                    use std::iter::FromIterator;
                     use std::collections::HashMap;
 
-                    let h: HashMap<Bytes, Bytes> = HashMap::from_iter(user_vals.clone().into_iter().map(|(k, v)| (Bytes::copy_from_slice(k), Bytes::copy_from_slice(v))));
+                    let h: HashMap<Bytes, Bytes> = user_vals.clone().into_iter().map(|(k, v)| (Bytes::copy_from_slice(k), Bytes::copy_from_slice(v))).collect();
                     trace!("from header: {:?}", h);
                 }
 
@@ -224,6 +223,7 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::prelude::*;
+    use std::path::PathBuf;
     use crate::logging::init_stderr_logging;
 
     fn create_req(header: Option<&str>) -> Request<Body> {

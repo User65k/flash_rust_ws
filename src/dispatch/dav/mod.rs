@@ -29,11 +29,11 @@ pub async fn do_dav(req: Request<Body>, req_path: &Path, config: &Config, web_mo
             Ok(rb.body(Body::empty()).unwrap())
         },
         "GET" => handle_get(req, &full_path).await,
-        "PUT" if config.read_only==false => handle_put(req, &full_path).await,
-        "COPY" if config.read_only==false => handle_copy(req, &full_path, &abs_doc_root, &abs_web_mount).await,
-        "MOVE" if config.read_only==false => handle_move(req, &full_path, &abs_doc_root, &abs_web_mount).await,
-        "DELETE" if config.read_only==false => handle_delete(req, &full_path).await,
-        "MKCOL" if config.read_only==false => handle_mkdir(req, &full_path).await,
+        "PUT" if !config.read_only => handle_put(req, &full_path).await,
+        "COPY" if !config.read_only => handle_copy(req, &full_path, &abs_doc_root, &abs_web_mount).await,
+        "MOVE" if !config.read_only => handle_move(req, &full_path, &abs_doc_root, &abs_web_mount).await,
+        "DELETE" if !config.read_only => handle_delete(req, &full_path).await,
+        "MKCOL" if !config.read_only => handle_mkdir(req, &full_path).await,
         "PUT"|"COPY"|"MOVE"|"DELETE"|"MKCOL"
             => Err(IoError::new(ErrorKind::PermissionDenied,"read only")),
         _ => Ok(Response::builder()
@@ -125,9 +125,9 @@ fn get_dst(req: &Request<Body>, root: &Path, web_mount: &Path)
     let dst = req.headers().get("Destination")
         .map(|hv| hv.as_bytes())
         .and_then(|s| hyper::Uri::try_from(s).ok())
-        .ok_or(IoError::new(ErrorKind::InvalidData,"no valid destination path"))?;
+        .ok_or_else(|| IoError::new(ErrorKind::InvalidData,"no valid destination path"))?;
 
-    let request_path = PathBuf::from(decode_percents(&dst.path()));
+    let request_path = PathBuf::from(decode_percents(dst.path()));
     let a = request_path.strip_prefix(web_mount)
         .map_err(|_|{
             IoError::new(ErrorKind::PermissionDenied,"destination path outside of mount")

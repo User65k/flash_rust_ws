@@ -17,7 +17,7 @@ use std::vec::Vec;
 use std::sync::Arc;
 use std::{fs, io};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{PlainStream, TLSBuilderTrait};
 
@@ -155,19 +155,19 @@ impl TLSBuilderTrait for ParsedTLSConfig {
 
 
 // Load public certificate from file.
-fn load_certs(filename: &PathBuf) -> Result<Vec<Certificate>,io::Error> {
+fn load_certs(filename: &Path) -> Result<Vec<Certificate>,io::Error> {
     // Open certificate file.
     let certfile = fs::File::open(filename)?;
     let mut reader = io::BufReader::new(certfile);
 
     // Load and return certificate.
     let chain = rustls_pemfile::certs(&mut reader)?
-        .drain(..).map(|v|Certificate(v)).collect();
+        .drain(..).map(Certificate).collect();
     Ok(chain)
 }
 
 // Load private key from file.
-fn load_private_key(filename: &PathBuf) -> Result<PrivateKey,io::Error> {
+fn load_private_key(filename: &Path) -> Result<PrivateKey,io::Error> {
     let keyfile = fs::File::open(filename)?;
     let mut reader = io::BufReader::new(keyfile);
 
@@ -179,9 +179,9 @@ fn load_private_key(filename: &PathBuf) -> Result<PrivateKey,io::Error> {
             _ => {}
         }
     }
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a single private key"));
+    Err(io::Error::new(io::ErrorKind::InvalidData, "expected a single private key"))
 }
-fn lookup_suites(suites: &Vec<String>) -> Result<Vec<SupportedCipherSuite>, io::Error> {
+fn lookup_suites(suites: &[String]) -> Result<Vec<SupportedCipherSuite>, io::Error> {
     let mut out = Vec::new();
 
     'cpr: for csname in suites {
@@ -198,7 +198,7 @@ fn lookup_suites(suites: &Vec<String>) -> Result<Vec<SupportedCipherSuite>, io::
 }
 
 /// Make a vector of protocol versions named in `versions`
-fn lookup_versions(versions: &Vec<String>) -> Result<Vec<&'static SupportedProtocolVersion>, io::Error> {
+fn lookup_versions(versions: &[String]) -> Result<Vec<&'static SupportedProtocolVersion>, io::Error> {
     let mut out = Vec::new();
 
     for vname in versions {

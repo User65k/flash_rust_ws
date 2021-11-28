@@ -31,7 +31,7 @@ fn get_map_from_header(header: &[u8]) -> Result<HashMap<&[u8], &[u8]>,()> {
     let mut asign = Vec::new();
     let mut i: usize = 0;
     let mut esc = false;
-    for c in header.as_ref() {
+    for c in header {
         match (c, esc) {
             (b'=', false) => asign.push(i),
             (b',', false) => sep.push(i),

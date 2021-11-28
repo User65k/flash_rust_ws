@@ -16,17 +16,17 @@ use crate::{body::FCGIBody, config::StaticFiles};
 pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
 
-const SCRIPT_NAME: &'static [u8] = b"SCRIPT_NAME";
-const PATH_INFO: &'static [u8] = b"PATH_INFO";
-const SERVER_NAME: &'static [u8] = b"SERVER_NAME";
-const SERVER_PORT: &'static [u8] = b"SERVER_PORT";
-const SERVER_PROTOCOL: &'static [u8] = b"SERVER_PROTOCOL";
-const REMOTE_ADDR: &'static [u8] = b"REMOTE_ADDR";
-const GATEWAY_INTERFACE: &'static [u8] = b"GATEWAY_INTERFACE";
-const CGI_VERS: &'static [u8] = b"CGI/1.1";
-const SERVER_SOFTWARE: &'static [u8] = b"SERVER_SOFTWARE";
-const REQUEST_URI: &'static [u8] = b"REQUEST_URI";
-const SCRIPT_FILENAME: &'static [u8] = b"SCRIPT_FILENAME";
+const SCRIPT_NAME: &[u8] = b"SCRIPT_NAME";
+const PATH_INFO: &[u8] = b"PATH_INFO";
+const SERVER_NAME: &[u8] = b"SERVER_NAME";
+const SERVER_PORT: &[u8] = b"SERVER_PORT";
+const SERVER_PROTOCOL: &[u8] = b"SERVER_PROTOCOL";
+const REMOTE_ADDR: &[u8] = b"REMOTE_ADDR";
+const GATEWAY_INTERFACE: &[u8] = b"GATEWAY_INTERFACE";
+const CGI_VERS: &[u8] = b"CGI/1.1";
+const SERVER_SOFTWARE: &[u8] = b"SERVER_SOFTWARE";
+const REQUEST_URI: &[u8] = b"REQUEST_URI";
+const SCRIPT_FILENAME: &[u8] = b"SCRIPT_FILENAME";
 
 
 pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
@@ -44,12 +44,21 @@ pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
             "FCGI app not available"));
     };
     
-    if req.body().size_hint().exact().is_none() {
-
-        return Ok(Response::builder()
-        .status(hyper::StatusCode::LENGTH_REQUIRED)
-        .body(Body::empty())
-        .expect("unable to build response"));
+    match *req.method() {
+        hyper::http::Method::GET
+        | hyper::http::Method::HEAD
+        | hyper::http::Method::OPTIONS
+        | hyper::http::Method::DELETE
+        | hyper::http::Method::TRACE => {},
+        _ => {
+            if req.body().size_hint().exact().is_none() {
+        
+                return Ok(Response::builder()
+                .status(hyper::StatusCode::LENGTH_REQUIRED)
+                .body(Body::empty())
+                .expect("unable to build response"));
+            }
+        }
     }
 
     let mut params = HashMap::new();
@@ -94,7 +103,7 @@ pub async fn fcgi_call(fcgi_cfg: &FCGIApp,
     );
     params.insert( // must CGI/1.1  4.1.15, flup cares for this
         Bytes::from(SERVER_PORT),
-        Bytes::from(req.uri().port().map(|p|p.to_string()).unwrap_or("80".to_string())),
+        Bytes::from(req.uri().port().map(|p|p.to_string()).unwrap_or_else(||"80".to_string())),
     );
     params.insert(  // must CGI/1.1  4.1.16, flup cares for this
         Bytes::from(SERVER_PROTOCOL),

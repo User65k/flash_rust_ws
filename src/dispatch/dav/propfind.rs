@@ -29,7 +29,7 @@ pub async fn handle_propfind(mut req: Request<Body>, path: &Path, root: PathBuf,
                                                 ..Default::default()
                                             });
     let mut props = Vec::new();
-    if let Err(_) = parse_propfind(xml, |prop| { props.push(prop); }) {
+    if parse_propfind(xml, |prop| { props.push(prop); }).is_err() {
         return Err(IoError::new(ErrorKind::InvalidData,"xml parse error"));
     }
 
@@ -63,7 +63,7 @@ pub async fn handle_propfind(mut req: Request<Body>, path: &Path, root: PathBuf,
             .map_err(|se|IoError::new(ErrorKind::Other,se))?;
     //}
     if meta.is_dir() {
-        handle_propfind_path_recursive(&path, &root, web_mount, depth, &mut xmlwriter, &props).await
+        handle_propfind_path_recursive(path, &root, web_mount, depth, &mut xmlwriter, &props).await
         .map_err(|se|IoError::new(ErrorKind::Other,se))?;
     }
 
@@ -75,7 +75,7 @@ pub async fn handle_propfind(mut req: Request<Body>, path: &Path, root: PathBuf,
     *res.status_mut() = StatusCode::MULTI_STATUS;
     Ok(res)
 }
-fn parse_propfind<R: Read, F: FnMut(OwnedName) -> ()>(mut xml: EventReader<R>, mut f: F)
+fn parse_propfind<R: Read, F: FnMut(OwnedName)>(mut xml: EventReader<R>, mut f: F)
 -> Result<(), XmlRError> {
     enum State {
         Start,
@@ -171,7 +171,7 @@ fn handle_propfind_path<W: Write>(xmlwriter: &mut EventWriter<W>,
     xmlwriter.write(XmlWEvent::end_element())?; // status
     xmlwriter.write(XmlWEvent::end_element())?; // propstat
 
-    if failed_props.len() > 0 {
+    if !failed_props.is_empty() {
         // Handle the failed properties
         xmlwriter.write(XmlWEvent::start_element("D:propstat"))?;
         xmlwriter.write(XmlWEvent::start_element("D:prop"))?;
