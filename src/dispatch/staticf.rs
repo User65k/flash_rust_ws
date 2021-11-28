@@ -1,36 +1,38 @@
-use mime_guess::MimeGuess;
-use std::io::{Error as IoError, ErrorKind as IoErrorKind};
-use std::path::PathBuf;
+use hyper::{Body, Method, Request, Response};
 use hyper_staticfile::ResolveResult;
-use std::fs::{Metadata, OpenOptions as StdOpenOptions};
-use std::path::Path;
-use tokio::fs::{File, OpenOptions};
-use log::debug;
 use hyper_staticfile::ResponseBuilder as FileResponseBuilder;
-use hyper::{Method, Body, Request, Response};
+use log::debug;
+use mime_guess::MimeGuess;
+use std::fs::{Metadata, OpenOptions as StdOpenOptions};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
+use std::path::Path;
+use std::path::PathBuf;
+use tokio::fs::{File, OpenOptions};
 
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 #[cfg(windows)]
 use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
 
-pub async fn return_file(req: &Request<Body>,
-    resolved_file: ResolveResult) -> Result<Response<Body>, IoError> {
+pub async fn return_file(
+    req: &Request<Body>,
+    resolved_file: ResolveResult,
+) -> Result<Response<Body>, IoError> {
     // Handle only `GET`/`HEAD` and absolute paths.
     match *req.method() {
-        Method::HEAD | Method::GET => {},
+        Method::HEAD | Method::GET => {}
         Method::OPTIONS => {
             return Ok(Response::builder()
-            .status(hyper::StatusCode::OK)
-            .header(hyper::header::ALLOW, "GET,HEAD,OPTIONS")
-            .body(Body::empty())
-            .expect("unable to build response"))
-        },
+                .status(hyper::StatusCode::OK)
+                .header(hyper::header::ALLOW, "GET,HEAD,OPTIONS")
+                .body(Body::empty())
+                .expect("unable to build response"))
+        }
         _ => {
             return Ok(Response::builder()
-            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::empty())
-            .expect("unable to build response"));
+                .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+                .body(Body::empty())
+                .expect("unable to build response"));
         }
     }
 
@@ -43,7 +45,10 @@ pub async fn return_file(req: &Request<Body>,
 }
 
 /// Open a file and get metadata.
-async fn open_with_metadata(path: impl AsRef<Path>, follow_symlinks: bool) -> Result<(File, Metadata), IoError> {
+async fn open_with_metadata(
+    path: impl AsRef<Path>,
+    follow_symlinks: bool,
+) -> Result<(File, Metadata), IoError> {
     let mut opts = StdOpenOptions::new();
     opts.read(true);
 
@@ -54,10 +59,13 @@ async fn open_with_metadata(path: impl AsRef<Path>, follow_symlinks: bool) -> Re
     let file = OpenOptions::from(opts).open(&path).await?;
     let metadata = if follow_symlinks {
         file.metadata().await?
-    }else{
+    } else {
         let metadata = tokio::fs::symlink_metadata(path).await?;
         if metadata.file_type().is_symlink() {
-            return Err(IoError::new(IoErrorKind::PermissionDenied, "Symlinks are not allowed"));
+            return Err(IoError::new(
+                IoErrorKind::PermissionDenied,
+                "Symlinks are not allowed",
+            ));
         }
         metadata
     };
@@ -68,12 +76,10 @@ pub async fn resolve_path(
     full_path: &Path,
     is_dir_request: bool,
     index_files: &Option<Vec<PathBuf>>,
-    follow_symlinks: bool
+    follow_symlinks: bool,
 ) -> Result<(PathBuf, ResolveResult), IoError> {
-
-
     let (file, metadata) = open_with_metadata(&full_path, follow_symlinks).await?;
-    debug!("have {:?}",metadata);
+    debug!("have {:?}", metadata);
 
     // The resolved `full_path` doesn't contain the trailing slash anymore, so we may
     // have opened a file for a directory request, which we treat as 'not found'.
@@ -91,15 +97,16 @@ pub async fn resolve_path(
         let mime = MimeGuess::from_path(&full_path).first_or_octet_stream();
         return Ok((full_path.into(), ResolveResult::Found(file, metadata, mime)));
     }
-    debug!("dir {:?}",full_path);
+    debug!("dir {:?}", full_path);
 
     if let Some(ifiles) = index_files {
         // Resolve the directory index.
         for index_file in ifiles {
             let full_path_index = full_path.join(index_file);
-            debug!("checking for {:?}",full_path_index);
-            if let Ok((file, metadata)) = open_with_metadata(&full_path_index, follow_symlinks).await {
-
+            debug!("checking for {:?}", full_path_index);
+            if let Ok((file, metadata)) =
+                open_with_metadata(&full_path_index, follow_symlinks).await
+            {
                 // The directory index cannot itself be a directory.
                 if metadata.is_dir() {
                     return Err(IoError::new(IoErrorKind::NotFound, ""));
@@ -107,9 +114,12 @@ pub async fn resolve_path(
 
                 // Serve this file.
                 let mime = MimeGuess::from_path(&full_path_index).first_or_octet_stream();
-                return Ok((full_path_index, ResolveResult::Found(file, metadata, mime)))
+                return Ok((full_path_index, ResolveResult::Found(file, metadata, mime)));
             }
         }
     }
-    Err(IoError::new(IoErrorKind::PermissionDenied, "dir w/o index file"))
+    Err(IoError::new(
+        IoErrorKind::PermissionDenied,
+        "dir w/o index file",
+    ))
 }

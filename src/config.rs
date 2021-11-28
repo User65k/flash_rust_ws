@@ -37,7 +37,7 @@ pub struct StaticFiles {
     pub serve: Option<Vec<PathBuf>>,
 }
 impl StaticFiles {
-    pub async fn setup(&self) -> Result<(),String> {
+    pub async fn setup(&self) -> Result<(), String> {
         if !self.dir.is_dir() {
             return Err(format!("{:?} ist not a directory", self.dir));
         }
@@ -61,34 +61,43 @@ pub enum UseCase {
 impl<'de> Deserialize<'de> for UseCase {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de> {
-
+        D: Deserializer<'de>,
+    {
         let content = SerdeContent::deserialize(deserializer)?;
 
         match &content {
             SerdeContent::Map(tree) => {
                 if tree.contains_key(&SerdeContent::String("fcgi".to_string())) {
                     #[cfg(feature = "fcgi")]
-                    return Ok(UseCase::FCGI(FcgiMnt::deserialize(content).map_err(DeError::custom)?));
+                    return Ok(UseCase::FCGI(
+                        FcgiMnt::deserialize(content).map_err(DeError::custom)?,
+                    ));
                     #[cfg(not(feature = "fcgi"))]
                     return Err(DeError::custom("fcgi support is disabled"));
-                }else if tree.contains_key(&SerdeContent::String("assock".to_string())) {
+                } else if tree.contains_key(&SerdeContent::String("assock".to_string())) {
                     #[cfg(feature = "websocket")]
-                    return Ok(UseCase::Websocket(Websocket::deserialize(content).map_err(DeError::custom)?));
+                    return Ok(UseCase::Websocket(
+                        Websocket::deserialize(content).map_err(DeError::custom)?,
+                    ));
                     #[cfg(not(feature = "websocket"))]
                     return Err(DeError::custom("websocket support is disabled"));
-                }else if tree.contains_key(&SerdeContent::String("root".to_string())) {
+                } else if tree.contains_key(&SerdeContent::String("root".to_string())) {
                     #[cfg(feature = "webdav")]
-                    return Ok(UseCase::Webdav(webdav::deserialize(content).map_err(DeError::custom)?));
+                    return Ok(UseCase::Webdav(
+                        webdav::deserialize(content).map_err(DeError::custom)?,
+                    ));
                     #[cfg(not(feature = "webdav"))]
                     return Err(DeError::custom("webdav support is disabled"));
-                }else if tree.contains_key(&SerdeContent::String("dir".to_string())) {
-                    Ok(UseCase::StaticFiles(StaticFiles::deserialize(content).map_err(DeError::custom)?))
-                }else{
-                    Err(DeError::custom("Missing one of fcgi, assock, root, dir. Expected struct WwwRoot"))
+                } else if tree.contains_key(&SerdeContent::String("dir".to_string())) {
+                    Ok(UseCase::StaticFiles(
+                        StaticFiles::deserialize(content).map_err(DeError::custom)?,
+                    ))
+                } else {
+                    Err(DeError::custom(
+                        "Missing one of fcgi, assock, root, dir. Expected struct WwwRoot",
+                    ))
                 }
-                
-            },
+            }
             _ => Err(DeError::custom("Invalid type. Expected struct WwwRoot")),
         }
     }
@@ -260,12 +269,7 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                 UseCase::Websocket(f) => f.setup().await,
                 UseCase::StaticFiles(sf) => sf.setup().await,
             } {
-                errors.add(format!(
-                    "\"{}/{}\": {}",
-                    vhost,
-                    mount.to_string_lossy(),
-                    e
-                ));
+                errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
             }
             //check if header are parseable
             if wwwroot.header.is_none() {
@@ -352,7 +356,7 @@ fn do_tcp_socket_activation() -> HashMap<SocketAddr, TcpListener> {
         for fd in fds {
             if fd.is_inet() {
                 let fd = fd.into_raw_fd();
-                
+
                 //close FD on EXEC / when starting FCGI apps
                 if -1 == unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } {
                     log::warn!("counld not set CLOEXEC");
@@ -403,10 +407,10 @@ where
                         mounts.insert(PathBuf::from(k), r);
                     }
                     Err(e) => {
-                        if format!("{}",&e).ends_with("Expected struct WwwRoot") {
+                        if format!("{}", &e).ends_with("Expected struct WwwRoot") {
                             //UseCase error -> maybe ok
                             lefties.insert(key, content);
-                        }else{
+                        } else {
                             //serde error -> real one
                             return Err(DeError::custom(format!("{}: {}", &key, e)));
                         }

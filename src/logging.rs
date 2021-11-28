@@ -1,23 +1,23 @@
 use log::LevelFilter;
 use log4rs::{
-    Handle,
-    append::console::{ConsoleAppender,Target},
+    append::console::{ConsoleAppender, Target},
     config::{Appender, Config, Logger, Root},
     encode::pattern::PatternEncoder,
+    Handle,
 };
 
 use std::error;
 
 use log4rs::{
     config::{Deserializers, RawConfig},
-    init_config
+    init_config,
 };
 
 #[cfg(unix)]
 mod systemd {
-    use std::borrow::Cow;
     use libsystemd::logging::Priority;
     use log::Level;
+    use std::borrow::Cow;
 
     #[derive(Debug)]
     pub struct JournalAppender;
@@ -30,11 +30,10 @@ mod systemd {
 
     impl log4rs::append::Append for JournalAppender {
         fn append(&self, record: &log::Record) -> Result<(), anyhow::Error> {
-            
             let prio = match record.level() {
                 Level::Error => Priority::Error,
-                Level::Warn  => Priority::Warning,
-                Level::Info  => Priority::Info,
+                Level::Warn => Priority::Warning,
+                Level::Info => Priority::Info,
                 Level::Debug => Priority::Debug,
                 Level::Trace => Priority::Debug,
             };
@@ -54,9 +53,11 @@ mod systemd {
                 fields.push(("CODE_MODULE".into(), module.into()))
             }
 
-            libsystemd::logging::journal_send(prio,
+            libsystemd::logging::journal_send(
+                prio,
                 &format!("{}", record.args()),
-                fields.into_iter())?;
+                fields.into_iter(),
+            )?;
             Ok(())
         }
 
@@ -64,8 +65,7 @@ mod systemd {
     }
 }
 
-pub fn init_file(config: RawConfig, handle: &Handle) -> Result<(), Box<dyn error::Error>>
-{
+pub fn init_file(config: RawConfig, handle: &Handle) -> Result<(), Box<dyn error::Error>> {
     let deserializers = Deserializers::default();
     //let refresh_rate = config.refresh_rate();
     let config = deserialize(&config, &deserializers)?;
@@ -73,7 +73,10 @@ pub fn init_file(config: RawConfig, handle: &Handle) -> Result<(), Box<dyn error
     handle.set_config(config);
     Ok(())
 }
-fn deserialize(config: &RawConfig, deserializers: &Deserializers) ->  Result<Config, Box<dyn error::Error>> {
+fn deserialize(
+    config: &RawConfig,
+    deserializers: &Deserializers,
+) -> Result<Config, Box<dyn error::Error>> {
     let (appenders, errors) = config.appenders_lossy(deserializers);
     if !errors.is_empty() {
         return Err(Box::new(errors));
@@ -81,9 +84,9 @@ fn deserialize(config: &RawConfig, deserializers: &Deserializers) ->  Result<Con
     let (mut has_err, mut has_out, mut has_sysd) = (false, false, false);
     for abc in appenders.iter() {
         match abc.name() {
-            "stderr" => has_err=true,
-            "stdout" => has_out=true,
-            "journal" => has_sysd=true,
+            "stderr" => has_err = true,
+            "stdout" => has_out = true,
+            "journal" => has_sysd = true,
             _ => {}
         }
     }
@@ -96,19 +99,22 @@ fn deserialize(config: &RawConfig, deserializers: &Deserializers) ->  Result<Con
     }
     #[cfg(unix)]
     if !has_sysd {
-        builder = builder.appender(Appender::builder().build("journal", Box::new(systemd::JournalAppender::new())));
+        builder = builder.appender(
+            Appender::builder().build("journal", Box::new(systemd::JournalAppender::new())),
+        );
     }
 
-    let config = builder
-        .loggers(config.loggers())
-        .build(config.root())?;
+    let config = builder.loggers(config.loggers()).build(config.root())?;
 
     Ok(config)
 }
 fn create_console_logger(target: Target) -> Appender {
     let ca = ConsoleAppender::builder() // "{d} {l} {t} - {m}{n}".
-        .encoder(Box::new(PatternEncoder::new("{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {t} - {m}{n}")))
-        .target(target).build();
+        .encoder(Box::new(PatternEncoder::new(
+            "{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {t} - {m}{n}",
+        )))
+        .target(target)
+        .build();
     let name = match target {
         Target::Stdout => "stdout",
         Target::Stderr => "stderr",
@@ -123,10 +129,11 @@ pub fn init_stderr_logging() -> Handle {
             "info" => LevelFilter::Info,
             "trace" => LevelFilter::Trace,
             _ => {
-            eprintln!("unsupported log level: {}", &level);
-            LevelFilter::Warn},
+                eprintln!("unsupported log level: {}", &level);
+                LevelFilter::Warn
+            }
         }
-    }else{
+    } else {
         LevelFilter::Warn
     };
 
@@ -140,7 +147,7 @@ pub fn init_stderr_logging() -> Handle {
         }
         if invoked_by_systemd {
             Appender::builder().build("stderr", Box::new(systemd::JournalAppender::new()))
-        }else{
+        } else {
             create_console_logger(Target::Stderr)
         }
     };

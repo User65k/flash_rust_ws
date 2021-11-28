@@ -2,19 +2,19 @@
 mod rustls;
 
 #[cfg(feature = "tlsrust")]
-use self::rustls::{UnderlyingTLSStream, UnderlyingAccept, TLSConfig};
+pub use self::rustls::{ParsedTLSConfig, TlsUserConfig};
 #[cfg(feature = "tlsrust")]
-pub use self::rustls::{TlsUserConfig, ParsedTLSConfig};
+use self::rustls::{TLSConfig, UnderlyingAccept, UnderlyingTLSStream};
 
 use super::{PlainIncoming, PlainStream};
 use core::task::{Context, Poll};
-use std::pin::Pin;
-use hyper::server::accept::Accept;
 use futures_util::ready;
+use hyper::server::accept::Accept;
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use std::future::Future;
 
 use std::net::SocketAddr;
 
@@ -31,10 +31,22 @@ enum State {
 
 pub(crate) trait TLSBuilderTrait {
     /// called by first vHost that wants TLS
-    fn new(c: &TlsUserConfig, sni: Option<&str>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> where Self: std::marker::Sized;
+    fn new(
+        c: &TlsUserConfig,
+        sni: Option<&str>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    where
+        Self: std::marker::Sized;
     /// called by all but the first vHost on one socket
-    fn add(&mut self, c: &TlsUserConfig, sni: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    fn get_accept_feature(accept: &TlsAcceptor, stream: PlainStream) -> UnderlyingAccept<PlainStream>;
+    fn add(
+        &mut self,
+        c: &TlsUserConfig,
+        sni: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn get_accept_feature(
+        accept: &TlsAcceptor,
+        stream: PlainStream,
+    ) -> UnderlyingAccept<PlainStream>;
     fn get_acceptor(self, incoming: PlainIncoming) -> TlsAcceptor;
 }
 
@@ -154,4 +166,3 @@ impl Accept for TlsAcceptor {
         }
     }
 }
-
