@@ -316,21 +316,25 @@ async fn dispatch_to_vhost(
 #[cfg(test)]
 mod vhost_tests {
     use super::*;
+    fn make_host_cfg(default_host: Option<config::VHost>, named: Option<(String, config::VHost)>) -> Arc<config::HostCfg> {
+        let mut map: HashMap<String, config::VHost> = HashMap::new();
+        if let Some((k,v)) = named {
+            map.insert(k, v);
+        }
+        Arc::new(config::HostCfg {
+            default_host,
+            vhosts: map,
+            listener: None,
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            tls: None,
+        })
+    }
     #[tokio::test]
     async fn unknown_vhost() {
         let req = Request::new(Body::empty());
         let sa = "127.0.0.1:8080".parse().unwrap();
 
-        let mut map: HashMap<String, config::VHost> = HashMap::new();
-        map.insert("1".to_string(), config::VHost::new(sa));
-
-        let cfg = Arc::new(config::HostCfg {
-            default_host: None,
-            vhosts: map,
-            listener: None,
-            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
-            tls: None,
-        });
+        let cfg = make_host_cfg(None, ("1".to_string(), config::VHost::new(sa)));
         let res = dispatch_to_vhost(req, cfg, sa).await;
         let res: IoError = res.unwrap_err();
         assert_eq!(res.into_inner().unwrap().to_string(), "no vHost found");
@@ -343,16 +347,7 @@ mod vhost_tests {
 
         let sa = "127.0.0.1:8080".parse().unwrap();
 
-        let mut map: HashMap<String, config::VHost> = HashMap::new();
-        map.insert("1".to_string(), config::VHost::new(sa));
-
-        let cfg = Arc::new(config::HostCfg {
-            default_host: None,
-            vhosts: map,
-            listener: None,
-            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
-            tls: None,
-        });
+        let cfg = make_host_cfg(None, ("1".to_string(), config::VHost::new(sa)));
 
         let res = dispatch_to_vhost(req, cfg, sa).await;
         let res: IoError = res.unwrap_err();
@@ -362,15 +357,8 @@ mod vhost_tests {
     async fn default_vhost() {
         let req = Request::new(Body::empty());
         let sa = "127.0.0.1:8080".parse().unwrap();
-        let map: HashMap<String, config::VHost> = HashMap::new();
 
-        let cfg = Arc::new(config::HostCfg {
-            default_host: Some(config::VHost::new(sa)),
-            vhosts: map,
-            listener: None,
-            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
-            tls: None,
-        });
+        let cfg = make_host_cfg(Some(config::VHost::new(sa)), None);
 
         let res = dispatch_to_vhost(req, cfg, sa).await;
         let res: IoError = res.unwrap_err();
