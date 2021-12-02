@@ -5,48 +5,50 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 
 */
 
-use futures_util::future::{select, join_all};
+use futures_util::future::join_all;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request};
-use log::{info, error, debug, trace};
-use std::net::SocketAddr;
+use log::{debug, error, info, trace};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::task::JoinHandle;
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::signal;
+use tokio::task::JoinHandle;
 
-mod config;
-mod user;
-mod pidfile;
-mod body;
-mod dispatch;
-mod transport;
-mod logging;
 mod auth;
+mod body;
+mod config;
+mod dispatch;
+mod logging;
+mod pidfile;
+mod transport;
+mod user;
 
+#[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+use crate::transport::tls::{TLSBuilderTrait, TlsStream};
 use transport::{PlainIncoming, PlainStream};
-#[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
-use crate::transport::tls::{TlsStream, TLSBuilderTrait};
 
 /// Set up each `SocketAddr` and return the `JoinHandle`s
 ///
 /// Walk trought `listening_ifs` and create a `PlainIncoming` (TCP Listener) for each `SocketAddr`.
 /// If its config has TLS wrap the `PlainIncoming` into an `TlsAcceptor`
-async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::HostCfg>)
- -> Result<Vec<JoinHandle<Result<(), hyper::Error>>>, Box<dyn Error>> {
-
+async fn prepare_hyper_servers(
+    mut listening_ifs: HashMap<SocketAddr, config::HostCfg>,
+) -> Result<Vec<JoinHandle<Result<(), hyper::Error>>>, Box<dyn Error>> {
     let mut handles = vec![];
     for (addr, mut cfg) in listening_ifs.drain() {
         let l = match cfg.listener.take() {
             Some(l) => l,
-            None => {return Err(Box::new(IoError::new(ErrorKind::Other, "could not listen")));}
+            None => {
+                return Err(Box::new(IoError::new(ErrorKind::Other, "could not listen")));
+            }
         };
         let server = match PlainIncoming::from_std(l) {
             Ok(incoming) => {
                 info!("Bound to {}", &addr);
-                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+                #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 let use_tls = cfg.tls.take();
 
                 let hcfg = Arc::new(cfg);
@@ -54,11 +56,13 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
                     trace!("Connected on {} by {}", &addr, &remote_addr);
                     let hcfg = hcfg.clone();
                     async move {
-                        Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| dispatch::handle_request(req, hcfg.clone(), remote_addr) ))
+                        Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
+                            dispatch::handle_request(req, hcfg.clone(), remote_addr)
+                        }))
                     }
                 };
-                
-                #[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+
+                #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if let Some(tls_cfg) = use_tls {
                     let a = tls_cfg.get_acceptor(incoming);
                     let new_service = make_service_fn(move |socket: &TlsStream| {
@@ -66,22 +70,30 @@ async fn prepare_hyper_servers(mut listening_ifs: HashMap<SocketAddr, config::Ho
                         serv_func(remote_addr)
                     });
                     tokio::spawn(hyper::Server::builder(a).executor(Exec).serve(new_service))
-                }else{
+                } else {
                     let new_service = make_service_fn(move |socket: &PlainStream| {
                         let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
-                    tokio::spawn(hyper::Server::builder(incoming).executor(Exec).serve(new_service))
+                    tokio::spawn(
+                        hyper::Server::builder(incoming)
+                            .executor(Exec)
+                            .serve(new_service),
+                    )
                 }
-                #[cfg(not(any(feature = "tlsrust",feature = "tlsnative")))]
+                #[cfg(not(any(feature = "tlsrust", feature = "tlsnative")))]
                 {
                     let new_service = make_service_fn(move |socket: &PlainStream| {
                         let remote_addr = socket.remote_addr();
                         serv_func(remote_addr)
                     });
-                    tokio::spawn(hyper::Server::builder(incoming).executor(Exec).serve(new_service))
+                    tokio::spawn(
+                        hyper::Server::builder(incoming)
+                            .executor(Exec)
+                            .serve(new_service),
+                    )
                 }
-            },
+            }
             Err(err) => {
                 error!("{}: {}", addr, err);
                 return Err(Box::new(err));
@@ -98,7 +110,7 @@ struct Exec;
 impl<F> hyper::rt::Executor<F> for Exec
 where
     F: std::future::Future + Send + 'static,
-    F::Output: Send
+    F::Output: Send,
 {
     fn execute(&self, task: F) {
         tokio::spawn(task);
@@ -112,12 +124,15 @@ async fn main() {
     match config::load_config() {
         Err(e) => {
             error!("Configuration error!\r\n{}", e);
-        },
+        }
         Ok(mut cfg) => {
             //group config by SocketAddrs
             let listening_ifs = match config::group_config(&mut cfg).await {
-                Err(e) => {error!("Configuration error!\r\n{}", e);return;},
-                Ok(m) => m
+                Err(e) => {
+                    error!("Configuration error!\r\n{}", e);
+                    return;
+                }
+                Ok(m) => m,
             };
             //Write pid file
             if let Some(pidfile) = cfg.pidfile {
@@ -147,7 +162,7 @@ async fn main() {
                     return;
                 }
             }
-            debug!("{:#?}",listening_ifs);
+            debug!("{:#?}", listening_ifs);
             //setup all servers
             match prepare_hyper_servers(listening_ifs).await {
                 Ok(handles) => {
@@ -167,9 +182,9 @@ async fn main() {
                             //TODO wait until all cleanups are done
                         }
                     }
-                },
+                }
                 Err(e) => {
-                    error!("{}",e);
+                    error!("{}", e);
                     eprintln!("Error! See Logs");
                 }
             }

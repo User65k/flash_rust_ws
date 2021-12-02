@@ -1,46 +1,52 @@
 use bytes::BytesMut;
-use hyper::{Body, HeaderMap, Request, Response, StatusCode, header, upgrade::Upgraded};
-use std::{io::{Error as IoError, ErrorKind}, path::{Path, PathBuf}};
-use log::{info, error, debug, trace};
+use hyper::{header, upgrade::Upgraded, Body, HeaderMap, Request, Response, StatusCode};
+use log::error;
 use std::net::SocketAddr;
+use std::{
+    io::{Error as IoError, ErrorKind},
+    path::{Path, PathBuf},
+};
 use tokio_util::codec::{Decoder, Framed};
-use websocket_codec::{ClientRequest, MessageCodec, Message, Opcode};
+use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use async_fcgi::stream::{Stream, FCGIAddr};
 
-
-pub async fn upgrade(req: Request<Body>,
+pub async fn upgrade(
+    req: Request<Body>,
     ws: &Websocket,
     req_path: &Path,
-    remote_addr: SocketAddr) -> Result<Response<Body>, IoError> {
-
+    _remote_addr: SocketAddr,
+) -> Result<Response<Body>, IoError> {
     //check if path is deeper than it should -> 404
-    if req_path.as_os_str().len()!=0 {
+    if !req_path.as_os_str().is_empty() {
         return Err(IoError::new(ErrorKind::NotFound, "WS mount had path"));
     }
 
     //update the request
     let mut res = Response::new(Body::empty());
     match *req.method() {
-        hyper::Method::GET => {},
+        hyper::Method::GET => {}
         hyper::Method::OPTIONS => {
-            res.headers_mut().insert(header::ALLOW, header::HeaderValue::from_static("GET"));
+            res.headers_mut()
+                .insert(header::ALLOW, header::HeaderValue::from_static("GET"));
             return Ok(res);
-        },
+        }
         _ => {
             *res.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
             return Ok(res);
         }
     }
 
-    let wscfg = match ws {/*
+    let wscfg = match ws {
+        /*
         Websocket::Proxy { forward } => {
             *res.status_mut() = StatusCode::NOT_IMPLEMENTED;
             return Ok(res);
         },*/
-        Websocket::Unwraped(wscfg) => wscfg
+        Websocket::Unwraped(wscfg) => wscfg,
     };
 
     let ws_accept = if let Ok(req) = ClientRequest::parse(|name| {
@@ -53,7 +59,7 @@ pub async fn upgrade(req: Request<Body>,
     };
 
     //TODO Sec-WebSocket-Protocol
-    //TODO Sec-WebSocket-Extensions	
+    //TODO Sec-WebSocket-Extensions
 
     let addr: FCGIAddr = (&wscfg.assock).into();
     let forward_header = wscfg.forward_header;
@@ -62,7 +68,7 @@ pub async fn upgrade(req: Request<Body>,
         let header = if forward_header {
             error!("forwarding header...");
             Some(req.headers().clone())
-        }else{
+        } else {
             None
         };
         match hyper::upgrade::on(req).await {
@@ -77,29 +83,43 @@ pub async fn upgrade(req: Request<Body>,
     *res.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
 
     let headers = res.headers_mut();
-    headers.insert(header::UPGRADE, header::HeaderValue::from_static("websocket"));
-    headers.insert(header::CONNECTION, header::HeaderValue::from_static("Upgrade"));
-    headers.insert(header::SEC_WEBSOCKET_ACCEPT, header::HeaderValue::from_str(&ws_accept).unwrap());
+    headers.insert(
+        header::UPGRADE,
+        header::HeaderValue::from_static("websocket"),
+    );
+    headers.insert(
+        header::CONNECTION,
+        header::HeaderValue::from_static("Upgrade"),
+    );
+    headers.insert(
+        header::SEC_WEBSOCKET_ACCEPT,
+        header::HeaderValue::from_str(&ws_accept).unwrap(),
+    );
     Ok(res)
 }
 
-async fn send_header(backend: &mut Stream, header: HeaderMap) -> Result<(),IoError>{
+async fn send_header(backend: &mut Stream, header: HeaderMap) -> Result<(), IoError> {
     /*
-host: 127.0.0.1:2330
-user-agent: Mozilla/5.0
-accept: *
-accept-language: en-US,en;q=0.7,de;
-accept-encoding: gzip, deflate
-origin: http://127.0.0.1:2330
-sec-websocket-extensions: permessage-deflate
-dnt: 1
-pragma: no-cache
-cache-control: no-cache
-    */
-    let skip = [header::SEC_WEBSOCKET_VERSION, header::SEC_WEBSOCKET_KEY, header::CONNECTION, header::UPGRADE];
+    host: 127.0.0.1:2330
+    user-agent: Mozilla/5.0
+    accept: *
+    accept-language: en-US,en;q=0.7,de;
+    accept-encoding: gzip, deflate
+    origin: http://127.0.0.1:2330
+    sec-websocket-extensions: permessage-deflate
+    dnt: 1
+    pragma: no-cache
+    cache-control: no-cache
+        */
+    let skip = [
+        header::SEC_WEBSOCKET_VERSION,
+        header::SEC_WEBSOCKET_KEY,
+        header::CONNECTION,
+        header::UPGRADE,
+    ];
     //append all HTTP headers
     for (key, value) in header.iter() {
-        if skip.iter().find(|x| x == key).is_some() {
+        if skip.iter().any(|x| x == key) {
             continue;
         }
         backend.write_all(key.as_str().as_bytes()).await?;
@@ -112,7 +132,6 @@ cache-control: no-cache
 }
 
 async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: AsyncClient) {
-
     match Stream::connect(&addr).await {
         Ok(mut backend) => {
             if let Some(header) = header {
@@ -133,7 +152,7 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
                             Some(Err(e)) => {error!("websocket error: {}", e);break},
                             None => break,
                         };
-                
+
                         match msg.opcode() {
                             Opcode::Text => {
                                 /*match &wscfg.encoding {
@@ -159,7 +178,7 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
                             }
                             Opcode::Pong => {},
                         };
-                
+
                     },
                     data = backend.read_buf(&mut buffer) => {
                         let data = match data {
@@ -170,8 +189,8 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
                     }
                 }
             }
-        },
-        Err(e) => error!("could not connect backend: {}", e)
+        }
+        Err(e) => error!("could not connect backend: {}", e),
     }
     let _ = frontend.send(Message::close(None)).await;
 }
@@ -184,29 +203,31 @@ impl From<&WSSock> for FCGIAddr {
         }
     }
 }
-#[derive(Debug)]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum WSSock {
     TCP(SocketAddr),
     Unix(PathBuf),
 }
 
-#[derive(Debug)]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 #[serde(deny_unknown_fields)]
 pub enum Websocket {
-//    Proxy{forward: String},
+    //    Proxy{forward: String},
     Unwraped(UnwrapedWS),
 }
 
-#[derive(Debug)]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnwrapedWS {
     assock: WSSock,
     #[serde(default)]
     forward_header: bool, // = false
-    encoding: Option<String>
+    encoding: Option<String>,
+}
+impl Websocket {
+    pub async fn setup(&self) -> Result<(), String> {
+        Ok(())
+    }
 }

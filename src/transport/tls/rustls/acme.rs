@@ -1,21 +1,19 @@
-use async_acme::acme::{AcmeError, Directory, Account};
-use async_acme::rustls_helper::{duration_until_renewal_attempt, drive_order, OrderError};
+use async_acme::acme::{Account, AcmeError, Directory};
+use async_acme::rustls_helper::{drive_order, duration_until_renewal_attempt, OrderError};
 
-use std::sync::Weak;
-use tokio::time::sleep;
-use std::vec::Vec;
-use std::sync::Arc;
-use std::io;
-use serde::Deserialize;
-use std::path::PathBuf;
-use log::{info, error};
-use super::{load_private_key, load_certs};
 use super::resolve_key::{CertKeys, ResolveServerCert};
-use tokio_rustls::rustls::sign::{CertifiedKey, any_ecdsa_type};
+use super::{load_certs, load_private_key};
+use log::{error, info};
+use serde::Deserialize;
+use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Weak;
+use std::vec::Vec;
+use tokio::time::sleep;
+use tokio_rustls::rustls::sign::{any_ecdsa_type, CertifiedKey};
 
-
-#[derive(Debug)]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ACME {
     pub uri: String,
@@ -39,48 +37,49 @@ pub struct AcmeTaskRunner {
     dns_names: Vec<String>,
 }
 impl AcmeTaskRunner {
-    pub fn add_new(acmes: &mut Vec<AcmeTaskRunner>,acme: &ACME, sni: Option<&str>) -> Result<(), io::Error>{
-        let dns_names = match &acme.dns_names
-        {
+    pub fn add_new(
+        acmes: &mut Vec<AcmeTaskRunner>,
+        acme: &ACME,
+        sni: Option<&str>,
+    ) -> Result<(), io::Error> {
+        let dns_names = match &acme.dns_names {
             Some(a) => a.clone(),
             None => match sni {
                 Some(s) => vec![s.to_string()],
                 None => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "ACME needs either an enforced vHost or dns_names specified"
+                        "ACME needs either an enforced vHost or dns_names specified",
                     ));
                 }
-            }
+            },
         };
-        let has_name = sni.map(|s|s.to_string());
+        let has_name = sni.map(|s| s.to_string());
         acmes.push(AcmeTaskRunner {
             uri: acme.uri.clone(),
             contact: acme.contact.clone(),
             cache_dir: acme.cache_dir.clone(),
             dns_names,
             certres: Weak::new(),
-            has_name
+            has_name,
         });
         Ok(())
     }
 
     pub fn start(self, certres: &Arc<ResolveServerCert>) {
         let mut task = self;
-        
-        let filename = task.get_cert_cache_file();
-        if let (Ok(k),Ok(chain))
-            = (load_private_key(&filename), load_certs(&filename)) {
 
+        let filename = task.get_cert_cache_file();
+        if let (Ok(k), Ok(chain)) = (load_private_key(&filename), load_certs(&filename)) {
             if let Ok(key) = any_ecdsa_type(&k) {
                 let ck = CertifiedKey::new(chain, key);
                 let v = CertKeys::ec(ck);
-            
+
                 certres.update_cert(task.has_name.clone(), v);
             }
         }
 
-        task.certres  = Arc::downgrade(certres);
+        task.certres = Arc::downgrade(certres);
         tokio::spawn(async move {
             task.acme_watcher().await;
         });
@@ -96,21 +95,26 @@ impl AcmeTaskRunner {
                 }
                 Some(resolver) => {
                     //check how long the current cert is still valid
-                    resolver.read_ec_cert(
-                        self.has_name.as_ref().map(|s|s.as_str()),
-                        |key|duration_until_renewal_attempt(key, err_cnt)
-                    ).unwrap_or_else(||duration_until_renewal_attempt(None, err_cnt))
+                    resolver
+                        .read_ec_cert(self.has_name.as_deref(), |key| {
+                            duration_until_renewal_attempt(key, err_cnt)
+                        })
+                        .unwrap_or_else(|| duration_until_renewal_attempt(None, err_cnt))
                 }
             };
             if d.as_secs() != 0 {
-                info!("ACME: next attempt for {:?} in {}s", self.dns_names, d.as_secs());
+                info!(
+                    "ACME: next attempt for {:?} in {}s",
+                    self.dns_names,
+                    d.as_secs()
+                );
                 sleep(d).await;
             }
             match self.order_and_cache().await {
                 Err(e) => {
                     error!("ACME {}", e);
                     err_cnt += 1;
-                },
+                }
                 Ok(cert_key) => {
                     match self.certres.upgrade() {
                         None => {
@@ -129,29 +133,31 @@ impl AcmeTaskRunner {
     }
     async fn order_and_cache(&self) -> Result<CertifiedKey, OrderError> {
         let directory = Directory::discover(&self.uri).await?;
-        let account = Account::load_or_create(
-            directory, 
-            Some(&self.cache_dir),
-            &self.contact).await?;
-    
+        let account =
+            Account::load_or_create(directory, Some(&self.cache_dir), &self.contact).await?;
+
         let (cert_key, key_pem, cert_pem) = drive_order(
-            |k,v|self.set_auth_key(k,v),
+            |k, v| self.set_auth_key(k, v),
             self.dns_names.clone(),
-            account).await?;
+            account,
+        )
+        .await?;
 
         let file = self.get_cert_cache_file();
         let content = format!("{}\n{}", key_pem, cert_pem);
-        tokio::fs::write(&file, &content).await.map_err(AcmeError::Io)?;
+        tokio::fs::write(&file, &content)
+            .await
+            .map_err(AcmeError::Io)?;
 
         Ok(cert_key)
     }
-    fn set_auth_key(&self, key: String, cert: CertifiedKey) -> Result<(),AcmeError> {
+    fn set_auth_key(&self, key: String, cert: CertifiedKey) -> Result<(), AcmeError> {
         match self.certres.upgrade() {
             Some(resolver) => {
                 resolver.set_acme_cert(key, cert);
                 Ok(())
-            },
-            None => Err(std::io::Error::new(io::ErrorKind::BrokenPipe,"TLS shut down").into())
+            }
+            None => Err(std::io::Error::new(io::ErrorKind::BrokenPipe, "TLS shut down").into()),
         }
     }
     #[inline]

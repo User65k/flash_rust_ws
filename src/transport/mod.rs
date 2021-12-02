@@ -29,15 +29,15 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 
-use std::future::Future;
 use core::task::{Context, Poll};
+use std::future::Future;
 use std::pin::Pin;
 
 //use hyper::server::conn::AddrStream;
 //pub use tokio::net::TcpStream as PlainStream;
-use hyper::server::accept::Accept;
-use log::{error, debug, trace};
 use futures_util::ready;
+use hyper::server::accept::Accept;
+use log::{debug, error, trace};
 
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -45,7 +45,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::Sleep;
 
-#[cfg(any(feature = "tlsrust",feature = "tlsnative"))]
+#[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 pub mod tls;
 
 /// A stream of connections from binding to an address.
@@ -138,7 +138,7 @@ impl PlainIncoming {
                         // Sleep 1s.
                         let timeout = tokio::time::sleep(Duration::from_secs(1));
                         let mut timeout = Box::pin(timeout);
-                        
+
                         match timeout.as_mut().poll(cx) {
                             Poll::Ready(()) => {
                                 // Wow, it's been a second already? Ok then...
@@ -146,8 +146,8 @@ impl PlainIncoming {
                             }
                             Poll::Pending => {
                                 self.timeout = Some(timeout);
-                                return Poll::Pending
-                            },
+                                return Poll::Pending;
+                            }
                         }
                     } else {
                         return Poll::Ready(Err(e));
@@ -179,12 +179,12 @@ impl Accept for PlainIncoming {
 /// The timeout is useful to handle resource exhaustion errors like ENFILE
 /// and EMFILE. Otherwise, could enter into tight loop.
 fn is_connection_error(e: &io::Error) -> bool {
-    match e.kind() {
+    matches!(
+        e.kind(),
         io::ErrorKind::ConnectionRefused
-        | io::ErrorKind::ConnectionAborted
-        | io::ErrorKind::ConnectionReset => true,
-        _ => false,
-    }
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
 }
 
 impl fmt::Debug for PlainIncoming {
