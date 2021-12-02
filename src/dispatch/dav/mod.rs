@@ -192,6 +192,7 @@ async fn handle_move(
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub root: PathBuf,
+    #[serde(default)]
     pub read_only: bool,
 }
 impl Config {

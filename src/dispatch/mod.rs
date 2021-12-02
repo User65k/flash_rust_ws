@@ -334,7 +334,7 @@ mod vhost_tests {
         let req = Request::new(Body::empty());
         let sa = "127.0.0.1:8080".parse().unwrap();
 
-        let cfg = make_host_cfg(None, ("1".to_string(), config::VHost::new(sa)));
+        let cfg = make_host_cfg(None, Some(("1".to_string(), config::VHost::new(sa))));
         let res = dispatch_to_vhost(req, cfg, sa).await;
         let res: IoError = res.unwrap_err();
         assert_eq!(res.into_inner().unwrap().to_string(), "no vHost found");
@@ -347,7 +347,7 @@ mod vhost_tests {
 
         let sa = "127.0.0.1:8080".parse().unwrap();
 
-        let cfg = make_host_cfg(None, ("1".to_string(), config::VHost::new(sa)));
+        let cfg = make_host_cfg(None, Some(("1".to_string(), config::VHost::new(sa))));
 
         let res = dispatch_to_vhost(req, cfg, sa).await;
         let res: IoError = res.unwrap_err();

@@ -5,7 +5,7 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 
 */
 
-use futures_util::future::{join_all, select};
+use futures_util::future::join_all;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request};
 use log::{debug, error, info, trace};
