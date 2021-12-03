@@ -335,3 +335,49 @@ impl FcgiMnt {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::{group_config, UseCase};
+    #[test]
+    fn basic_config() {
+        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+            r#"
+    fcgi.sock = "127.0.0.1:9000"
+    dir = "."
+        "#,
+        ) {
+            assert_eq!(f.fcgi.set_script_filename, false);
+            assert_eq!(f.fcgi.set_request_uri, false);
+            assert_eq!(f.fcgi.timeout, 20);
+            assert!(f.static_files.is_some());
+        } else {
+            panic!("not fcgi");
+        }
+    }
+    #[tokio::test]
+    async fn wrong_cfg() {
+        let mut cfg: crate::config::Configuration = toml::from_str(
+            r#"
+    [host]
+    ip = "0.0.0.0:1337"
+    [host.fcgi]
+    sock = "127.0.0.1:9000"
+    exec = ["php"]
+    "#,
+        )
+        .expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+        let mut cfg: crate::config::Configuration = toml::from_str(
+            r#"
+    [host]
+    ip = "0.0.0.0:1337"
+    dir = "."
+    [host.fcgi]
+    sock = "127.0.0.1:9000"
+    "#,
+        )
+        .expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+    }
+}

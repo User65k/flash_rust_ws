@@ -123,3 +123,20 @@ pub async fn resolve_path(
         "dir w/o index file",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::UseCase;
+    #[test]
+    fn basic_config() {
+        if let Ok(UseCase::StaticFiles(s)) = toml::from_str(
+            r#"
+    dir = "."
+        "#,
+        ) {
+            assert_eq!(s.follow_symlinks, false);
+        } else {
+            panic!("not a StaticFiles");
+        }
+    }
+}

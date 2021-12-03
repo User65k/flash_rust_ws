@@ -9,10 +9,10 @@ use std::{
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
+use async_fcgi::stream::{FCGIAddr, Stream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use async_fcgi::stream::{Stream, FCGIAddr};
 
 pub async fn upgrade(
     req: Request<Body>,
@@ -229,5 +229,27 @@ pub struct UnwrapedWS {
 impl Websocket {
     pub async fn setup(&self) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UseCase;
+    #[test]
+    fn basic_config() {
+        if let Ok(UseCase::Websocket(w)) = toml::from_str(
+            r#"
+            assock = "127.0.0.1:1337"
+        "#,
+        ) {
+            if let Websocket::Unwraped(u) = w {
+                assert_eq!(u.forward_header, false);
+            } else {
+                panic!("not a Unwraped webdav");
+            }
+        } else {
+            panic!("not a webdav");
+        }
     }
 }
