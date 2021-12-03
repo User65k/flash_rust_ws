@@ -297,3 +297,33 @@ impl Config {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::UseCase;
+    #[test]
+    fn basic_config() {
+        if let Ok(UseCase::Webdav(w)) = toml::from_str(
+            r#"
+    dav = "."
+        "#,
+        ) {
+            assert_eq!(w.read_only,false);
+            assert_eq!(w.dont_overwrite,false);
+        }else{
+            panic!("not a webdav");
+        }
+    }
+    #[tokio::test]
+    async fn dir_nonexistent() {
+        let mut cfg: crate::config::Configuration = toml::from_str(
+            r#"
+    [host]
+    ip = "0.0.0.0:1337"
+    dav = "blablahui"
+    "#,
+        )
+        .expect("parse err");
+        assert!(group_config(&mut cfg).await.is_err());
+    }
+}

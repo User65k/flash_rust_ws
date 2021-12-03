@@ -81,7 +81,7 @@ impl<'de> Deserialize<'de> for UseCase {
                     ));
                     #[cfg(not(feature = "websocket"))]
                     return Err(DeError::custom("websocket support is disabled"));
-                } else if tree.contains_key(&SerdeContent::String("root".to_string())) {
+                } else if tree.contains_key(&SerdeContent::String("dav".to_string())) {
                     #[cfg(feature = "webdav")]
                     return Ok(UseCase::Webdav(
                         webdav::deserialize(content).map_err(DeError::custom)?,
@@ -94,7 +94,7 @@ impl<'de> Deserialize<'de> for UseCase {
                     ))
                 } else {
                     Err(DeError::custom(
-                        "Missing one of fcgi, assock, root, dir. Expected struct WwwRoot",
+                        "Missing one of fcgi, assock, dav, dir. Expected struct WwwRoot",
                     ))
                 }
             }
