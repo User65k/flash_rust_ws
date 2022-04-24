@@ -1,9 +1,9 @@
 use super::staticf::{resolve_path, return_file};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut, BufMut};
 use hyper::{body::HttpBody, header, Body, Request, Response, StatusCode};
 use std::{
     convert::TryFrom,
-    io::{Error as IoError, ErrorKind},
+    io::{Error as IoError, ErrorKind, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
@@ -75,7 +75,8 @@ pub async fn do_dav(
 }
 async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
     let mut dir = tokio::fs::read_dir(full_path).await?;
-    let res = Response::new(Body::empty());
+    let mut buf = BytesMut::new().writer();
+    buf.write_all(b"<html><body>")?;
     while let Some(f) = dir.next_entry().await? {
         let path = f.path();
         let meta = match f.metadata().await {
@@ -85,8 +86,18 @@ async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>
                 continue;
             }
         };
-        //f.file_name()
+        //percent_encoding::percent_encode_byte(byte)
+        
+        if meta.is_dir() {
+            buf.write_all(format!("<a href=\"{0}{1}/\">{1}/</a><br/>", req.uri().path(), f.file_name().to_string_lossy()).as_bytes())?;
+        }else{
+            buf.write_all(format!("<a href=\"{0}{1}\">{1}</a> {2}<br/>", req.uri().path(), f.file_name().to_string_lossy(), meta.len()).as_bytes())?;
+        }
     }
+    buf.write_all(b"</body></html>")?;
+    let res = Response::builder()
+        .header(header::CONTENT_TYPE, &b"text/html; charset=UTF-8"[..])
+        .body(Body::from(buf.into_inner().freeze())).expect("unable to build response");
     Ok(res)
 }
 async fn handle_get(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
@@ -300,7 +311,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::UseCase;
+    use crate::config::{UseCase, group_config};
     #[test]
     fn basic_config() {
         if let Ok(UseCase::Webdav(w)) = toml::from_str(
