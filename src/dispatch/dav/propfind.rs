@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, BytesMut};
 use chrono::{DateTime, Utc};
-use hyper::{body::aggregate, Body, Request, Response, StatusCode};
+use hyper::{body::{aggregate, HttpBody}, Body, Request, Response, StatusCode};
 use std::{
     fs::Metadata,
     io::{Error as IoError, ErrorKind, Read, Write},
@@ -30,26 +30,35 @@ pub async fn handle_propfind(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
 
-    let read = aggregate(req.body_mut())
-        .await
-        .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
-        .reader();
+    let props = if let Some(0) = req.body().size_hint().exact() {
+        //Windows explorer does not send a body
+        vec![
+            OwnedName::qualified("resourcetype", "DAV", Option::<String>::None),
+            OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
+        ]
+    }else{
+        let read = aggregate(req.body_mut())
+            .await
+            .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
+            .reader();
 
-    let xml = EventReader::new_with_config(
-        read,
-        ParserConfig {
-            trim_whitespace: true,
-            ..Default::default()
-        },
-    );
-    let mut props = Vec::new();
-    if parse_propfind(xml, |prop| {
-        props.push(prop);
-    })
-    .is_err()
-    {
-        return Err(IoError::new(ErrorKind::InvalidData, "xml parse error"));
-    }
+        let xml = EventReader::new_with_config(
+            read,
+            ParserConfig {
+                trim_whitespace: true,
+                ..Default::default()
+            },
+        );
+        let mut props = Vec::new();
+        if parse_propfind(xml, |prop| {
+            props.push(prop);
+        })
+        .is_err()
+        {
+            return Err(IoError::new(ErrorKind::InvalidData, "xml parse error"));
+        }
+        props
+    };
 
     //log::debug!("Propfind {:?} {:?}", path, props);
 
