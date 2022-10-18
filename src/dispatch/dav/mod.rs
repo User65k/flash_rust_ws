@@ -53,7 +53,7 @@ pub async fn do_dav(
             ErrorKind::PermissionDenied,
             "properties are read only",
         )),
-        "PUT" if !config.read_only => handle_put(req, &full_path).await,
+        "PUT" if !config.read_only => handle_put(req, &full_path, config.dont_overwrite).await,
         "COPY" if !config.read_only && !config.dont_overwrite => {
             handle_copy(req, &full_path, &abs_doc_root, &abs_web_mount).await
         }
@@ -87,7 +87,7 @@ async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>
             }
         };
         //percent_encoding::percent_encode_byte(byte)
-        
+
         if meta.is_dir() {
             buf.write_all(format!("<a href=\"{0}{1}/\">{1}/</a><br/>", req.uri().path(), f.file_name().to_string_lossy()).as_bytes())?;
         }else{
@@ -180,7 +180,14 @@ impl AsyncRead for BodyW {
         }
     }
 }
-async fn handle_put(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
+async fn handle_put(req: Request<Body>, full_path: &Path, dont_overwrite: bool) -> Result<Response<Body>, IoError> {
+    // Check if file exists before proceeding
+    if full_path.exists() && dont_overwrite {
+        return Err(IoError::new(
+            ErrorKind::AlreadyExists,
+            "file overwriting is disabled",
+        ));
+    }
     log::info!("about to store {:?}", full_path);
     let mut f = File::create(full_path).await?;
     let mut b = BodyW {
