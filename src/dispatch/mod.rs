@@ -256,7 +256,7 @@ mod mount_tests {
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap();
         assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/aa%2Fa/");
+        assert_eq!(res.headers().get("location").unwrap(), "/aa/a/");
     }
     #[tokio::test]
     async fn root() {
