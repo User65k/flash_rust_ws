@@ -15,8 +15,7 @@ use serde::Deserialize;
 use serde_value::Value as SerdeContent;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
+use std::fs::read_to_string;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 
@@ -181,7 +180,7 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     #[cfg(not(test))]
     let path = {
         let mut path = None;
-        for cfg_path in ["./config.toml", "/etc/defaults/frws.toml"].iter() {
+        for cfg_path in ["./config.toml", "/etc/default/frws.toml"].iter() {
             let p: PathBuf = cfg_path.into();
             if p.is_file() {
                 path = Some(p);
@@ -202,16 +201,10 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     #[cfg(test)]
     let path = "./test_cfg.toml";
 
-    let mut f =
-        File::open(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
-    //.metadata()?.len()
-    let mut buffer = Vec::new();
-
     // read the whole file
-    f.read_to_end(&mut buffer)
-        .with_context(|| format!("Failed to read config from {:?}", path))?;
+    let buffer = read_to_string(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
 
-    let mut cfg = toml::from_slice::<Configuration>(&buffer)?;
+    let mut cfg = toml::from_str::<Configuration>(&buffer)?;
     for (host_name, vhost) in cfg.hosts.iter_mut() {
         info!("host: {} @ {}", host_name, vhost.ip);
         if vhost.paths.is_empty() {
