@@ -9,7 +9,7 @@ use std::{
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
-use async_fcgi::stream::{FCGIAddr, Stream};
+use async_fcgi::stream::{Stream, FCGIAddr};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -154,17 +154,7 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
                         };
 
                         match msg.opcode() {
-                            Opcode::Text => {
-                                /*match &wscfg.encoding {
-                                    None => {*/
-                                        error!("websocket without encoding got text");break
-                                   /* },
-                                    Some(enc) => {
-                                        //TODO encode to bytes
-                                    }
-                                }*/
-                            },
-                            Opcode::Binary => {
+                            Opcode::Text  | Opcode::Binary => {
                                 if let Err(e) = backend.write_all(&msg.into_data()).await {
                                     error!("backend socket error: {}", e);
                                     break;
@@ -224,7 +214,6 @@ pub struct UnwrapedWS {
     assock: WSSock,
     #[serde(default)]
     forward_header: bool, // = false
-    encoding: Option<String>,
 }
 impl Websocket {
     pub async fn setup(&self) -> Result<(), String> {
