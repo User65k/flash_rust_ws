@@ -1,6 +1,6 @@
 [![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
 [![GitHub](https://img.shields.io/github/license/User65k/flash_rust_ws)](./LICENSE)
-![GitHub Workflow Status](https://img.shields.io/github/workflow/status/User65k/flash_rust_ws/Rust)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/User65k/flash_rust_ws/rust.yml)
 
 A Webserver written in Rust.
 Build on the speedy [Hyper](https://hyper.rs/).
@@ -10,7 +10,8 @@ Build on the speedy [Hyper](https://hyper.rs/).
 ## Installation
 
 [Install cargo](https://www.rust-lang.org/tools/install) and then:
-`cargo install --git https://github.com/User65k/flash_rust_ws.git`
+`cargo install flash_rust_ws` (stable)
+`cargo install --git https://github.com/User65k/flash_rust_ws.git` (hottest kind of hot)
 
 ## Running
 
