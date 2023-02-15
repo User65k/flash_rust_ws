@@ -17,19 +17,19 @@ use tokio::{
     io::AsyncRead,
 };
 mod propfind;
-use super::{decode_percents, normalize_path};
+use super::decode_and_normalize_path;
 
 /// req_path is relative from config.root
 /// web_mount is config.root from the client perspective
 pub async fn do_dav(
     req: Request<Body>,
-    req_path: &Path,
+    req_path: &super::WebPath,
     config: &Config,
     web_mount: &Path,
     _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     let abs_doc_root = config.dav.canonicalize()?;
-    let full_path = abs_doc_root.join(req_path);
+    let full_path = req_path.prefix_with(&abs_doc_root);
     let mut abs_web_mount = PathBuf::from("/");
     abs_web_mount.push(web_mount);
     match req.method().as_ref() {
@@ -210,14 +210,14 @@ fn get_dst(req: &Request<Body>, root: &Path, web_mount: &Path) -> Result<PathBuf
         .and_then(|s| hyper::Uri::try_from(s).ok())
         .ok_or_else(|| IoError::new(ErrorKind::InvalidData, "no valid destination path"))?;
 
-    let request_path = PathBuf::from(decode_percents(dst.path()));
-    let a = request_path.strip_prefix(web_mount).map_err(|_| {
+    let request_path = decode_and_normalize_path(&dst)?;
+    let path = request_path.strip_prefix(web_mount).map_err(|_| {
         IoError::new(
             ErrorKind::PermissionDenied,
             "destination path outside of mount",
         )
     })?;
-    let req_path = root.join(normalize_path(a));
+    let req_path = path.prefix_with(root);
     Ok(req_path)
 }
 async fn handle_copy(

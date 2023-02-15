@@ -4,7 +4,7 @@ use log::error;
 use std::net::SocketAddr;
 use std::{
     io::{Error as IoError, ErrorKind},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
@@ -17,13 +17,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub async fn upgrade(
     req: Request<Body>,
     ws: &Websocket,
-    req_path: &Path,
+    _req_path: &super::WebPath,
     _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-    //check if path is deeper than it should -> 404
-    if !req_path.as_os_str().is_empty() {
-        return Err(IoError::new(ErrorKind::NotFound, "WS mount had path"));
-    }
+    //TODO? check if path is deeper than it should -> 404
 
     //update the request
     let mut res = Response::new(Body::empty());

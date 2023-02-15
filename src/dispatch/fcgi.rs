@@ -33,9 +33,9 @@ const SCRIPT_FILENAME: &[u8] = b"SCRIPT_FILENAME";
 pub async fn fcgi_call(
     fcgi_cfg: &FCGIApp,
     req: Request<Body>,
-    req_path: &Path,
+    req_path: &super::WebPath,
     web_mount: &Path,
-    fs_root: Option<&Path>,
+    fs_full_path: Option<&Path>,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     let app = if let Some(app) = &fcgi_cfg.app {
@@ -68,7 +68,7 @@ pub async fn fcgi_call(
         &req,
         req_path,
         web_mount,
-        fs_root,
+        fs_full_path,
         remote_addr);
 
     trace!("to FCGI: {:?}", &params);
@@ -96,26 +96,32 @@ pub async fn fcgi_call(
 fn create_params(
     fcgi_cfg: &FCGIApp,
     req: &Request<Body>,
-    req_path: &Path,
+    req_path: &super::WebPath,
     web_mount: &Path,
-    fs_root: Option<&Path>,
+    fs_full_path: Option<&Path>,
     remote_addr: SocketAddr,) -> HashMap<Bytes, Bytes> {
 
     let mut params = HashMap::new();
-    if let Some(root_dir) = fs_root {
-        //req_path is completely resolved (to get index files)
-        if let Ok(rel) = req_path.strip_prefix(root_dir) {
-            let mut abs_name = PathBuf::from("/");
-            abs_name.push(web_mount);
-            abs_name.push(rel);
-            params.insert(
-                // must CGI/1.1  4.1.13, everybody cares
-                Bytes::from(SCRIPT_NAME),
-                path_to_bytes(abs_name),
-            );
-        } else {
-            unreachable!();
+    if let Some(full_path) = fs_full_path {
+        //full_path is completely resolved (to get index files)
+        
+        let mut abs_name = PathBuf::from("/");
+        abs_name.push(web_mount);
+        let mut abs_name = req_path.prefix_with(&abs_name);
+
+        //add index file if needed
+        if let Some(index_file) = full_path.file_name() {
+            match abs_name.file_name() {
+                Some(f) if f!=index_file => {abs_name.push(index_file);},
+                _ => {}
+            }            
         }
+        params.insert(
+            // must CGI/1.1  4.1.13, everybody cares
+            Bytes::from(SCRIPT_NAME),
+            path_to_bytes(abs_name),
+        );
+    
         // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
         // -> not a thing, as we check if the file exists
     } else {
@@ -129,9 +135,7 @@ fn create_params(
             path_to_bytes(abs_web_mount),
         );
         //... so everything inside it is PATH_INFO
-        let mut abs_path = PathBuf::new();
-        abs_path.push("/");
-        abs_path.push(req_path);
+        let abs_path = req_path.prefix_with(Path::new("/"));
         params.insert(
             // opt CGI/1.1   4.1.5
             Bytes::from(PATH_INFO),
@@ -186,7 +190,12 @@ fn create_params(
         params.insert(
             // PHP cares for this
             Bytes::from(SCRIPT_FILENAME),
-            path_to_bytes(req_path),
+            if let Some(full_path) = fs_full_path {
+                path_to_bytes(full_path)
+            }else{
+                // I am guessing here
+                path_to_bytes(req_path.prefix_with(Path::new("/")))
+            }
         );
     }
     if let Some(kvp) = &fcgi_cfg.params {
@@ -421,9 +430,9 @@ mod tests {
         let params = create_params(
             &fcgi_cfg,
             &req,
-            &Path::new("/opt/php/index.php"),
+            unsafe{core::mem::transmute(Path::new(""))},
             &Path::new("php"),
-            Some(&Path::new("/opt/php/")),
+            Some(&Path::new("/opt/php/index.php")),
             "1.2.3.4:1337".parse().unwrap());
 
         assert_eq!(params.get(&Bytes::from(GATEWAY_INTERFACE)), Some(&CGI_VERS.into()));
@@ -451,7 +460,7 @@ mod tests {
         let params = create_params(
             &fcgi_cfg,
             &req,
-            &Path::new("status"),
+            unsafe{core::mem::transmute(Path::new("status"))},
             &Path::new("flup"),
             None,
             "[::1]:1337".parse().unwrap());

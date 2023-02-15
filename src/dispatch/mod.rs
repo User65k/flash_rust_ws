@@ -7,14 +7,16 @@ mod staticf;
 pub mod websocket;
 
 use crate::config;
+use hyper::Uri;
 use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
 use hyper_staticfile::{ResolveResult, ResponseBuilder as FileResponseBuilder};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
 use std::error::Error;
+use std::ffi::OsString;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn insert_default_headers(
@@ -59,27 +61,64 @@ fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &Path) -> bool {
     true // no list == all is ok
 }
 
-#[inline]
-fn decode_percents(string: &str) -> String {
-    percent_encoding::percent_decode_str(string)
-        .decode_utf8_lossy()
-        .into_owned()
+fn decode_and_normalize_path(uri: &Uri) -> Result<OwnedWebPath, IoError> {
+    let path = percent_encoding::percent_decode_str(uri.path())
+        .decode_utf8_lossy();
+    
+    let mut r = OsString::with_capacity(path.len());
+    for p in path.split('/') {
+        match p {
+            "."|"" => {},
+            ".." => {
+                let mut p = PathBuf::from(r);
+                if !p.pop() {
+                    return Err(IoError::new(
+                        ErrorKind::PermissionDenied,
+                        "path traversal",
+                    ));
+                }
+                r = p.into_os_string();
+            },
+            comp => {
+                if !r.is_empty() {
+                    r.push::<String>(std::path::MAIN_SEPARATOR.into());
+                }
+                r.push(comp);
+            },
+        }
+    }
+    Ok(OwnedWebPath(PathBuf::from(r)))
 }
 
-/// Path.canonicalize for non existend paths
-fn normalize_path(path: &Path) -> PathBuf {
-    path.components()
-        .fold(PathBuf::new(), |mut result, p| match p {
-            Component::Normal(x) => {
-                result.push(x);
-                result
-            }
-            Component::ParentDir => {
-                result.pop();
-                result
-            }
-            _ => result,
-        })
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct OwnedWebPath(PathBuf);
+impl core::ops::Deref for OwnedWebPath {
+	type Target = WebPath;
+	fn deref(&self) -> &WebPath {
+        unsafe {core::mem::transmute(self.0.as_path())}
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct WebPath(Path);
+impl WebPath {
+    /// turn it into a path by appending. Never replace the existing root!
+    /// rustsec_2022_0072
+    pub fn prefix_with(&self, pre: &Path) -> PathBuf {
+        let r : &std::ffi::OsStr = pre.as_ref();
+        let mut r = r.to_os_string();
+        if let Some(false) = r.to_str().map(|s|s.ends_with(std::path::MAIN_SEPARATOR)) {
+            r.push::<String>(std::path::MAIN_SEPARATOR.into());
+        }
+        //does never start with a seperator
+        r.push(&self.0);
+        PathBuf::from(r)
+    }
+    pub fn strip_prefix(&self, base: &Path) -> Result<&WebPath, std::path::StripPrefixError> {
+        self.0.strip_prefix(base).map(|p|unsafe {core::mem::transmute(p)})
+    }
 }
 
 /// handle a request by
@@ -90,7 +129,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 async fn handle_wwwroot(
     req: Request<Body>,
     wwwr: &config::WwwRoot,
-    req_path: &Path,
+    req_path: &WebPath,
     web_mount: &Path,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
@@ -129,7 +168,7 @@ async fn handle_wwwroot(
     };
 
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
-    let full_path = sf.dir.join(req_path);
+    let full_path = req_path.prefix_with(&sf.dir);
     trace!("full_path {:?}", full_path.canonicalize());
 
     let (full_path, resolved_file) =
@@ -147,7 +186,7 @@ async fn handle_wwwroot(
     if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
         //FCGI + check for file
         if ext_in_list(&fcgi.exec, &full_path) {
-            return fcgi::fcgi_call(fcgi, req, &full_path, web_mount, Some(&sf.dir), remote_addr)
+            return fcgi::fcgi_call(fcgi, req, req_path, web_mount, Some(&full_path), remote_addr)
                 .await;
         }
     }
@@ -170,9 +209,8 @@ async fn handle_vhost(
     cfg: &config::VHost,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-    let request_path = PathBuf::from(decode_percents(req.uri().path()));
 
-    let req_path = normalize_path(&request_path);
+    let req_path = decode_and_normalize_path(req.uri())?;
     debug!("req_path {:?}", req_path);
 
     //we want the longest match
@@ -259,21 +297,74 @@ mod mount_tests {
         assert_eq!(res.headers().get("location").unwrap(), "/aa/a/");
     }
     #[tokio::test]
-    async fn root() {
+    async fn path_trav_outside_mounts() {
         let req = Request::get("/a/../b").body(Body::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(PathBuf::from("a"), create_wwwroot("."));
         let res = handle_vhost(req, &cfg, sa).await;
-        let _res = res.unwrap_err();
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
+    }
+    #[tokio::test]
+    async fn path_trav_outside_webroot() {
+        let req = Request::get("/../b").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from("b"), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(res.into_inner().unwrap().to_string(), "path traversal");
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rustsec_2022_0072_part1() {
+        let req = Request::get("/c:/b").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from(""), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(res.into_inner().unwrap().to_string(), "left webroot");
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rustsec_2022_0072_part2() {
+        let req = Request::get("/a/c:/b").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from("a/c:/b"), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), 301);
+        assert_eq!(res.headers().get("location").unwrap(), "/a/c:/b/"); //Note: ":" is not a valid dir char in windows
+                                                                        //      However, an FCGI App might do things with it
+    }
+    #[tokio::test]
+    async fn webroot() {
+        let req = Request::get("/").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from(""), create_wwwroot("."));
+        let res = handle_vhost(req, &cfg, sa).await;
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(res.into_inner().unwrap().to_string(), "dir w/o index file");
     }
     #[test]
     fn normalize() {
-        let req = PathBuf::from("a/../b");
-        assert_eq!(normalize_path(&req), PathBuf::from("b"));
-        let req = PathBuf::from("../../");
-        assert_eq!(normalize_path(&req), PathBuf::from(""));
+        assert_eq!(decode_and_normalize_path(&"/a/../b".parse().unwrap()).unwrap().0, PathBuf::from("b"));
+        assert_eq!(decode_and_normalize_path(&"/../../".parse().unwrap()).unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(decode_and_normalize_path(&"/a/c:/b".parse().unwrap()).unwrap().0, PathBuf::from("a/c:/b"));
+        assert_eq!(decode_and_normalize_path(&"/c:/b".parse().unwrap()).unwrap().0, PathBuf::from("c:/b"));
     }
 }
 
