@@ -220,6 +220,7 @@ pub async fn setup_fcgi_connection(
         }
         let mut running_cmd = cmd.kill_on_drop(true).spawn()?;
         info!("Started {:?} @ {}", &bin.path, &sock);
+        #[cfg(unix)]
         let delete_after_use = if let FCGIAddr::Unix(a) = &sock {
             Some(a.to_path_buf())
         } else {
@@ -235,7 +236,7 @@ pub async fn setup_fcgi_connection(
                 },
                 _ = tokio::signal::ctrl_c() => {info!("killing");running_cmd.kill().await.expect("kill failed");}
             }
-
+            #[cfg(unix)]
             if let Some(path) = delete_after_use {
                 info!("cleanup");
                 std::fs::remove_file(path).unwrap();
@@ -263,6 +264,7 @@ impl From<&FCGISock> for FCGIAddr {
     fn from(addr: &FCGISock) -> FCGIAddr {
         match addr {
             FCGISock::TCP(s) => FCGIAddr::Inet(*s),
+            #[cfg(unix)]
             FCGISock::Unix(p) => FCGIAddr::Unix(p.to_path_buf()),
         }
     }
@@ -272,6 +274,7 @@ impl From<&FCGISock> for FCGIAddr {
 #[serde(untagged)]
 pub enum FCGISock {
     TCP(SocketAddr),
+    #[cfg(unix)]
     Unix(PathBuf),
 }
 
