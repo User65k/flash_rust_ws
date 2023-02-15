@@ -63,6 +63,43 @@ pub async fn fcgi_call(
             }
         }
     }
+    let params = create_params(
+        fcgi_cfg,
+        &req,
+        req_path,
+        web_mount,
+        fs_root,
+        remote_addr);
+
+    trace!("to FCGI: {:?}", &params);
+    let resp = match fcgi_cfg.timeout {
+        0 => app.forward(req, params).await,
+        secs => match timeout(Duration::from_secs(secs), app.forward(req, params)).await {
+            Err(_) => {
+                return Err(IoError::new(
+                    ErrorKind::TimedOut,
+                    "FCGI app did not respond",
+                ))
+            }
+            Ok(resp) => resp,
+        },
+    }?;
+    debug!("FCGI response: {:?} {:?}", resp.status(), resp.headers());
+    //return types:
+    //doc: MUST return a Content-Type header
+    //TODO fetch local resource: Location header, MUST NOT return any other header fields or a message-body
+    //TODO 302Found: Abs Location header, MUST NOT return any other header fields
+
+    Ok(resp.map(|bod| Body::wrap_stream(FCGIBody::from(bod))))
+}
+
+fn create_params(
+    fcgi_cfg: &FCGIApp,
+    req: &Request<Body>,
+    req_path: &Path,
+    web_mount: &Path,
+    fs_root: Option<&Path>,
+    remote_addr: SocketAddr,) -> HashMap<Bytes, Bytes> {
 
     let mut params = HashMap::new();
     if let Some(root_dir) = fs_root {
@@ -77,10 +114,7 @@ pub async fn fcgi_call(
                 path_to_bytes(abs_name),
             );
         } else {
-            return Err(IoError::new(
-                ErrorKind::PermissionDenied,
-                "FCGI script not within root dir",
-            ));
+            unreachable!();
         }
         // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
         // -> not a thing, as we check if the file exists
@@ -109,7 +143,7 @@ pub async fn fcgi_call(
     params.insert(
         // must CGI/1.1  4.1.14, flup cares for this
         Bytes::from(SERVER_NAME),
-        Bytes::from(super::get_host(&req).unwrap_or_default().to_string()),
+        Bytes::from(super::get_host(req).unwrap_or_default().to_string()),
     );
     params.insert(
         // must CGI/1.1  4.1.15, flup cares for this
@@ -161,27 +195,9 @@ pub async fn fcgi_call(
                 .map(|(k, v)| (Bytes::from(k.to_string()), Bytes::from(v.to_string()))),
         );
     }
-    trace!("to FCGI: {:?}", &params);
-    let resp = match fcgi_cfg.timeout {
-        0 => app.forward(req, params).await,
-        secs => match timeout(Duration::from_secs(secs), app.forward(req, params)).await {
-            Err(_) => {
-                return Err(IoError::new(
-                    ErrorKind::TimedOut,
-                    "FCGI app did not respond",
-                ))
-            }
-            Ok(resp) => resp,
-        },
-    }?;
-    debug!("FCGI response: {:?} {:?}", resp.status(), resp.headers());
-    //return types:
-    //doc: MUST return a Content-Type header
-    //TODO fetch local resource: Location header, MUST NOT return any other header fields or a message-body
-    //TODO 302Found: Abs Location header, MUST NOT return any other header fields
-
-    Ok(resp.map(|bod| Body::wrap_stream(FCGIBody::from(bod))))
+    params
 }
+
 #[cfg(unix)]
 fn path_to_bytes<P: AsRef<Path>>(path: P) -> Bytes {
     use std::os::unix::ffi::OsStrExt;
@@ -341,6 +357,11 @@ impl FcgiMnt {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use super::*;
+    use bytes::Bytes;
+    use hyper::{Request, Body, Version, header};
+
     use crate::config::{group_config, UseCase};
     #[test]
     fn basic_config() {
@@ -382,5 +403,67 @@ mod tests {
         )
         .expect("parse err");
         assert!(group_config(&mut cfg).await.is_err());
+    }
+    #[test]
+    fn params_php_example() {
+        let fcgi_cfg = FCGIApp {
+            sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+            exec: None,
+            set_script_filename: true,
+            set_request_uri: false,
+            timeout: 0,
+            params: None,
+            bin: None,
+            app: None,
+        };
+        let req = Request::get("/php/").header(header::HOST, "example.com").version(Version::HTTP_11).body(Body::empty()).unwrap();
+
+        let params = create_params(
+            &fcgi_cfg,
+            &req,
+            &Path::new("/opt/php/index.php"),
+            &Path::new("php"),
+            Some(&Path::new("/opt/php/")),
+            "1.2.3.4:1337".parse().unwrap());
+
+        assert_eq!(params.get(&Bytes::from(GATEWAY_INTERFACE)), Some(&CGI_VERS.into()));
+        assert_eq!(params.get(&Bytes::from(SERVER_PROTOCOL)), Some(&"HTTP/1.1".into()));
+        assert_eq!(params.get(&Bytes::from(SERVER_NAME)), Some(&"example.com".into()));
+        assert_eq!(params.get(&Bytes::from(REMOTE_ADDR)), Some(&"1.2.3.4".into()));
+
+        assert_eq!(params.get(&Bytes::from(SCRIPT_FILENAME)), Some(&"/opt/php/index.php".into()));
+        assert_eq!(params.get(&Bytes::from(SCRIPT_NAME)), Some(&"/php/index.php".into()));
+    }
+    #[test]
+    fn params_flup_example() {
+        let fcgi_cfg = FCGIApp {
+            sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+            exec: None,
+            set_script_filename: false,
+            set_request_uri: true,
+            timeout: 0,
+            params: None,
+            bin: None,
+            app: None,
+        };
+        let req = Request::get("/flup/status").header(header::HOST, "localhost").version(Version::HTTP_10).body(Body::empty()).unwrap();
+
+        let params = create_params(
+            &fcgi_cfg,
+            &req,
+            &Path::new("status"),
+            &Path::new("flup"),
+            None,
+            "[::1]:1337".parse().unwrap());
+
+        assert_eq!(params.get(&Bytes::from(GATEWAY_INTERFACE)), Some(&CGI_VERS.into()));
+        assert_eq!(params.get(&Bytes::from(SERVER_PROTOCOL)), Some(&"HTTP/1.0".into()));
+        assert_eq!(params.get(&Bytes::from(SERVER_NAME)), Some(&"localhost".into()));
+        assert_eq!(params.get(&Bytes::from(REMOTE_ADDR)), Some(&"::1".into()));
+
+        assert_eq!(params.get(&Bytes::from(SCRIPT_FILENAME)), None);
+        assert_eq!(params.get(&Bytes::from(SCRIPT_NAME)), Some(&"/flup".into()));
+        assert_eq!(params.get(&Bytes::from(PATH_INFO)), Some(&"/status".into()));
+        assert_eq!(params.get(&Bytes::from(REQUEST_URI)), Some(&"/flup/status".into()));
     }
 }
