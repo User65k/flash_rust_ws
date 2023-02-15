@@ -9,7 +9,7 @@ use std::{
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
-use async_fcgi::stream::{Stream, FCGIAddr};
+use async_fcgi::stream::{FCGIAddr, Stream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

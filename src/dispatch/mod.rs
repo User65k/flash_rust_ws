@@ -62,29 +62,25 @@ fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &Path) -> bool {
 }
 
 fn decode_and_normalize_path(uri: &Uri) -> Result<OwnedWebPath, IoError> {
-    let path = percent_encoding::percent_decode_str(uri.path())
-        .decode_utf8_lossy();
-    
+    let path = percent_encoding::percent_decode_str(uri.path()).decode_utf8_lossy();
+
     let mut r = OsString::with_capacity(path.len());
     for p in path.split('/') {
         match p {
-            "."|"" => {},
+            "." | "" => {}
             ".." => {
                 let mut p = PathBuf::from(r);
                 if !p.pop() {
-                    return Err(IoError::new(
-                        ErrorKind::PermissionDenied,
-                        "path traversal",
-                    ));
+                    return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
                 }
                 r = p.into_os_string();
-            },
+            }
             comp => {
                 if !r.is_empty() {
                     r.push::<String>(std::path::MAIN_SEPARATOR.into());
                 }
                 r.push(comp);
-            },
+            }
         }
     }
     Ok(OwnedWebPath(PathBuf::from(r)))
@@ -94,9 +90,9 @@ fn decode_and_normalize_path(uri: &Uri) -> Result<OwnedWebPath, IoError> {
 #[derive(Debug)]
 pub struct OwnedWebPath(PathBuf);
 impl core::ops::Deref for OwnedWebPath {
-	type Target = WebPath;
-	fn deref(&self) -> &WebPath {
-        unsafe {core::mem::transmute(self.0.as_path())}
+    type Target = WebPath;
+    fn deref(&self) -> &WebPath {
+        unsafe { core::mem::transmute(self.0.as_path()) }
     }
 }
 
@@ -107,9 +103,9 @@ impl WebPath {
     /// turn it into a path by appending. Never replace the existing root!
     /// rustsec_2022_0072
     pub fn prefix_with(&self, pre: &Path) -> PathBuf {
-        let r : &std::ffi::OsStr = pre.as_ref();
+        let r: &std::ffi::OsStr = pre.as_ref();
         let mut r = r.to_os_string();
-        if let Some(false) = r.to_str().map(|s|s.ends_with(std::path::MAIN_SEPARATOR)) {
+        if let Some(false) = r.to_str().map(|s| s.ends_with(std::path::MAIN_SEPARATOR)) {
             r.push::<String>(std::path::MAIN_SEPARATOR.into());
         }
         //does never start with a seperator
@@ -117,7 +113,9 @@ impl WebPath {
         PathBuf::from(r)
     }
     pub fn strip_prefix(&self, base: &Path) -> Result<&WebPath, std::path::StripPrefixError> {
-        self.0.strip_prefix(base).map(|p|unsafe {core::mem::transmute(p)})
+        self.0
+            .strip_prefix(base)
+            .map(|p| unsafe { core::mem::transmute(p) })
     }
 }
 
@@ -186,8 +184,15 @@ async fn handle_wwwroot(
     if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
         //FCGI + check for file
         if ext_in_list(&fcgi.exec, &full_path) {
-            return fcgi::fcgi_call(fcgi, req, req_path, web_mount, Some(&full_path), remote_addr)
-                .await;
+            return fcgi::fcgi_call(
+                fcgi,
+                req,
+                req_path,
+                web_mount,
+                Some(&full_path),
+                remote_addr,
+            )
+            .await;
         }
     }
 
@@ -209,7 +214,6 @@ async fn handle_vhost(
     cfg: &config::VHost,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-
     let req_path = decode_and_normalize_path(req.uri())?;
     debug!("req_path {:?}", req_path);
 
@@ -340,7 +344,8 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("a/c:/b"), create_wwwroot("."));
+        cfg.paths
+            .insert(PathBuf::from("a/c:/b"), create_wwwroot("."));
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap();
         assert_eq!(res.status(), 301);
@@ -361,10 +366,30 @@ mod mount_tests {
     }
     #[test]
     fn normalize() {
-        assert_eq!(decode_and_normalize_path(&"/a/../b".parse().unwrap()).unwrap().0, PathBuf::from("b"));
-        assert_eq!(decode_and_normalize_path(&"/../../".parse().unwrap()).unwrap_err().kind(), ErrorKind::PermissionDenied);
-        assert_eq!(decode_and_normalize_path(&"/a/c:/b".parse().unwrap()).unwrap().0, PathBuf::from("a/c:/b"));
-        assert_eq!(decode_and_normalize_path(&"/c:/b".parse().unwrap()).unwrap().0, PathBuf::from("c:/b"));
+        assert_eq!(
+            decode_and_normalize_path(&"/a/../b".parse().unwrap())
+                .unwrap()
+                .0,
+            PathBuf::from("b")
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/../../".parse().unwrap())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/a/c:/b".parse().unwrap())
+                .unwrap()
+                .0,
+            PathBuf::from("a/c:/b")
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/c:/b".parse().unwrap())
+                .unwrap()
+                .0,
+            PathBuf::from("c:/b")
+        );
     }
 }
 
@@ -407,9 +432,12 @@ async fn dispatch_to_vhost(
 #[cfg(test)]
 mod vhost_tests {
     use super::*;
-    fn make_host_cfg(default_host: Option<config::VHost>, named: Option<(String, config::VHost)>) -> Arc<config::HostCfg> {
+    fn make_host_cfg(
+        default_host: Option<config::VHost>,
+        named: Option<(String, config::VHost)>,
+    ) -> Arc<config::HostCfg> {
         let mut map: HashMap<String, config::VHost> = HashMap::new();
-        if let Some((k,v)) = named {
+        if let Some((k, v)) = named {
             map.insert(k, v);
         }
         Arc::new(config::HostCfg {

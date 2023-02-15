@@ -69,7 +69,8 @@ pub async fn fcgi_call(
         req_path,
         web_mount,
         fs_full_path,
-        remote_addr);
+        remote_addr,
+    );
 
     trace!("to FCGI: {:?}", &params);
     let resp = match fcgi_cfg.timeout {
@@ -99,12 +100,12 @@ fn create_params(
     req_path: &super::WebPath,
     web_mount: &Path,
     fs_full_path: Option<&Path>,
-    remote_addr: SocketAddr,) -> HashMap<Bytes, Bytes> {
-
+    remote_addr: SocketAddr,
+) -> HashMap<Bytes, Bytes> {
     let mut params = HashMap::new();
     if let Some(full_path) = fs_full_path {
         //full_path is completely resolved (to get index files)
-        
+
         let mut abs_name = PathBuf::from("/");
         abs_name.push(web_mount);
         let mut abs_name = req_path.prefix_with(&abs_name);
@@ -112,16 +113,18 @@ fn create_params(
         //add index file if needed
         if let Some(index_file) = full_path.file_name() {
             match abs_name.file_name() {
-                Some(f) if f!=index_file => {abs_name.push(index_file);},
+                Some(f) if f != index_file => {
+                    abs_name.push(index_file);
+                }
                 _ => {}
-            }            
+            }
         }
         params.insert(
             // must CGI/1.1  4.1.13, everybody cares
             Bytes::from(SCRIPT_NAME),
             path_to_bytes(abs_name),
         );
-    
+
         // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
         // -> not a thing, as we check if the file exists
     } else {
@@ -192,10 +195,10 @@ fn create_params(
             Bytes::from(SCRIPT_FILENAME),
             if let Some(full_path) = fs_full_path {
                 path_to_bytes(full_path)
-            }else{
+            } else {
                 // I am guessing here
                 path_to_bytes(req_path.prefix_with(Path::new("/")))
-            }
+            },
         );
     }
     if let Some(kvp) = &fcgi_cfg.params {
@@ -366,10 +369,10 @@ impl FcgiMnt {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use super::*;
     use bytes::Bytes;
-    use hyper::{Request, Body, Version, header};
+    use hyper::{header, Body, Request, Version};
+    use std::path::Path;
 
     use crate::config::{group_config, UseCase};
     #[test]
@@ -425,23 +428,46 @@ mod tests {
             bin: None,
             app: None,
         };
-        let req = Request::get("/php/").header(header::HOST, "example.com").version(Version::HTTP_11).body(Body::empty()).unwrap();
+        let req = Request::get("/php/")
+            .header(header::HOST, "example.com")
+            .version(Version::HTTP_11)
+            .body(Body::empty())
+            .unwrap();
 
         let params = create_params(
             &fcgi_cfg,
             &req,
-            unsafe{core::mem::transmute(Path::new(""))},
+            unsafe { core::mem::transmute(Path::new("")) },
             &Path::new("php"),
             Some(&Path::new("/opt/php/index.php")),
-            "1.2.3.4:1337".parse().unwrap());
+            "1.2.3.4:1337".parse().unwrap(),
+        );
 
-        assert_eq!(params.get(&Bytes::from(GATEWAY_INTERFACE)), Some(&CGI_VERS.into()));
-        assert_eq!(params.get(&Bytes::from(SERVER_PROTOCOL)), Some(&"HTTP/1.1".into()));
-        assert_eq!(params.get(&Bytes::from(SERVER_NAME)), Some(&"example.com".into()));
-        assert_eq!(params.get(&Bytes::from(REMOTE_ADDR)), Some(&"1.2.3.4".into()));
+        assert_eq!(
+            params.get(&Bytes::from(GATEWAY_INTERFACE)),
+            Some(&CGI_VERS.into())
+        );
+        assert_eq!(
+            params.get(&Bytes::from(SERVER_PROTOCOL)),
+            Some(&"HTTP/1.1".into())
+        );
+        assert_eq!(
+            params.get(&Bytes::from(SERVER_NAME)),
+            Some(&"example.com".into())
+        );
+        assert_eq!(
+            params.get(&Bytes::from(REMOTE_ADDR)),
+            Some(&"1.2.3.4".into())
+        );
 
-        assert_eq!(params.get(&Bytes::from(SCRIPT_FILENAME)), Some(&"/opt/php/index.php".into()));
-        assert_eq!(params.get(&Bytes::from(SCRIPT_NAME)), Some(&"/php/index.php".into()));
+        assert_eq!(
+            params.get(&Bytes::from(SCRIPT_FILENAME)),
+            Some(&"/opt/php/index.php".into())
+        );
+        assert_eq!(
+            params.get(&Bytes::from(SCRIPT_NAME)),
+            Some(&"/php/index.php".into())
+        );
     }
     #[test]
     fn params_flup_example() {
@@ -455,24 +481,41 @@ mod tests {
             bin: None,
             app: None,
         };
-        let req = Request::get("/flup/status").header(header::HOST, "localhost").version(Version::HTTP_10).body(Body::empty()).unwrap();
+        let req = Request::get("/flup/status")
+            .header(header::HOST, "localhost")
+            .version(Version::HTTP_10)
+            .body(Body::empty())
+            .unwrap();
 
         let params = create_params(
             &fcgi_cfg,
             &req,
-            unsafe{core::mem::transmute(Path::new("status"))},
+            unsafe { core::mem::transmute(Path::new("status")) },
             &Path::new("flup"),
             None,
-            "[::1]:1337".parse().unwrap());
+            "[::1]:1337".parse().unwrap(),
+        );
 
-        assert_eq!(params.get(&Bytes::from(GATEWAY_INTERFACE)), Some(&CGI_VERS.into()));
-        assert_eq!(params.get(&Bytes::from(SERVER_PROTOCOL)), Some(&"HTTP/1.0".into()));
-        assert_eq!(params.get(&Bytes::from(SERVER_NAME)), Some(&"localhost".into()));
+        assert_eq!(
+            params.get(&Bytes::from(GATEWAY_INTERFACE)),
+            Some(&CGI_VERS.into())
+        );
+        assert_eq!(
+            params.get(&Bytes::from(SERVER_PROTOCOL)),
+            Some(&"HTTP/1.0".into())
+        );
+        assert_eq!(
+            params.get(&Bytes::from(SERVER_NAME)),
+            Some(&"localhost".into())
+        );
         assert_eq!(params.get(&Bytes::from(REMOTE_ADDR)), Some(&"::1".into()));
 
         assert_eq!(params.get(&Bytes::from(SCRIPT_FILENAME)), None);
         assert_eq!(params.get(&Bytes::from(SCRIPT_NAME)), Some(&"/flup".into()));
         assert_eq!(params.get(&Bytes::from(PATH_INFO)), Some(&"/status".into()));
-        assert_eq!(params.get(&Bytes::from(REQUEST_URI)), Some(&"/flup/status".into()));
+        assert_eq!(
+            params.get(&Bytes::from(REQUEST_URI)),
+            Some(&"/flup/status".into())
+        );
     }
 }

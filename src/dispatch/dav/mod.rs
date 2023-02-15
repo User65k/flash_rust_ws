@@ -1,6 +1,8 @@
 use super::staticf::{resolve_path, return_file};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use hyper::{body::HttpBody, header, Body, Request, Response, StatusCode};
+use hyper_staticfile::ResolveResult;
+use serde::Deserialize;
 use std::{
     convert::TryFrom,
     io::{Error as IoError, ErrorKind, Write},
@@ -9,8 +11,6 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use hyper_staticfile::ResolveResult;
-use serde::Deserialize;
 use tokio::io::copy as redirect;
 use tokio::{
     fs::{copy, create_dir, metadata, remove_dir_all, remove_file, rename, File},
@@ -68,9 +68,9 @@ pub async fn do_dav(
             Err(IoError::new(ErrorKind::PermissionDenied, "read only"))
         }
         _ => Ok(Response::builder()
-                .status(StatusCode::METHOD_NOT_ALLOWED)
-                .body(Body::empty())
-                .expect("unable to build response")),
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .body(Body::empty())
+            .expect("unable to build response")),
     }
 }
 async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
@@ -89,15 +89,31 @@ async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>
         //percent_encoding::percent_encode_byte(byte)
 
         if meta.is_dir() {
-            buf.write_all(format!("<a href=\"{0}{1}/\">{1}/</a><br/>", req.uri().path(), f.file_name().to_string_lossy()).as_bytes())?;
-        }else{
-            buf.write_all(format!("<a href=\"{0}{1}\">{1}</a> {2}<br/>", req.uri().path(), f.file_name().to_string_lossy(), meta.len()).as_bytes())?;
+            buf.write_all(
+                format!(
+                    "<a href=\"{0}{1}/\">{1}/</a><br/>",
+                    req.uri().path(),
+                    f.file_name().to_string_lossy()
+                )
+                .as_bytes(),
+            )?;
+        } else {
+            buf.write_all(
+                format!(
+                    "<a href=\"{0}{1}\">{1}</a> {2}<br/>",
+                    req.uri().path(),
+                    f.file_name().to_string_lossy(),
+                    meta.len()
+                )
+                .as_bytes(),
+            )?;
         }
     }
     buf.write_all(b"</body></html>")?;
     let res = Response::builder()
         .header(header::CONTENT_TYPE, &b"text/html; charset=UTF-8"[..])
-        .body(Body::from(buf.into_inner().freeze())).expect("unable to build response");
+        .body(Body::from(buf.into_inner().freeze()))
+        .expect("unable to build response");
     Ok(res)
 }
 async fn handle_get(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
@@ -180,7 +196,11 @@ impl AsyncRead for BodyW {
         }
     }
 }
-async fn handle_put(req: Request<Body>, full_path: &Path, dont_overwrite: bool) -> Result<Response<Body>, IoError> {
+async fn handle_put(
+    req: Request<Body>,
+    full_path: &Path,
+    dont_overwrite: bool,
+) -> Result<Response<Body>, IoError> {
     // Check if file exists before proceeding
     if full_path.exists() && dont_overwrite {
         return Err(IoError::new(
@@ -318,7 +338,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{UseCase, group_config};
+    use crate::config::{group_config, UseCase};
     #[test]
     fn basic_config() {
         if let Ok(UseCase::Webdav(w)) = toml::from_str(
@@ -326,9 +346,9 @@ mod tests {
     dav = "."
         "#,
         ) {
-            assert_eq!(w.read_only,false);
-            assert_eq!(w.dont_overwrite,false);
-        }else{
+            assert_eq!(w.read_only, false);
+            assert_eq!(w.dont_overwrite, false);
+        } else {
             panic!("not a webdav");
         }
     }

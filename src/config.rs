@@ -202,7 +202,8 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     let path = "./test_cfg.toml";
 
     // read the whole file
-    let buffer = read_to_string(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
+    let buffer =
+        read_to_string(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
 
     let mut cfg = toml::from_str::<Configuration>(&buffer)?;
     for (host_name, vhost) in cfg.hosts.iter_mut() {

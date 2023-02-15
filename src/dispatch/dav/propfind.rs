@@ -1,6 +1,9 @@
 use bytes::{Buf, BufMut, BytesMut};
 use chrono::{DateTime, Utc};
-use hyper::{body::{aggregate, HttpBody}, Body, Request, Response, StatusCode};
+use hyper::{
+    body::{aggregate, HttpBody},
+    Body, Request, Response, StatusCode,
+};
 use std::{
     fs::Metadata,
     io::{Error as IoError, ErrorKind, Read, Write},
@@ -36,7 +39,7 @@ pub async fn handle_propfind(
             OwnedName::qualified("resourcetype", "DAV", Option::<String>::None),
             OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
         ]
-    }else{
+    } else {
         let read = aggregate(req.body_mut())
             .await
             .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
