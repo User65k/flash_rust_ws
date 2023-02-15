@@ -12,7 +12,7 @@ use tokio::fs::{File, OpenOptions};
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 #[cfg(windows)]
-use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
 
 pub async fn return_file(
     req: &Request<Body>,
