@@ -23,7 +23,7 @@ use super::decode_and_normalize_path;
 /// web_mount is config.root from the client perspective
 pub async fn do_dav(
     req: Request<Body>,
-    req_path: &super::WebPath,
+    req_path: &super::WebPath<'_>,
     config: &Config,
     web_mount: &Path,
     _remote_addr: SocketAddr,

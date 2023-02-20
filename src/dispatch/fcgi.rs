@@ -33,7 +33,7 @@ const SCRIPT_FILENAME: &[u8] = b"SCRIPT_FILENAME";
 pub async fn fcgi_call(
     fcgi_cfg: &FCGIApp,
     req: Request<Body>,
-    req_path: &super::WebPath,
+    req_path: &super::WebPath<'_>,
     web_mount: &Path,
     fs_full_path: Option<&Path>,
     remote_addr: SocketAddr,
@@ -106,19 +106,18 @@ fn create_params(
     if let Some(full_path) = fs_full_path {
         //full_path is completely resolved (to get index files)
 
-        let mut abs_name = PathBuf::from("/");
-        abs_name.push(web_mount);
-        let mut abs_name = req_path.prefix_with(&abs_name);
-
         //add index file if needed
-        if let Some(index_file) = full_path.file_name() {
-            match abs_name.file_name() {
-                Some(f) if f != index_file => {
-                    abs_name.push(index_file);
-                }
-                _ => {}
+        let index_file_name = full_path.file_name().and_then(|o| o.to_str());
+        let post = index_file_name.map_or(0, |v| v.len());
+
+        let mut abs_name = req_path.prefixed_as_abs_url_path(web_mount, post);
+
+        if let Some(f) = index_file_name {
+            if !abs_name.ends_with(f) {
+                abs_name.push_str(f);
             }
         }
+
         params.insert(
             // must CGI/1.1  4.1.13, everybody cares
             Bytes::from(SCRIPT_NAME),
@@ -138,7 +137,7 @@ fn create_params(
             path_to_bytes(abs_web_mount),
         );
         //... so everything inside it is PATH_INFO
-        let abs_path = req_path.prefix_with(Path::new("/"));
+        let abs_path = req_path.prefixed_as_abs_url_path(Path::new(""), 0);
         params.insert(
             // opt CGI/1.1   4.1.5
             Bytes::from(PATH_INFO),
@@ -197,7 +196,7 @@ fn create_params(
                 path_to_bytes(full_path)
             } else {
                 // I am guessing here
-                path_to_bytes(req_path.prefix_with(Path::new("/")))
+                path_to_bytes(req_path.prefixed_as_abs_url_path(Path::new(""), 0))
             },
         );
     }
@@ -374,7 +373,10 @@ mod tests {
     use hyper::{header, Body, Request, Version};
     use std::path::Path;
 
-    use crate::config::{group_config, UseCase};
+    use crate::{
+        config::{group_config, UseCase},
+        dispatch::WebPath,
+    };
     #[test]
     fn basic_config() {
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
@@ -437,7 +439,7 @@ mod tests {
         let params = create_params(
             &fcgi_cfg,
             &req,
-            unsafe { core::mem::transmute(Path::new("")) },
+            &WebPath::parsed(""),
             &Path::new("php"),
             Some(&Path::new("/opt/php/index.php")),
             "1.2.3.4:1337".parse().unwrap(),
@@ -490,7 +492,7 @@ mod tests {
         let params = create_params(
             &fcgi_cfg,
             &req,
-            unsafe { core::mem::transmute(Path::new("status")) },
+            &WebPath::parsed("status"),
             &Path::new("flup"),
             None,
             "[::1]:1337".parse().unwrap(),

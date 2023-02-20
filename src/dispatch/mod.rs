@@ -11,9 +11,9 @@ use hyper::Uri;
 use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
 use hyper_staticfile::{ResolveResult, ResponseBuilder as FileResponseBuilder};
 use log::{debug, error, info, trace};
+use std::borrow::{Borrow, Cow};
 use std::collections::HashMap;
 use std::error::Error;
-use std::ffi::OsString;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -61,45 +61,42 @@ fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &Path) -> bool {
     true // no list == all is ok
 }
 
-fn decode_and_normalize_path(uri: &Uri) -> Result<OwnedWebPath, IoError> {
-    let path = percent_encoding::percent_decode_str(uri.path()).decode_utf8_lossy();
+fn decode_and_normalize_path(uri: &Uri) -> Result<WebPath<'_>, IoError> {
+    let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
 
-    let mut r = OsString::with_capacity(path.len());
+    let mut parts = Vec::new();
+    let mut len = 0;
     for p in path.split('/') {
         match p {
             "." | "" => {}
             ".." => {
-                let mut p = PathBuf::from(r);
-                if !p.pop() {
+                if parts.pop().is_none() {
                     return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
                 }
-                r = p.into_os_string();
             }
             comp => {
-                if !r.is_empty() {
-                    r.push::<String>(std::path::MAIN_SEPARATOR.into());
-                }
-                r.push(comp);
+                parts.push(comp);
+                len += 1 + comp.len();
             }
         }
     }
-    Ok(OwnedWebPath(PathBuf::from(r)))
-}
-
-#[repr(transparent)]
-#[derive(Debug)]
-pub struct OwnedWebPath(PathBuf);
-impl core::ops::Deref for OwnedWebPath {
-    type Target = WebPath;
-    fn deref(&self) -> &WebPath {
-        unsafe { core::mem::transmute(self.0.as_path()) }
+    if len == path.len() {
+        Ok(WebPath(path))
+    } else {
+        let mut r = String::with_capacity(len);
+        for p in parts {
+            r.push_str(p);
+            r.push('/');
+        }
+        r.pop();
+        Ok(WebPath(Cow::from(r)))
     }
 }
 
 #[repr(transparent)]
 #[derive(Debug)]
-pub struct WebPath(Path);
-impl WebPath {
+pub struct WebPath<'a>(Cow<'a, str>);
+impl<'a> WebPath<'a> {
     /// turn it into a path by appending. Never replace the existing root!
     /// rustsec_2022_0072
     pub fn prefix_with(&self, pre: &Path) -> PathBuf {
@@ -108,14 +105,53 @@ impl WebPath {
         if let Some(false) = r.to_str().map(|s| s.ends_with(std::path::MAIN_SEPARATOR)) {
             r.push::<String>(std::path::MAIN_SEPARATOR.into());
         }
-        //does never start with a seperator
-        r.push(&self.0);
+        //does never start with a separator
+        r.push(self.0.as_ref());
         PathBuf::from(r)
     }
-    pub fn strip_prefix(&self, base: &Path) -> Result<&WebPath, std::path::StripPrefixError> {
-        self.0
-            .strip_prefix(base)
-            .map(|p| unsafe { core::mem::transmute(p) })
+    pub fn strip_prefix(&'a self, base: &'_ Path) -> Result<WebPath<'a>, ()> {
+        let mut strip = base.components();
+        let mut path = self.0.split('/');
+        let mut offset = 0;
+        loop {
+            match (strip.next(), path.next()) {
+                (None, None) => {
+                    offset -= 1;
+                    break;
+                } //no next dir -> no final separator
+                (Some(c), p @ Some(s)) if c.as_os_str().to_str() == p => offset += 1 + s.len(),
+                (None, Some(_)) => break,
+                _ => return Err(()),
+            }
+        }
+        Ok(WebPath(Cow::from(&self.0[offset..])))
+    }
+    pub fn prefixed_as_abs_url_path(&self, pre: &Path, extra_cap: usize) -> String {
+        //https://docs.rs/hyper-staticfile/latest/src/hyper_staticfile/response_builder.rs.html#75-123
+        if let Some(pre) = pre.to_str() {
+            let s = self.0.as_ref();
+            let capa = pre.len() + s.len() + extra_cap + 2;
+            let mut r = String::with_capacity(capa);
+            if !pre.is_empty() && !pre.starts_with('/') {
+                r.push('/');
+            }
+            r.push_str(pre);
+            if !pre.ends_with('/') {
+                r.push('/');
+            }
+            r.push_str(s);
+            return r;
+        }
+        String::new()
+    }
+    pub fn clone<'b>(&self) -> WebPath<'b> {
+        // not as trait as we change lifetime
+        let s: &str = self.0.borrow();
+        WebPath(Cow::Owned(s.to_owned()))
+    }
+    #[cfg(test)]
+    pub fn parsed(v: &'a str) -> WebPath<'a> {
+        WebPath(Cow::from(v))
     }
 }
 
@@ -127,7 +163,7 @@ impl WebPath {
 async fn handle_wwwroot(
     req: Request<Body>,
     wwwr: &config::WwwRoot,
-    req_path: &WebPath,
+    req_path: WebPath<'_>,
     web_mount: &Path,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
@@ -148,7 +184,7 @@ async fn handle_wwwroot(
         config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, static_files }) => {
             if fcgi.exec.is_none() {
                 //FCGI + dont check for file -> always FCGI
-                return fcgi::fcgi_call(fcgi, req, req_path, web_mount, None, remote_addr).await;
+                return fcgi::fcgi_call(fcgi, req, &req_path, web_mount, None, remote_addr).await;
             }
             match static_files {
                 Some(sf) => sf,
@@ -157,11 +193,11 @@ async fn handle_wwwroot(
         }
         #[cfg(feature = "websocket")]
         config::UseCase::Websocket(ws) => {
-            return websocket::upgrade(req, ws, req_path, remote_addr).await;
+            return websocket::upgrade(req, ws, &req_path, remote_addr).await;
         }
         #[cfg(feature = "webdav")]
         config::UseCase::Webdav(dav) => {
-            return dav::do_dav(req, req_path, dav, web_mount, remote_addr).await;
+            return dav::do_dav(req, &req_path, dav, web_mount, remote_addr).await;
         }
         #[cfg(test)]
         config::UseCase::UnitTest(ut) => {
@@ -191,7 +227,7 @@ async fn handle_wwwroot(
             return fcgi::fcgi_call(
                 fcgi,
                 req,
-                req_path,
+                &req_path,
                 web_mount,
                 Some(&full_path),
                 remote_addr,
@@ -226,7 +262,9 @@ async fn handle_vhost(
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
         if let Ok(full_path) = req_path.strip_prefix(mount_path) {
-            let mut resp = handle_wwwroot(req, wwwr, full_path, mount_path, remote_addr).await?;
+            let req_path = full_path.clone(); // T_T
+            drop(full_path);
+            let mut resp = handle_wwwroot(req, wwwr, req_path, mount_path, remote_addr).await?;
             insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
             return Ok(resp);
         }
@@ -243,14 +281,15 @@ async fn handle_vhost(
 pub struct UnitTestUseCase {
     req_path: Option<&'static str>,
     mount: Option<&'static Path>,
-    remote_addr: Option<SocketAddr>
+    remote_addr: Option<SocketAddr>,
 }
 #[cfg(test)]
 impl UnitTestUseCase {
     pub fn create_wwwroot(
         req_path: Option<&'static str>,
         mount: Option<&'static Path>,
-        remote_addr: Option<SocketAddr>) -> config::WwwRoot {
+        remote_addr: Option<SocketAddr>,
+    ) -> config::WwwRoot {
         let sf = UnitTestUseCase {
             req_path,
             mount,
@@ -262,13 +301,14 @@ impl UnitTestUseCase {
             auth: None,
         }
     }
-    fn body(&self,
-        req_path: &WebPath,
+    fn body(
+        &self,
+        req_path: WebPath<'_>,
         web_mount: &Path,
-        remote_addr: SocketAddr,) -> Result<Response<Body>, IoError> {
-
+        remote_addr: SocketAddr,
+    ) -> Result<Response<Body>, IoError> {
         if let Some(r) = self.req_path {
-            assert_eq!(&req_path.0, Path::new(r));
+            assert_eq!(req_path.0, r);
         }
         if let Some(m) = self.mount {
             assert_eq!(web_mount, m);
@@ -276,7 +316,6 @@ impl UnitTestUseCase {
         if let Some(a) = self.remote_addr {
             assert_eq!(remote_addr, a);
         }
-        
         Ok(Response::builder().body(Body::default()).unwrap())
     }
 }
@@ -385,7 +424,10 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("a"), UnitTestUseCase::create_wwwroot(None, None, None));
+        cfg.paths.insert(
+            PathBuf::from("a"),
+            UnitTestUseCase::create_wwwroot(None, None, None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
         assert_eq!(res.kind(), ErrorKind::PermissionDenied);
@@ -397,7 +439,10 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("b"), UnitTestUseCase::create_wwwroot(None, None, None));
+        cfg.paths.insert(
+            PathBuf::from("b"),
+            UnitTestUseCase::create_wwwroot(None, None, None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
         assert_eq!(res.kind(), ErrorKind::PermissionDenied);
@@ -411,7 +456,8 @@ mod mount_tests {
         //test mapping it to a file on disk
         assert_eq!(
             decode_and_normalize_path(req.uri())
-            .unwrap().prefix_with(Path::new("test")),
+                .unwrap()
+                .prefix_with(Path::new("test")),
             Path::new("test/c:/b")
         );
 
@@ -419,7 +465,10 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from(""), UnitTestUseCase::create_wwwroot(Some("c:/b"), None, None));
+        cfg.paths.insert(
+            PathBuf::from(""),
+            UnitTestUseCase::create_wwwroot(Some("c:/b"), None, None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
         //Note: ":" is not a valid dir char in windows
@@ -433,7 +482,8 @@ mod mount_tests {
         //test mapping it to a file on disk
         assert_eq!(
             decode_and_normalize_path(req.uri())
-            .unwrap().prefix_with(Path::new("test")),
+                .unwrap()
+                .prefix_with(Path::new("test")),
             Path::new("test/a/c:/b/d")
         );
 
@@ -441,8 +491,10 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths
-            .insert(PathBuf::from("a/c:/b"), UnitTestUseCase::create_wwwroot(Some("d"), Some(Path::new("a/c:/b")), None));
+        cfg.paths.insert(
+            PathBuf::from("a/c:/b"),
+            UnitTestUseCase::create_wwwroot(Some("d"), Some(Path::new("a/c:/b")), None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
     }
@@ -452,7 +504,10 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from(""), UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("")), None));
+        cfg.paths.insert(
+            PathBuf::from(""),
+            UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("")), None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
     }
@@ -462,7 +517,7 @@ mod mount_tests {
             decode_and_normalize_path(&"/a/../b".parse().unwrap())
                 .unwrap()
                 .0,
-            PathBuf::from("b")
+            "b"
         );
         assert_eq!(
             decode_and_normalize_path(&"/../../".parse().unwrap())
@@ -474,19 +529,21 @@ mod mount_tests {
             decode_and_normalize_path(&"/a/c:/b".parse().unwrap())
                 .unwrap()
                 .0,
-            PathBuf::from("a/c:/b")
+            "a/c:/b"
         );
         assert_eq!(
             decode_and_normalize_path(&"/c:/b".parse().unwrap())
                 .unwrap()
                 .0,
-            PathBuf::from("c:/b")
+            "c:/b"
         );
         assert_eq!(
             decode_and_normalize_path(&"/a/b/c".parse().unwrap())
-                .unwrap().strip_prefix(&Path::new("a")).unwrap()
+                .unwrap()
+                .strip_prefix(&Path::new("a"))
+                .unwrap()
                 .0,
-                PathBuf::from("b/c")
+            "b/c"
         );
     }
 }

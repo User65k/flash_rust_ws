@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub async fn upgrade(
     req: Request<Body>,
     ws: &Websocket,
-    _req_path: &super::WebPath,
+    _req_path: &super::WebPath<'_>,
     _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     //TODO? check if path is deeper than it should -> 404
