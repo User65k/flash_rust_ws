@@ -163,6 +163,10 @@ async fn handle_wwwroot(
         config::UseCase::Webdav(dav) => {
             return dav::do_dav(req, req_path, dav, web_mount, remote_addr).await;
         }
+        #[cfg(test)]
+        config::UseCase::UnitTest(ut) => {
+            return ut.body(req_path, web_mount, remote_addr);
+        }
     };
 
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
@@ -235,6 +239,48 @@ async fn handle_vhost(
 }
 
 #[cfg(test)]
+#[derive(Debug, Default)]
+pub struct UnitTestUseCase {
+    req_path: Option<&'static str>,
+    mount: Option<&'static Path>,
+    remote_addr: Option<SocketAddr>
+}
+#[cfg(test)]
+impl UnitTestUseCase {
+    pub fn create_wwwroot(
+        req_path: Option<&'static str>,
+        mount: Option<&'static Path>,
+        remote_addr: Option<SocketAddr>) -> config::WwwRoot {
+        let sf = UnitTestUseCase {
+            req_path,
+            mount,
+            remote_addr,
+        };
+        config::WwwRoot {
+            mount: config::UseCase::UnitTest(sf),
+            header: None,
+            auth: None,
+        }
+    }
+    fn body(&self,
+        req_path: &WebPath,
+        web_mount: &Path,
+        remote_addr: SocketAddr,) -> Result<Response<Body>, IoError> {
+
+        if let Some(r) = self.req_path {
+            assert_eq!(&req_path.0, Path::new(r));
+        }
+        if let Some(m) = self.mount {
+            assert_eq!(web_mount, m);
+        }
+        if let Some(a) = self.remote_addr {
+            assert_eq!(remote_addr, a);
+        }
+        
+        Ok(Response::builder().body(Body::default()).unwrap())
+    }
+}
+#[cfg(test)]
 mod mount_tests {
     use super::*;
     fn create_wwwroot(dir: &str) -> config::WwwRoot {
@@ -249,6 +295,39 @@ mod mount_tests {
             header: None,
             auth: None,
         }
+    }
+    #[tokio::test]
+    async fn test_mount_params() {
+        let req = Request::get("/abc/def/ghi").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+        let m = UnitTestUseCase::create_wwwroot(Some("def/ghi"), Some(Path::new("abc")), None);
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from("abc"), m);
+        let res = handle_vhost(req, &cfg, sa).await;
+        assert!(res.is_ok());
+    }
+    #[tokio::test]
+    async fn test_barely_mounted() {
+        let req = Request::get("/abc").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+        let m = UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("abc")), None);
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from("abc"), m);
+        let res = handle_vhost(req, &cfg, sa).await;
+        assert!(res.is_ok());
+    }
+    #[tokio::test]
+    async fn top_mount() {
+        let req = Request::get("/abc").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+        let m = UnitTestUseCase::create_wwwroot(Some("abc"), Some(Path::new("")), None);
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(PathBuf::from(""), m);
+        let res = handle_vhost(req, &cfg, sa).await;
+        assert!(res.is_ok());
     }
     #[tokio::test]
     async fn no_mounts() {
@@ -306,7 +385,7 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("a"), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from("a"), UnitTestUseCase::create_wwwroot(None, None, None));
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
         assert_eq!(res.kind(), ErrorKind::PermissionDenied);
@@ -318,7 +397,7 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("b"), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from("b"), UnitTestUseCase::create_wwwroot(None, None, None));
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
         assert_eq!(res.kind(), ErrorKind::PermissionDenied);
@@ -328,29 +407,44 @@ mod mount_tests {
     #[tokio::test]
     async fn rustsec_2022_0072_part1() {
         let req = Request::get("/c:/b").body(Body::empty()).unwrap();
+
+        //test mapping it to a file on disk
+        assert_eq!(
+            decode_and_normalize_path(req.uri())
+            .unwrap().prefix_with(Path::new("test")),
+            Path::new("test/c:/b")
+        );
+
+        //test mount logic
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from(""), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from(""), UnitTestUseCase::create_wwwroot(Some("c:/b"), None, None));
         let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap_err();
-        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(res.into_inner().unwrap().to_string(), "left webroot");
+        assert!(res.is_ok());
+        //Note: ":" is not a valid dir char in windows
+        //      However, an FCGI App might do things with it
     }
     #[cfg(windows)]
     #[tokio::test]
     async fn rustsec_2022_0072_part2() {
-        let req = Request::get("/a/c:/b").body(Body::empty()).unwrap();
+        let req = Request::get("/a/c:/b/d").body(Body::empty()).unwrap();
+
+        //test mapping it to a file on disk
+        assert_eq!(
+            decode_and_normalize_path(req.uri())
+            .unwrap().prefix_with(Path::new("test")),
+            Path::new("test/a/c:/b/d")
+        );
+
+        //test mount logic
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths
-            .insert(PathBuf::from("a/c:/b"), create_wwwroot("."));
+            .insert(PathBuf::from("a/c:/b"), UnitTestUseCase::create_wwwroot(Some("d"), Some(Path::new("a/c:/b")), None));
         let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap();
-        assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/a/c:/b/"); //Note: ":" is not a valid dir char in windows
-                                                                        //      However, an FCGI App might do things with it
+        assert!(res.is_ok());
     }
     #[tokio::test]
     async fn webroot() {
@@ -358,11 +452,9 @@ mod mount_tests {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from(""), create_wwwroot("."));
+        cfg.paths.insert(PathBuf::from(""), UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("")), None));
         let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap_err();
-        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(res.into_inner().unwrap().to_string(), "dir w/o index file");
+        assert!(res.is_ok());
     }
     #[test]
     fn normalize() {
@@ -389,6 +481,12 @@ mod mount_tests {
                 .unwrap()
                 .0,
             PathBuf::from("c:/b")
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/a/b/c".parse().unwrap())
+                .unwrap().strip_prefix(&Path::new("a")).unwrap()
+                .0,
+                PathBuf::from("b/c")
         );
     }
 }

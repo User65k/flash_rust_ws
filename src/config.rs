@@ -4,6 +4,8 @@ use crate::dispatch::dav::Config as webdav;
 use crate::dispatch::fcgi::FcgiMnt;
 #[cfg(feature = "websocket")]
 use crate::dispatch::websocket::Websocket;
+#[cfg(test)]
+use crate::dispatch::UnitTestUseCase;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 use crate::transport::tls::{ParsedTLSConfig, TLSBuilderTrait, TlsUserConfig};
 use anyhow::{Context, Result};
@@ -54,6 +56,8 @@ pub enum UseCase {
     //Proxy{host: String, path: String},
     #[cfg(feature = "webdav")]
     Webdav(webdav),
+    #[cfg(test)]
+    UnitTest(UnitTestUseCase),
 }
 /// use own deserializer to get the variant from the "main" key
 /// this helps to preserve usefull error messages
@@ -262,6 +266,8 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                 UseCase::Webdav(dav) => dav.setup().await,
                 #[cfg(feature = "websocket")]
                 UseCase::Websocket(f) => f.setup().await,
+                #[cfg(test)]
+                UseCase::UnitTest(_) => unreachable!(),
                 UseCase::StaticFiles(sf) => sf.setup().await,
             } {
                 errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
