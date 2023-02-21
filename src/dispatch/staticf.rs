@@ -94,7 +94,7 @@ pub async fn resolve_path(
 
     // If not a directory, serve this file.
     if !is_dir_request {
-        let mime = MimeGuess::from_path(&full_path).first_or_octet_stream();
+        let mime = MimeGuess::from_path(full_path).first_or_octet_stream();
         return Ok((full_path.into(), ResolveResult::Found(file, metadata, mime)));
     }
     debug!("dir {:?}", full_path);
@@ -126,11 +126,14 @@ pub async fn resolve_path(
 
 #[cfg(test)]
 mod tests {
-    use std::{env::temp_dir, fs::{File, remove_file}, path::{PathBuf, Path}, io::Write};
+    use std::{
+        env::temp_dir,
+        path::{Path, PathBuf},
+    };
 
-    use hyper::{Request, Body, Response};
-    use crate::config::{UseCase, StaticFiles, WwwRoot};
+    use crate::config::{StaticFiles, UseCase, WwwRoot};
     use hyper::body::to_bytes;
+    use hyper::{Body, Request, Response};
     //use crate::dispatch::test::
 
     #[test]
@@ -140,30 +143,34 @@ mod tests {
     dir = "."
         "#,
         ) {
-            assert_eq!(s.follow_symlinks, false);
+            assert!(!s.follow_symlinks);
         } else {
             panic!("not a StaticFiles");
         }
     }
 
-
     fn create_temp_file(file_name: &str, content: &[u8]) -> TempFile {
         let mut path = temp_dir();
         path.push(file_name);
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(content)
-            .expect("could not write htdigest file");
+        let mut file = std::fs::File::create(&path).expect("could not create htdigest file");
+        std::io::Write::write_all(&mut file, content).expect("could not write htdigest file");
         TempFile(path)
     }
     struct TempFile(PathBuf);
-    impl TempFile {
-        fn get_path(&self) -> &Path {
-            &self.0
-        }
-    }
     impl Drop for TempFile {
         fn drop(&mut self) {
-            let _ = remove_file(&self.0);
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    struct TempDir(PathBuf);
+    fn create_tmp_dir(name: &str) -> TempDir {
+        let d = temp_dir().join(name);
+        std::fs::create_dir(&d).expect("could not create dir");
+        TempDir(d)
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir(&self.0);
         }
     }
 
@@ -172,7 +179,6 @@ mod tests {
         sf: StaticFiles,
         req_path: &str,
     ) -> Result<Response<Body>, std::io::Error> {
-
         let wwwr = WwwRoot {
             mount: UseCase::StaticFiles(sf),
             header: None,
@@ -180,9 +186,15 @@ mod tests {
         };
         let remote_addr = "127.0.0.1:8080".parse().unwrap();
 
-        crate::dispatch::handle_wwwroot(req, &wwwr, crate::dispatch::WebPath::parsed(req_path), Path::new("mount"), remote_addr).await
+        crate::dispatch::handle_wwwroot(
+            req,
+            &wwwr,
+            crate::dispatch::WebPath::parsed(req_path),
+            Path::new("mount"),
+            remote_addr,
+        )
+        .await
     }
-
 
     #[tokio::test]
     async fn resolve_file() {
@@ -195,7 +207,9 @@ mod tests {
             index: None,
             serve: None,
         };
-        let req = Request::get("/mount/test_resolve_file").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/test_resolve_file")
+            .body(Body::empty())
+            .unwrap();
         let res = handle_wwwroot(req, sf, "test_resolve_file").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
@@ -245,7 +259,9 @@ mod tests {
             index: None,
             serve: Some(vec![PathBuf::from("allow")]),
         };
-        let req = Request::get("/mount/test_allowlist").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/test_allowlist")
+            .body(Body::empty())
+            .unwrap();
         let res = handle_wwwroot(req, sf, "test_allowlist").await;
         let res = res.unwrap_err();
         assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
@@ -263,18 +279,19 @@ mod tests {
             serve: Some(vec![PathBuf::from("allow")]),
         };
 
-        let req = Request::get("/mount/test_allowlist.allow").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/test_allowlist.allow")
+            .body(Body::empty())
+            .unwrap();
         let res = handle_wwwroot(req, sf, "test_allowlist.allow").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
         let body = to_bytes(res.into_body()).await.unwrap();
         assert_eq!(body, file_content);
     }
-    
+
     #[tokio::test]
     async fn dir_redir() {
-        let d = temp_dir().join("test_dir_redir");
-        std::fs::create_dir(&d).unwrap();
+        let _d = create_tmp_dir("test_dir_redir");
 
         let sf = StaticFiles {
             dir: temp_dir(),
@@ -282,14 +299,42 @@ mod tests {
             index: None,
             serve: None,
         };
-        let req = Request::get("/mount/test_dir_redir").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/test_dir_redir")
+            .body(Body::empty())
+            .unwrap();
         let res = handle_wwwroot(req, sf, "test_dir_redir").await;
         let res = res.unwrap();
         assert_eq!(res.status(), hyper::StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(res.headers().get(hyper::header::LOCATION).map(|h|h.as_bytes()), Some(&b"/mount/test_dir_redir/"[..]));
-
-        std::fs::remove_dir(&d).unwrap();
+        assert_eq!(
+            res.headers()
+                .get(hyper::header::LOCATION)
+                .map(|h| h.as_bytes()),
+            Some(&b"/mount/test_dir_redir/"[..])
+        );
     }
+    #[tokio::test]
+    async fn redirects_to_sanitized_path() {
+        let _d = create_tmp_dir("redirects_to_sanitized_path");
+
+        let sf = StaticFiles {
+            dir: temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount//foo.org/redirects_to_sanitized_path")
+            .body(Body::empty())
+            .unwrap();
+        let req_path = crate::dispatch::decode_and_normalize_path(req.uri()).unwrap();
+        let rel_path = req_path.strip_prefix(Path::new("mount")).unwrap();
+
+        assert_eq!(rel_path, "foo.org/redirects_to_sanitized_path");
+
+        let res = handle_wwwroot(req, sf, "foo.org/redirects_to_sanitized_path").await;
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), std::io::ErrorKind::NotFound);
+    }
+
     //TODO symlink
-    //TODO dir redirect
+    //std::os::unix::fs::symlink
 }
