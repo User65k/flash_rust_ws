@@ -1,8 +1,7 @@
 use hyper::{Body, Method, Request, Response};
-use hyper_staticfile::ResolveResult;
-use hyper_staticfile::ResponseBuilder as FileResponseBuilder;
+use hyper_staticfile::util::FileResponseBuilder;
 use log::debug;
-use mime_guess::MimeGuess;
+use mime_guess::{Mime, MimeGuess};
 use std::fs::{Metadata, OpenOptions as StdOpenOptions};
 use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::path::Path;
@@ -14,9 +13,20 @@ use std::os::windows::fs::OpenOptionsExt;
 #[cfg(windows)]
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
 
+/// The result of `resolve_path`.
+#[derive(Debug)]
+pub enum ResolveResult {
+    /// A directory was requested as a file.
+    IsDirectory,
+    /// The requested file was found.
+    Found(File, Metadata, Mime),
+}
+
 pub async fn return_file(
     req: &Request<Body>,
-    resolved_file: ResolveResult,
+    file: File,
+    metadata: Metadata,
+    mime: Mime,
 ) -> Result<Response<Body>, IoError> {
     // Handle only `GET`/`HEAD` and absolute paths.
     match *req.method() {
@@ -36,12 +46,34 @@ pub async fn return_file(
         }
     }
 
-    debug!("resolved to {:?}", resolved_file);
+    debug!("resolved to {:?}", file);
     Ok(FileResponseBuilder::new()
         .request(req)
         .cache_headers(Some(500))
-        .build(resolved_file)
+        .build(file, metadata, mime.to_string())
         .expect("unable to build response"))
+
+}
+
+pub fn redirect(
+    req: &Request<Body>,
+    req_path: &super::WebPath<'_>,
+    web_mount: &Path,
+) -> Response<Body> {
+    //request for a file that is a directory
+    let mut target_url = req_path
+        .prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(0, |q| q.len() + 2));
+    target_url.push('/');
+    if let Some(q) = req.uri().query() {
+        target_url.push('?');
+        target_url.push_str(q);
+    }
+
+    Response::builder()
+        .status(hyper::StatusCode::MOVED_PERMANENTLY)
+        .header(hyper::header::LOCATION, target_url)
+        .body(Body::empty())
+        .expect("unable to build redirect")
 }
 
 /// Open a file and get metadata.

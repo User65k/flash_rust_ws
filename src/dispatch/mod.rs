@@ -12,7 +12,7 @@ pub use webpath::{decode_and_normalize_path, WebPath};
 
 use crate::config;
 use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
-use hyper_staticfile::ResolveResult;
+use staticf::ResolveResult;
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
 use std::error::Error;
@@ -120,46 +120,37 @@ async fn handle_wwwroot(
     let (full_path, resolved_file) =
         staticf::resolve_path(&full_path, is_dir_request, &sf.index, sf.follow_symlinks).await?;
 
-    if let ResolveResult::IsDirectory = resolved_file {
-        //request for a file that is a directory
-        let mut target_url = req_path
-            .prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(0, |q| q.len() + 2));
-        target_url.push('/');
-        if let Some(q) = req.uri().query() {
-            target_url.push('?');
-            target_url.push_str(q);
-        }
-
-        return Ok(Response::builder()
-            .status(StatusCode::MOVED_PERMANENTLY)
-            .header(header::LOCATION, target_url)
-            .body(Body::empty())
-            .expect("unable to build redirect"));
-    }
-
-    #[cfg(feature = "fcgi")]
-    if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
-        //FCGI + check for file
-        if ext_in_list(&fcgi.exec, &full_path) {
-            return fcgi::fcgi_call(
-                fcgi,
-                req,
-                &req_path,
-                web_mount,
-                Some(&full_path),
-                remote_addr,
-            )
-            .await;
-        }
-    }
-
-    if ext_in_list(&sf.serve, &full_path) {
-        staticf::return_file(&req, resolved_file).await
-    } else {
-        Err(IoError::new(
-            ErrorKind::PermissionDenied,
-            "bad file extension",
-        ))
+    match resolved_file {
+        ResolveResult::IsDirectory => {
+            //request for a file that is a directory        
+            Ok(staticf::redirect(&req, &req_path, web_mount))
+        },
+        ResolveResult::Found(file, metadata, mime) => {
+            #[cfg(feature = "fcgi")]
+            if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
+                //FCGI + check for file
+                if ext_in_list(&fcgi.exec, &full_path) {
+                    return fcgi::fcgi_call(
+                        fcgi,
+                        req,
+                        &req_path,
+                        web_mount,
+                        Some(&full_path),
+                        remote_addr,
+                    )
+                    .await;
+                }
+            }
+        
+            if ext_in_list(&sf.serve, &full_path) {
+                staticf::return_file(&req, file, metadata, mime).await
+            } else {
+                Err(IoError::new(
+                    ErrorKind::PermissionDenied,
+                    "bad file extension",
+                ))
+            }
+        },
     }
 }
 
