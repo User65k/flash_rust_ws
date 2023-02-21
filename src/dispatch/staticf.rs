@@ -126,7 +126,13 @@ pub async fn resolve_path(
 
 #[cfg(test)]
 mod tests {
-    use crate::config::UseCase;
+    use std::{env::temp_dir, fs::{File, remove_file}, path::{PathBuf, Path}, io::Write};
+
+    use hyper::{Request, Body, Response};
+    use crate::config::{UseCase, StaticFiles, WwwRoot};
+    use hyper::body::to_bytes;
+    //use crate::dispatch::test::
+
     #[test]
     fn basic_config() {
         if let Ok(UseCase::StaticFiles(s)) = toml::from_str(
@@ -139,4 +145,151 @@ mod tests {
             panic!("not a StaticFiles");
         }
     }
+
+
+    fn create_temp_file(file_name: &str, content: &[u8]) -> TempFile {
+        let mut path = temp_dir();
+        path.push(file_name);
+        let mut file = File::create(&path).expect("could not create htdigest file");
+        file.write_all(content)
+            .expect("could not write htdigest file");
+        TempFile(path)
+    }
+    struct TempFile(PathBuf);
+    impl TempFile {
+        fn get_path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = remove_file(&self.0);
+        }
+    }
+
+    async fn handle_wwwroot(
+        req: Request<Body>,
+        sf: StaticFiles,
+        req_path: &str,
+    ) -> Result<Response<Body>, std::io::Error> {
+
+        let wwwr = WwwRoot {
+            mount: UseCase::StaticFiles(sf),
+            header: None,
+            auth: None,
+        };
+        let remote_addr = "127.0.0.1:8080".parse().unwrap();
+
+        crate::dispatch::handle_wwwroot(req, &wwwr, crate::dispatch::WebPath::parsed(req_path), Path::new("mount"), remote_addr).await
+    }
+
+
+    #[tokio::test]
+    async fn resolve_file() {
+        let file_content = &b"test_resolve_file"[..];
+        let _tf = create_temp_file("test_resolve_file", file_content);
+
+        let sf = StaticFiles {
+            dir: temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/test_resolve_file").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "test_resolve_file").await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = to_bytes(res.into_body()).await.unwrap();
+        assert_eq!(body, file_content);
+    }
+    #[tokio::test]
+    async fn index_file() {
+        let file_content = &b"test_index_file"[..];
+        let _tf = create_temp_file("test_index_file", file_content);
+
+        let sf = StaticFiles {
+            dir: temp_dir(),
+            follow_symlinks: false,
+            index: Some(vec![PathBuf::from("test_index_file")]),
+            serve: None,
+        };
+        let req = Request::get("/mount/").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "").await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = to_bytes(res.into_body()).await.unwrap();
+        assert_eq!(body, file_content);
+    }
+    #[tokio::test]
+    async fn no_index() {
+        let sf = StaticFiles {
+            dir: temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "").await;
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(res.into_inner().unwrap().to_string(), "dir w/o index file");
+    }
+    #[tokio::test]
+    async fn allowlist_blocks() {
+        let file_content = &b"test_allowlist"[..];
+        let _tf = create_temp_file("test_allowlist", file_content);
+
+        let sf = StaticFiles {
+            dir: temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: Some(vec![PathBuf::from("allow")]),
+        };
+        let req = Request::get("/mount/test_allowlist").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "test_allowlist").await;
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(res.into_inner().unwrap().to_string(), "bad file extension");
+    }
+    #[tokio::test]
+    async fn allowlist_allows() {
+        let file_content = &b"test_allowlist_allows"[..];
+        let _tf = create_temp_file("test_allowlist.allow", file_content);
+
+        let sf = StaticFiles {
+            dir: temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: Some(vec![PathBuf::from("allow")]),
+        };
+
+        let req = Request::get("/mount/test_allowlist.allow").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "test_allowlist.allow").await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = to_bytes(res.into_body()).await.unwrap();
+        assert_eq!(body, file_content);
+    }
+    
+    #[tokio::test]
+    async fn dir_redir() {
+        let d = temp_dir().join("test_dir_redir");
+        std::fs::create_dir(&d).unwrap();
+
+        let sf = StaticFiles {
+            dir: temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/test_dir_redir").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "test_dir_redir").await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), hyper::StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(res.headers().get(hyper::header::LOCATION).map(|h|h.as_bytes()), Some(&b"/mount/test_dir_redir/"[..]));
+
+        std::fs::remove_dir(&d).unwrap();
+    }
+    //TODO symlink
+    //TODO dir redirect
 }
