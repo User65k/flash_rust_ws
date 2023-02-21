@@ -520,4 +520,66 @@ mod tests {
             Some(&"/flup/status".into())
         );
     }
+
+    async fn handle_wwwroot(
+        req: Request<Body>,
+        mount: UseCase,
+        req_path: &str,
+    ) -> Result<Response<Body>, std::io::Error> {
+        let wwwr = crate::config::WwwRoot {
+            mount,
+            header: None,
+            auth: None,
+        };
+        let remote_addr = "127.0.0.1:8080".parse().unwrap();
+
+        crate::dispatch::handle_wwwroot(
+            req,
+            &wwwr,
+            crate::dispatch::WebPath::parsed(req_path),
+            Path::new("mount"),
+            remote_addr,
+        )
+        .await
+    }
+    #[tokio::test]
+    async fn resolve_file() {
+        let file_content = &b"test_fcgi_fallthroug"[..];
+        let path = std::env::temp_dir().join("test_fcgi_fallthroug");
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            std::io::Write::write_all(&mut file, file_content).unwrap();
+        }
+
+        let sf = StaticFiles {
+            dir: std::env::temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let mount = UseCase::FCGI(FcgiMnt {
+            fcgi: FCGIApp {
+                sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+                exec: Some(vec![PathBuf::from("php")]),
+                set_script_filename: false,
+                set_request_uri: false,
+                timeout: 0,
+                params: None,
+                bin: None,
+                app: None,
+            },
+            static_files: Some(sf),
+        });
+
+        let req = Request::get("/mount/test_fcgi_fallthroug")
+            .body(Body::empty())
+            .unwrap();
+        let res = handle_wwwroot(req, mount, "test_fcgi_fallthroug").await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
+        assert_eq!(body, file_content);
+
+        std::fs::remove_file(&path).unwrap();
+    }
 }
