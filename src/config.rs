@@ -5,7 +5,7 @@ use crate::dispatch::fcgi::FcgiMnt;
 #[cfg(feature = "websocket")]
 use crate::dispatch::websocket::Websocket;
 #[cfg(test)]
-use crate::dispatch::UnitTestUseCase;
+use crate::dispatch::test::UnitTestUseCase;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 use crate::transport::tls::{ParsedTLSConfig, TLSBuilderTrait, TlsUserConfig};
 use anyhow::{Context, Result};
