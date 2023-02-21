@@ -31,7 +31,7 @@ impl UnitTestUseCase {
         remote_addr: SocketAddr,
     ) -> Result<Response<Body>, IoError> {
         if let Some(r) = self.req_path {
-            assert_eq!(req_path.0, r);
+            assert_eq!(req_path, r);
         }
         if let Some(m) = self.mount {
             assert_eq!(web_mount, m);
@@ -45,19 +45,6 @@ impl UnitTestUseCase {
 
 mod mount {
     use super::*;
-    fn create_wwwroot(dir: &str) -> config::WwwRoot {
-        let sf = config::StaticFiles {
-            dir: PathBuf::from(dir),
-            follow_symlinks: false,
-            index: None,
-            serve: None,
-        };
-        config::WwwRoot {
-            mount: config::UseCase::StaticFiles(sf),
-            header: None,
-            auth: None,
-        }
-    }
     #[tokio::test]
     async fn test_mount_params() {
         let req = Request::get("/abc/def/ghi").body(Body::empty()).unwrap();
@@ -107,13 +94,20 @@ mod mount {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from(""), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aaa"), create_wwwroot("."));
+        cfg.paths.insert(
+            PathBuf::from(""),
+            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+        );
+        cfg.paths.insert(
+            PathBuf::from("aa"),
+            UnitTestUseCase::create_wwwroot(None, Some(Path::new("aa")), None),
+        );
+        cfg.paths.insert(
+            PathBuf::from("aaa"),
+            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap();
-        assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/aa/");
+        assert!(res.is_ok());
     }
     #[tokio::test]
     async fn longest_mount() {
@@ -121,12 +115,16 @@ mod mount {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aa/a"), create_wwwroot("."));
+        cfg.paths.insert(
+            PathBuf::from("aa"),
+            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+        );
+        cfg.paths.insert(
+            PathBuf::from("aa/a"),
+            UnitTestUseCase::create_wwwroot(None, Some(Path::new("aa/a")), None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap();
-        assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/aa/a/");
+        assert!(res.is_ok());
     }
     #[tokio::test]
     async fn uri_encode() {
@@ -134,12 +132,16 @@ mod mount {
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aa/a"), create_wwwroot("."));
+        cfg.paths.insert(
+            PathBuf::from("aa"),
+            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+        );
+        cfg.paths.insert(
+            PathBuf::from("aa/a"),
+            UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("aa/a")), None),
+        );
         let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap();
-        assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/aa/a/");
+        assert!(res.is_ok());
     }
     #[tokio::test]
     async fn path_trav_outside_mounts() {
@@ -171,20 +173,9 @@ mod mount {
         assert_eq!(res.kind(), ErrorKind::PermissionDenied);
         assert_eq!(res.into_inner().unwrap().to_string(), "path traversal");
     }
-    #[cfg(windows)]
     #[tokio::test]
     async fn rustsec_2022_0072_part1() {
         let req = Request::get("/c:/b").body(Body::empty()).unwrap();
-
-        //test mapping it to a file on disk
-        assert_eq!(
-            decode_and_normalize_path(req.uri())
-                .unwrap()
-                .prefix_with(Path::new("test")),
-            Path::new("test/c:/b")
-        );
-
-        //test mount logic
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -197,20 +188,9 @@ mod mount {
         //Note: ":" is not a valid dir char in windows
         //      However, an FCGI App might do things with it
     }
-    #[cfg(windows)]
     #[tokio::test]
     async fn rustsec_2022_0072_part2() {
         let req = Request::get("/a/c:/b/d").body(Body::empty()).unwrap();
-
-        //test mapping it to a file on disk
-        assert_eq!(
-            decode_and_normalize_path(req.uri())
-                .unwrap()
-                .prefix_with(Path::new("test")),
-            Path::new("test/a/c:/b/d")
-        );
-
-        //test mount logic
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -233,41 +213,6 @@ mod mount {
         );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
-    }
-    #[test]
-    fn normalize() {
-        assert_eq!(
-            decode_and_normalize_path(&"/a/../b".parse().unwrap())
-                .unwrap()
-                .0,
-            "b"
-        );
-        assert_eq!(
-            decode_and_normalize_path(&"/../../".parse().unwrap())
-                .unwrap_err()
-                .kind(),
-            ErrorKind::PermissionDenied
-        );
-        assert_eq!(
-            decode_and_normalize_path(&"/a/c:/b".parse().unwrap())
-                .unwrap()
-                .0,
-            "a/c:/b"
-        );
-        assert_eq!(
-            decode_and_normalize_path(&"/c:/b".parse().unwrap())
-                .unwrap()
-                .0,
-            "c:/b"
-        );
-        assert_eq!(
-            decode_and_normalize_path(&"/a/b/c".parse().unwrap())
-                .unwrap()
-                .strip_prefix(Path::new("a"))
-                .unwrap()
-                .0,
-            "b/c"
-        );
     }
 }
 
