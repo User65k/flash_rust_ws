@@ -3,17 +3,17 @@ pub mod dav;
 #[cfg(feature = "fcgi")]
 pub mod fcgi;
 mod staticf;
-#[cfg(feature = "websocket")]
-pub mod websocket;
 #[cfg(test)]
 pub mod test;
+mod webpath;
+#[cfg(feature = "websocket")]
+pub mod websocket;
+pub use webpath::{decode_and_normalize_path, WebPath};
 
 use crate::config;
-use hyper::Uri;
 use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
-use hyper_staticfile::{ResolveResult, ResponseBuilder as FileResponseBuilder};
+use hyper_staticfile::ResolveResult;
 use log::{debug, error, info, trace};
-use std::borrow::{Borrow, Cow};
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
@@ -61,100 +61,6 @@ fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &Path) -> bool {
         return false;
     }
     true // no list == all is ok
-}
-
-fn decode_and_normalize_path(uri: &Uri) -> Result<WebPath<'_>, IoError> {
-    let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
-
-    let mut parts = Vec::new();
-    let mut len = 0;
-    for p in path.split('/') {
-        match p {
-            "." | "" => {}
-            ".." => {
-                if parts.pop().is_none() {
-                    return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
-                }
-            }
-            comp => {
-                parts.push(comp);
-                len += 1 + comp.len();
-            }
-        }
-    }
-    if len == path.len() {
-        Ok(WebPath(path))
-    } else {
-        let mut r = String::with_capacity(len);
-        for p in parts {
-            r.push_str(p);
-            r.push('/');
-        }
-        r.pop();
-        Ok(WebPath(Cow::from(r)))
-    }
-}
-
-#[repr(transparent)]
-#[derive(Debug)]
-pub struct WebPath<'a>(Cow<'a, str>);
-impl<'a> WebPath<'a> {
-    /// turn it into a path by appending. Never replace the existing root!
-    /// rustsec_2022_0072
-    pub fn prefix_with(&self, pre: &Path) -> PathBuf {
-        let r: &std::ffi::OsStr = pre.as_ref();
-        let mut r = r.to_os_string();
-        if let Some(false) = r.to_str().map(|s| s.ends_with(std::path::MAIN_SEPARATOR)) {
-            r.push::<String>(std::path::MAIN_SEPARATOR.into());
-        }
-        //does never start with a separator
-        r.push(self.0.as_ref());
-        PathBuf::from(r)
-    }
-    pub fn strip_prefix(&'a self, base: &'_ Path) -> Result<WebPath<'a>, ()> {
-        let mut strip = base.components();
-        let mut path = self.0.split('/');
-        let mut offset = 0;
-        loop {
-            match (strip.next(), path.next()) {
-                (None, None) => {
-                    offset -= 1;
-                    break;
-                } //no next dir -> no final separator
-                (Some(c), p @ Some(s)) if c.as_os_str().to_str() == p => offset += 1 + s.len(),
-                (None, Some(_)) => break,
-                _ => return Err(()),
-            }
-        }
-        Ok(WebPath(Cow::from(&self.0[offset..])))
-    }
-    pub fn prefixed_as_abs_url_path(&self, pre: &Path, extra_cap: usize) -> String {
-        //https://docs.rs/hyper-staticfile/latest/src/hyper_staticfile/response_builder.rs.html#75-123
-        if let Some(pre) = pre.to_str() {
-            let s = self.0.as_ref();
-            let capa = pre.len() + s.len() + extra_cap + 2;
-            let mut r = String::with_capacity(capa);
-            if !pre.is_empty() && !pre.starts_with('/') {
-                r.push('/');
-            }
-            r.push_str(pre);
-            if !pre.ends_with('/') {
-                r.push('/');
-            }
-            r.push_str(s);
-            return r;
-        }
-        String::new()
-    }
-    pub fn clone<'b>(&self) -> WebPath<'b> {
-        // not as trait as we change lifetime
-        let s: &str = self.0.borrow();
-        WebPath(Cow::Owned(s.to_owned()))
-    }
-    #[cfg(test)]
-    pub fn parsed(v: &'a str) -> WebPath<'a> {
-        WebPath(Cow::from(v))
-    }
 }
 
 /// handle a request by
@@ -216,10 +122,19 @@ async fn handle_wwwroot(
 
     if let ResolveResult::IsDirectory = resolved_file {
         //request for a file that is a directory
-        return Ok(FileResponseBuilder::new()
-            .request(&req)
-            .build(ResolveResult::IsDirectory)
-            .expect("unable to build response"));
+        let mut target_url = req_path
+            .prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(0, |q| q.len() + 2));
+        target_url.push('/');
+        if let Some(q) = req.uri().query() {
+            target_url.push('?');
+            target_url.push_str(q);
+        }
+
+        return Ok(Response::builder()
+            .status(StatusCode::MOVED_PERMANENTLY)
+            .header(header::LOCATION, target_url)
+            .body(Body::empty())
+            .expect("unable to build redirect"));
     }
 
     #[cfg(feature = "fcgi")]

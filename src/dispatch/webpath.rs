@@ -1,0 +1,211 @@
+use hyper::Uri;
+use std::borrow::{Borrow, Cow};
+use std::io::{Error as IoError, ErrorKind};
+use std::path::{Path, PathBuf};
+
+pub fn decode_and_normalize_path(uri: &Uri) -> Result<WebPath<'_>, IoError> {
+    let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
+    let mut parts = Vec::new();
+    let mut len = 0;
+    let mut offset = 0;
+    let mut skip = 0;
+    for p in path.split('/') {
+        match p {
+            "" => {
+                skip += 1;
+            }
+            "." => {
+                skip += 2;
+            }
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
+                }
+                skip += 3;
+                if parts.is_empty() {
+                    offset = skip + len;
+                }
+            }
+            comp => {
+                parts.push(comp);
+                len += 1 + comp.len();
+            }
+        }
+    }
+    len = len.saturating_sub(1); //leading sep
+
+    if len == path.len() {
+        Ok(WebPath(path))
+    } else {
+        if offset != 0 {
+            if let Cow::Borrowed(p) = path {
+                return Ok(WebPath(Cow::from(&p[offset..])));
+            }
+        }
+        let mut r = String::with_capacity(len);
+        for p in parts {
+            r.push_str(p);
+            r.push('/');
+        }
+        r.pop();
+        Ok(WebPath(Cow::from(r)))
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct WebPath<'a>(Cow<'a, str>);
+impl<'a> WebPath<'a> {
+    /// turn it into a path by appending. Never replace the existing root!
+    /// rustsec_2022_0072
+    pub fn prefix_with(&self, pre: &Path) -> PathBuf {
+        let r: &std::ffi::OsStr = pre.as_ref();
+        let mut r = r.to_os_string();
+        if let Some(false) = r.to_str().map(|s| s.ends_with(std::path::MAIN_SEPARATOR)) {
+            r.push::<String>(std::path::MAIN_SEPARATOR.into());
+        }
+        //does never start with a separator
+        r.push(self.0.as_ref());
+        PathBuf::from(r)
+    }
+    pub fn strip_prefix(&'a self, base: &'_ Path) -> Result<WebPath<'a>, ()> {
+        let mut strip = base.components();
+        let mut path = self.0.split('/');
+        let mut offset = 0;
+        loop {
+            match (strip.next(), path.next()) {
+                (None, None) => {
+                    offset -= 1;
+                    break;
+                } //no next dir -> no final separator
+                (Some(c), p @ Some(s)) if c.as_os_str().to_str() == p => offset += 1 + s.len(),
+                (None, Some(_)) => break,
+                _ => return Err(()),
+            }
+        }
+        Ok(WebPath(Cow::from(&self.0[offset..])))
+    }
+    pub fn prefixed_as_abs_url_path(&self, pre: &Path, extra_cap: usize) -> String {
+        //https://docs.rs/hyper-staticfile/latest/src/hyper_staticfile/response_builder.rs.html#75-123
+        if let Some(pre) = pre.to_str() {
+            let s = self.0.as_ref();
+            let capa = pre.len() + s.len() + extra_cap + 2;
+            let mut r = String::with_capacity(capa);
+            if !pre.is_empty() && !pre.starts_with('/') {
+                r.push('/');
+            }
+            r.push_str(pre);
+            if !pre.ends_with('/') {
+                r.push('/');
+            }
+            r.push_str(s);
+            return r;
+        }
+        String::new()
+    }
+    pub fn clone<'b>(&self) -> WebPath<'b> {
+        // not as trait as we change lifetime
+        let s: &str = self.0.borrow();
+        WebPath(Cow::Owned(s.to_owned()))
+    }
+    #[cfg(test)]
+    pub fn parsed(v: &'a str) -> WebPath<'a> {
+        WebPath(Cow::from(v))
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<&str> for WebPath<'_> {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn normalize() {
+        assert_eq!(
+            decode_and_normalize_path(&"/a/../b".parse().unwrap())
+                .unwrap()
+                .0,
+            "b"
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/../../".parse().unwrap())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/a/c:/b".parse().unwrap())
+                .unwrap()
+                .0,
+            "a/c:/b"
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/c:/b".parse().unwrap())
+                .unwrap()
+                .0,
+            "c:/b"
+        );
+        assert_eq!(
+            decode_and_normalize_path(&"/a/b/c".parse().unwrap())
+                .unwrap()
+                .strip_prefix(Path::new("a"))
+                .unwrap()
+                .0,
+            "b/c"
+        );
+    }
+    #[test]
+    fn rustsec_2022_0072() {
+        assert_eq!(
+            decode_and_normalize_path(&"/c:/b".parse().unwrap())
+                .unwrap()
+                .prefix_with(Path::new("test")),
+            Path::new("test/c:/b")
+        );
+
+        assert_eq!(
+            decode_and_normalize_path(&"/a/c:/b/d".parse().unwrap())
+                .unwrap()
+                .prefix_with(Path::new("test")),
+            Path::new("test/a/c:/b/d")
+        );
+    }
+    #[test]
+    fn cow() {
+        assert!(matches!(
+            decode_and_normalize_path(&"/a/b".parse().unwrap())
+                .unwrap()
+                .0,
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            decode_and_normalize_path(&"/c:/d".parse().unwrap())
+                .unwrap()
+                .0,
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            decode_and_normalize_path(&"/e//f".parse().unwrap())
+                .unwrap()
+                .0,
+            Cow::Owned(_)
+        ));
+        assert!(matches!(
+            decode_and_normalize_path(&"/g/h/../i".parse().unwrap())
+                .unwrap()
+                .0,
+            Cow::Owned(_)
+        ));
+        assert!(matches!(
+            decode_and_normalize_path(&"//./j/../k".parse().unwrap())
+                .unwrap()
+                .0,
+            Cow::Borrowed("k")
+        ));
+    }
+}
