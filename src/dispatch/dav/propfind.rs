@@ -86,13 +86,16 @@ pub async fn handle_propfind(
         .write(XmlWEvent::start_element("D:multistatus").ns("D", "DAV:"))
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
 
+
+    let mut abs_web_mount = PathBuf::from("/");
+    abs_web_mount.push(web_mount);
     //if depth==0 && meta.is_dir(){
-    //    log::info!("ls {} {:?} {:?} {:?}", depth, path, &root, web_mount);
-    handle_propfind_path(&mut xmlwriter, path, &root, web_mount, &meta, &props)
+    //    log::info!("ls {} {:?} {:?} {:?}", depth, path, &root, abs_web_mount);
+    handle_propfind_path(&mut xmlwriter, path, &root, &abs_web_mount, &meta, &props)
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
     //}
     if meta.is_dir() {
-        handle_propfind_path_recursive(path, &root, web_mount, depth, &mut xmlwriter, &props)
+        handle_propfind_path_recursive(path, &root, &abs_web_mount, depth, &mut xmlwriter, &props)
             .await
             .map_err(|se| IoError::new(ErrorKind::Other, se))?;
     }

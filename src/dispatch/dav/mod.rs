@@ -1,7 +1,6 @@
-use super::staticf::{resolve_path, return_file};
+use super::staticf::{resolve_path, return_file, ResolveResult, self};
 use bytes::{BufMut, Bytes, BytesMut};
 use hyper::{body::HttpBody, header, Body, Request, Response, StatusCode};
-use hyper_staticfile::ResolveResult;
 use serde::Deserialize;
 use std::{
     convert::TryFrom,
@@ -30,13 +29,11 @@ pub async fn do_dav(
 ) -> Result<Response<Body>, IoError> {
     let abs_doc_root = config.dav.canonicalize()?;
     let full_path = req_path.prefix_with(&abs_doc_root);
-    let mut abs_web_mount = PathBuf::from("/");
-    abs_web_mount.push(web_mount);
     match req.method().as_ref() {
         //strip root
         //prepent mount
         "PROPFIND" => {
-            propfind::handle_propfind(req, &full_path, abs_doc_root, &abs_web_mount).await
+            propfind::handle_propfind(req, &full_path, abs_doc_root, web_mount).await
         }
         "OPTIONS" => {
             let rb = Response::builder()
@@ -48,17 +45,17 @@ pub async fn do_dav(
                 .header("DAV", "1");
             Ok(rb.body(Body::empty()).unwrap())
         }
-        "GET" => handle_get(req, &full_path).await,
+        "GET" => handle_get(req, &full_path, req_path, web_mount).await,
         "PROPPATCH" => Err(IoError::new(
             ErrorKind::PermissionDenied,
             "properties are read only",
         )),
         "PUT" if !config.read_only => handle_put(req, &full_path, config.dont_overwrite).await,
         "COPY" if !config.read_only && !config.dont_overwrite => {
-            handle_copy(req, &full_path, &abs_doc_root, &abs_web_mount).await
+            handle_copy(req, &full_path, &abs_doc_root, web_mount).await
         }
         "MOVE" if !config.read_only && !config.dont_overwrite => {
-            handle_move(req, &full_path, &abs_doc_root, &abs_web_mount).await
+            handle_move(req, &full_path, &abs_doc_root, web_mount).await
         }
         "DELETE" if !config.read_only && !config.dont_overwrite => {
             handle_delete(req, &full_path).await
@@ -73,7 +70,7 @@ pub async fn do_dav(
             .expect("unable to build response")),
     }
 }
-async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
+async fn list_dir(full_path: &Path, url_path: String) -> Result<Response<Body>, IoError> {
     let mut dir = tokio::fs::read_dir(full_path).await?;
     let mut buf = BytesMut::new().writer();
     buf.write_all(b"<html><body>")?;
@@ -92,7 +89,7 @@ async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>
             buf.write_all(
                 format!(
                     "<a href=\"{0}{1}/\">{1}/</a><br/>",
-                    req.uri().path(),
+                    url_path,
                     f.file_name().to_string_lossy()
                 )
                 .as_bytes(),
@@ -101,7 +98,7 @@ async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>
             buf.write_all(
                 format!(
                     "<a href=\"{0}{1}\">{1}</a> {2}<br/>",
-                    req.uri().path(),
+                    url_path,
                     f.file_name().to_string_lossy(),
                     meta.len()
                 )
@@ -116,17 +113,26 @@ async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>
         .expect("unable to build response");
     Ok(res)
 }
-async fn handle_get(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
+async fn handle_get(req: Request<Body>,
+    full_path: &Path,
+    req_path: &super::WebPath<'_>,
+    web_mount: &Path,) -> Result<Response<Body>, IoError> {
     let follow_symlinks = false;
     //we could serve dir listings as well. with a litte webdav client :-D
     let (_, file_lookup) = resolve_path(full_path, false, &None, follow_symlinks).await?;
-    if let ResolveResult::IsDirectory = file_lookup {
-        let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
-        if is_dir_request {
-            return list_dir(req, full_path).await;
-        } //else -> redirect to "path/"
+    
+    match file_lookup {
+        ResolveResult::IsDirectory => {
+            let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
+            if is_dir_request {
+                list_dir(full_path, req_path.prefixed_as_abs_url_path(web_mount, 0)).await
+            }else{
+                Ok(staticf::redirect(&req, req_path, web_mount))
+            }
+        }
+        ResolveResult::Found(file, metadata, mime) => return_file(&req, file, metadata, mime).await,
     }
-    return_file(&req, file_lookup).await
+    
 }
 async fn handle_delete(_: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
     let res = Response::new(Body::empty());
@@ -346,8 +352,8 @@ mod tests {
     dav = "."
         "#,
         ) {
-            assert_eq!(w.read_only, false);
-            assert_eq!(w.dont_overwrite, false);
+            assert!(!w.read_only);
+            assert!(!w.dont_overwrite);
         } else {
             panic!("not a webdav");
         }
