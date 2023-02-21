@@ -297,12 +297,36 @@ impl From<&FCGISock> for FCGIAddr {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum FCGISock {
     TCP(SocketAddr),
     #[cfg(unix)]
     Unix(PathBuf),
+}
+impl<'de> Deserialize<'de> for FCGISock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = FCGISock;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a String")
+                }
+                fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    #[cfg(unix)]
+                    if v.starts_with('/') || v.starts_with("./") {
+                        return Ok(FCGISock::Unix(PathBuf::from(v)));
+                    }
+                    Ok(FCGISock::TCP(v.parse().map_err(E::custom)?))
+                }
+
+            }
+            deserializer.deserialize_str(Visitor)
+    }
 }
 
 /// Information to execute a FCGI App
@@ -378,6 +402,46 @@ mod tests {
         dispatch::WebPath,
     };
     #[test]
+    fn parse_addr() {
+        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+            r#"
+                fcgi.sock = "127.0.0.1:9000"
+        "#,
+        ) {
+            assert!(matches!(f.fcgi.sock,
+                FCGISock::TCP(_)
+            ));
+        }
+        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+            r#"
+                fcgi.sock = "localhost:9000"
+        "#,
+        ) {
+            assert!(matches!(f.fcgi.sock,
+                FCGISock::TCP(_)
+            ));
+        }
+        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+            r#"
+                fcgi.sock = "[::1]:9000"
+        "#,
+        ) {
+            assert!(matches!(f.fcgi.sock,
+                FCGISock::TCP(_)
+            ));
+        }
+        #[cfg(unix)]
+        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+            r#"
+                fcgi.sock = "/path"
+        "#,
+        ) {
+            assert!(matches!(f.fcgi.sock,
+                FCGISock::Unix(_)
+            ));
+        }
+    }
+    #[test]
     fn basic_config() {
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
             r#"
@@ -385,8 +449,8 @@ mod tests {
     dir = "."
         "#,
         ) {
-            assert_eq!(f.fcgi.set_script_filename, false);
-            assert_eq!(f.fcgi.set_request_uri, false);
+            assert!(!f.fcgi.set_script_filename);
+            assert!(!f.fcgi.set_request_uri);
             assert_eq!(f.fcgi.timeout, 20);
             assert!(f.static_files.is_some());
         } else {
