@@ -1,4 +1,4 @@
-use super::staticf::{resolve_path, return_file, ResolveResult, self};
+use super::staticf::{self, resolve_path, return_file, ResolveResult};
 use bytes::{BufMut, Bytes, BytesMut};
 use hyper::{body::HttpBody, header, Body, Request, Response, StatusCode};
 use serde::Deserialize;
@@ -17,6 +17,8 @@ use tokio::{
 };
 mod propfind;
 use super::decode_and_normalize_path;
+#[cfg(test)]
+mod tests;
 
 /// req_path is relative from config.root
 /// web_mount is config.root from the client perspective
@@ -32,9 +34,7 @@ pub async fn do_dav(
     match req.method().as_ref() {
         //strip root
         //prepent mount
-        "PROPFIND" => {
-            propfind::handle_propfind(req, &full_path, abs_doc_root, web_mount).await
-        }
+        "PROPFIND" => propfind::handle_propfind(req, &full_path, abs_doc_root, web_mount).await,
         "OPTIONS" => {
             let rb = Response::builder()
                 .status(StatusCode::OK)
@@ -113,26 +113,27 @@ async fn list_dir(full_path: &Path, url_path: String) -> Result<Response<Body>, 
         .expect("unable to build response");
     Ok(res)
 }
-async fn handle_get(req: Request<Body>,
+async fn handle_get(
+    req: Request<Body>,
     full_path: &Path,
     req_path: &super::WebPath<'_>,
-    web_mount: &Path,) -> Result<Response<Body>, IoError> {
+    web_mount: &Path,
+) -> Result<Response<Body>, IoError> {
     let follow_symlinks = false;
     //we could serve dir listings as well. with a litte webdav client :-D
     let (_, file_lookup) = resolve_path(full_path, false, &None, follow_symlinks).await?;
-    
+
     match file_lookup {
         ResolveResult::IsDirectory => {
             let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
             if is_dir_request {
                 list_dir(full_path, req_path.prefixed_as_abs_url_path(web_mount, 0)).await
-            }else{
+            } else {
                 Ok(staticf::redirect(&req, req_path, web_mount))
             }
         }
         ResolveResult::Found(file, metadata, mime) => return_file(&req, file, metadata, mime).await,
     }
-    
 }
 async fn handle_delete(_: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
     let res = Response::new(Body::empty());
@@ -339,35 +340,5 @@ impl Config {
             return Err(format!("{:?} ist not a directory", self.dav));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::config::{group_config, UseCase};
-    #[test]
-    fn basic_config() {
-        if let Ok(UseCase::Webdav(w)) = toml::from_str(
-            r#"
-    dav = "."
-        "#,
-        ) {
-            assert!(!w.read_only);
-            assert!(!w.dont_overwrite);
-        } else {
-            panic!("not a webdav");
-        }
-    }
-    #[tokio::test]
-    async fn dir_nonexistent() {
-        let mut cfg: crate::config::Configuration = toml::from_str(
-            r#"
-    [host]
-    ip = "0.0.0.0:1337"
-    dav = "blablahui"
-    "#,
-        )
-        .expect("parse err");
-        assert!(group_config(&mut cfg).await.is_err());
     }
 }

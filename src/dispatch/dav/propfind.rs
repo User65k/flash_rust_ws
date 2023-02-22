@@ -86,7 +86,6 @@ pub async fn handle_propfind(
         .write(XmlWEvent::start_element("D:multistatus").ns("D", "DAV:"))
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
 
-
     let mut abs_web_mount = PathBuf::from("/");
     abs_web_mount.push(web_mount);
     //if depth==0 && meta.is_dir(){
