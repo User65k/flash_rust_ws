@@ -239,11 +239,9 @@ pub async fn check_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::test::TempFile;
     use crate::logging::init_stderr_logging;
-    use std::fs::{File, remove_file};
-    use std::io::Write;
     use std::path::PathBuf;
-    use std::env::temp_dir;
 
     fn create_req(header: Option<&str>) -> Request<Body> {
         match header {
@@ -252,25 +250,6 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
             None => Request::new(Body::empty()),
-        }
-    }
-    fn create_temp_file(file_name: &str, content: &[u8]) -> TempFile {
-        let mut path = temp_dir();
-        path.push(file_name);
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(content)
-            .expect("could not write htdigest file");
-        TempFile(path)
-    }
-    struct TempFile(PathBuf);
-    impl TempFile {
-        fn get_path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = remove_file(&self.0);
         }
     }
 
@@ -285,7 +264,10 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_success() {
-        let f = create_temp_file(r"auth_suc", b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a");
+        let f = TempFile::create(
+            r"auth_suc",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
         let e = check_digest(f.get_path(), &h, &String::from("a realm"))
@@ -295,7 +277,10 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_success_multi() {
-        let f = create_temp_file(r"auth_suc0", b"egal:1:1\r\ndani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a\r\n");
+        let f = TempFile::create(
+            r"auth_suc0",
+            b"egal:1:1\r\ndani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a\r\n",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
         let e = check_digest(f.get_path(), &h, &String::from("a realm"))
@@ -305,7 +290,10 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_success_sess() {
-        let f = create_temp_file(r"auth_suc2", b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a");
+        let f = TempFile::create(
+            r"auth_suc2",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/favicon.ico\", algorithm=MD5-sess, response=\"f02dcc493b488cc25d503c15765a3005\", qop=auth, nc=00000002, cnonce=\"30d60c5e1664d9cb\""));
         let e = check_digest(f.get_path(), &h, &String::from("a realm"))
@@ -315,7 +303,10 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_success_qop_auth() {
-        let f = create_temp_file(r"auth_suc3", b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a");
+        let f = TempFile::create(
+            r"auth_suc3",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/\", response=\"d2f5ad3b664dd98d2dcb700d8027afec\", qop=auth, nc=00000001, cnonce=\"ceee320d38ca229e\""));
         let e = check_digest(f.get_path(), &h, &String::from("a realm"))
@@ -326,7 +317,10 @@ mod tests {
     #[tokio::test]
     async fn auth_wrong_pw() {
         init_stderr_logging();
-        let f = create_temp_file(r"auth_fail", b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a");
+        let f = TempFile::create(
+            r"auth_fail",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"7a1415c70ae45a88a2a83f896b30bfc3\""));
         let e = check_digest(f.get_path(), &h, &String::from("a realm"))
@@ -337,7 +331,10 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_wrong_user() {
-        let f = create_temp_file(r"auth_nouser", b"daniel:a realm:109c7da4a649a1da4a35843583146140");
+        let f = TempFile::create(
+            r"auth_nouser",
+            b"daniel:a realm:109c7da4a649a1da4a35843583146140",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
         let e = check_digest(f.get_path(), &h, &String::from("a realm"))
@@ -348,7 +345,10 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_wrong_realm() {
-        let f = create_temp_file(r"auth_realm", b"dani:another realm:1a30634ead89d6934aa82b933863acf3");
+        let f = TempFile::create(
+            r"auth_realm",
+            b"dani:another realm:1a30634ead89d6934aa82b933863acf3",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
         let e = check_digest(f.get_path(), &h, &String::from("a realm"))

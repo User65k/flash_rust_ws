@@ -52,7 +52,6 @@ pub async fn return_file(
         .cache_headers(Some(500))
         .build(file, metadata, mime.to_string())
         .expect("unable to build response"))
-
 }
 
 pub fn redirect(
@@ -61,8 +60,8 @@ pub fn redirect(
     web_mount: &Path,
 ) -> Response<Body> {
     //request for a file that is a directory
-    let mut target_url = req_path
-        .prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(0, |q| q.len() + 2));
+    let mut target_url =
+        req_path.prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(0, |q| q.len() + 2));
     target_url.push('/');
     if let Some(q) = req.uri().query() {
         target_url.push('?');
@@ -163,7 +162,10 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use crate::config::{StaticFiles, UseCase, WwwRoot};
+    use crate::{
+        config::{StaticFiles, UseCase, WwwRoot},
+        dispatch::test::{TempDir, TempFile},
+    };
     use hyper::body::to_bytes;
     use hyper::{Body, Request, Response};
     //use crate::dispatch::test::
@@ -178,31 +180,6 @@ mod tests {
             assert!(!s.follow_symlinks);
         } else {
             panic!("not a StaticFiles");
-        }
-    }
-
-    fn create_temp_file(file_name: &str, content: &[u8]) -> TempFile {
-        let mut path = temp_dir();
-        path.push(file_name);
-        let mut file = std::fs::File::create(&path).expect("could not create htdigest file");
-        std::io::Write::write_all(&mut file, content).expect("could not write htdigest file");
-        TempFile(path)
-    }
-    struct TempFile(PathBuf);
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    struct TempDir(PathBuf);
-    fn create_tmp_dir(name: &str) -> TempDir {
-        let d = temp_dir().join(name);
-        std::fs::create_dir(&d).expect("could not create dir");
-        TempDir(d)
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir(&self.0);
         }
     }
 
@@ -231,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_file() {
         let file_content = &b"test_resolve_file"[..];
-        let _tf = create_temp_file("test_resolve_file", file_content);
+        let _tf = TempFile::create("test_resolve_file", file_content);
 
         let sf = StaticFiles {
             dir: temp_dir(),
@@ -251,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn index_file() {
         let file_content = &b"test_index_file"[..];
-        let _tf = create_temp_file("test_index_file", file_content);
+        let _tf = TempFile::create("test_index_file", file_content);
 
         let sf = StaticFiles {
             dir: temp_dir(),
@@ -283,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn allowlist_blocks() {
         let file_content = &b"test_allowlist"[..];
-        let _tf = create_temp_file("test_allowlist", file_content);
+        let _tf = TempFile::create("test_allowlist", file_content);
 
         let sf = StaticFiles {
             dir: temp_dir(),
@@ -302,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn allowlist_allows() {
         let file_content = &b"test_allowlist_allows"[..];
-        let _tf = create_temp_file("test_allowlist.allow", file_content);
+        let _tf = TempFile::create("test_allowlist.allow", file_content);
 
         let sf = StaticFiles {
             dir: temp_dir(),
@@ -323,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn dir_redir() {
-        let _d = create_tmp_dir("test_dir_redir");
+        let _d = TempDir::create("test_dir_redir");
 
         let sf = StaticFiles {
             dir: temp_dir(),
@@ -346,7 +323,7 @@ mod tests {
     }
     #[tokio::test]
     async fn redirects_to_sanitized_path() {
-        let _d = create_tmp_dir("redirects_to_sanitized_path");
+        let _d = TempDir::create("redirects_to_sanitized_path");
 
         let sf = StaticFiles {
             dir: temp_dir(),

@@ -270,3 +270,35 @@ mod vhost {
         assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
     }
 }
+
+pub struct TempFile(PathBuf);
+impl TempFile {
+    pub fn create(file_name: &str, content: &[u8]) -> TempFile {
+        let mut path = std::env::temp_dir();
+        path.push(file_name);
+        let mut file = std::fs::File::create(&path).expect("could not create htdigest file");
+        std::io::Write::write_all(&mut file, content).expect("could not write htdigest file");
+        TempFile(path)
+    }
+    pub fn get_path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+pub struct TempDir(PathBuf);
+impl TempDir {
+    pub fn create(name: &str) -> TempDir {
+        let d = std::env::temp_dir().join(name);
+        std::fs::create_dir(&d).expect("could not create dir");
+        TempDir(d)
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}

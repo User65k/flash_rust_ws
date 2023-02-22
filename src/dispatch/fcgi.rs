@@ -306,26 +306,26 @@ pub enum FCGISock {
 impl<'de> Deserialize<'de> for FCGISock {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de> {
-            struct Visitor;
-            impl<'de> serde::de::Visitor<'de> for Visitor {
-                type Value = FCGISock;
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("a String")
-                }
-                fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-                where
-                    E: serde::de::Error,
-                {
-                    #[cfg(unix)]
-                    if v.starts_with('/') || v.starts_with("./") {
-                        return Ok(FCGISock::Unix(PathBuf::from(v)));
-                    }
-                    Ok(FCGISock::TCP(v.parse().map_err(E::custom)?))
-                }
-
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = FCGISock;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a String")
             }
-            deserializer.deserialize_str(Visitor)
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                #[cfg(unix)]
+                if v.starts_with('/') || v.starts_with("./") {
+                    return Ok(FCGISock::Unix(PathBuf::from(v)));
+                }
+                Ok(FCGISock::TCP(v.parse().map_err(E::custom)?))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
     }
 }
 
@@ -408,27 +408,21 @@ mod tests {
                 fcgi.sock = "127.0.0.1:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock,
-                FCGISock::TCP(_)
-            ));
+            assert!(matches!(f.fcgi.sock, FCGISock::TCP(_)));
         }
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
             r#"
                 fcgi.sock = "localhost:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock,
-                FCGISock::TCP(_)
-            ));
+            assert!(matches!(f.fcgi.sock, FCGISock::TCP(_)));
         }
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
             r#"
                 fcgi.sock = "[::1]:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock,
-                FCGISock::TCP(_)
-            ));
+            assert!(matches!(f.fcgi.sock, FCGISock::TCP(_)));
         }
         #[cfg(unix)]
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
@@ -436,9 +430,7 @@ mod tests {
                 fcgi.sock = "/path"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock,
-                FCGISock::Unix(_)
-            ));
+            assert!(matches!(f.fcgi.sock, FCGISock::Unix(_)));
         }
     }
     #[test]
@@ -609,11 +601,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_file() {
         let file_content = &b"test_fcgi_fallthroug"[..];
-        let path = std::env::temp_dir().join("test_fcgi_fallthroug");
-        {
-            let mut file = std::fs::File::create(&path).unwrap();
-            std::io::Write::write_all(&mut file, file_content).unwrap();
-        }
+        let _tf = crate::dispatch::test::TempFile::create("test_fcgi_fallthroug", file_content);
 
         let sf = StaticFiles {
             dir: std::env::temp_dir(),
@@ -643,7 +631,5 @@ mod tests {
         assert_eq!(res.status(), 200);
         let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
         assert_eq!(body, file_content);
-
-        std::fs::remove_file(&path).unwrap();
     }
 }
