@@ -117,6 +117,9 @@ impl<'a> WebPath<'a> {
         r.push_str(s);
         r
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
     pub fn clone<'b>(&self) -> WebPath<'b> {
         // not as trait as we change lifetime
         let s: &str = self.0.borrow();

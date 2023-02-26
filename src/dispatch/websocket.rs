@@ -1,14 +1,12 @@
 use bytes::BytesMut;
 use hyper::{header, upgrade::Upgraded, Body, HeaderMap, Request, Response, StatusCode};
 use log::error;
+use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
-use std::{
-    io::{Error as IoError, ErrorKind},
-    path::PathBuf,
-};
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
+use crate::config::Utf8PathBuf;
 use async_fcgi::stream::{FCGIAddr, Stream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -17,13 +15,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub async fn upgrade(
     req: Request<Body>,
     ws: &Websocket,
-    _req_path: &super::WebPath<'_>,
+    req_path: &super::WebPath<'_>,
     _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-    //TODO? check if path is deeper than it should -> 404
-
     //update the request
     let mut res = Response::new(Body::empty());
+    //TODO? check if path is deeper than it should -> 404
+    if !req_path.is_empty() {
+        *res.status_mut() = StatusCode::NOT_FOUND;
+        return Ok(res);
+    }
     match *req.method() {
         hyper::Method::GET => {}
         hyper::Method::OPTIONS => {
@@ -195,7 +196,7 @@ impl From<&WSSock> for FCGIAddr {
 pub enum WSSock {
     TCP(SocketAddr),
     #[cfg(unix)]
-    Unix(PathBuf),
+    Unix(Utf8PathBuf),
 }
 impl<'de> Deserialize<'de> for WSSock {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -214,7 +215,7 @@ impl<'de> Deserialize<'de> for WSSock {
             {
                 #[cfg(unix)]
                 if v.starts_with('/') || v.starts_with("./") {
-                    return Ok(WSSock::Unix(PathBuf::from(v)));
+                    return Ok(WSSock::Unix(Utf8PathBuf::from(v)));
                 }
                 Ok(WSSock::TCP(v.parse().map_err(E::custom)?))
             }
@@ -255,11 +256,8 @@ mod tests {
             assock = "127.0.0.1:1337"
         "#,
         ) {
-            if let Websocket::Unwraped(u) = w {
-                assert_eq!(u.forward_header, false);
-            } else {
-                panic!("not a Unwraped webdav");
-            }
+            let Websocket::Unwraped(u) = w;
+            assert_eq!(u.forward_header, false);
         } else {
             panic!("not a webdav");
         }
