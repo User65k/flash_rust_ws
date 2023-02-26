@@ -2,7 +2,7 @@
 name = "flash_rust_ws"
 version = "0.4.2"
 authors = ["User65k <15049544+User65k@users.noreply.github.com>"]
-edition = "2018"
+edition = "2021"
 license = "AGPL-3.0"
 description = "General purpose Webserver with TLS, File, FCGI, DAV and Websocket support"
 
