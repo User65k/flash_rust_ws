@@ -10,6 +10,8 @@ use tokio::fs::{File, OpenOptions};
 
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
+
+use crate::config::Utf8PathBuf;
 #[cfg(windows)]
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
 
@@ -57,7 +59,7 @@ pub async fn return_file(
 pub fn redirect(
     req: &Request<Body>,
     req_path: &super::WebPath<'_>,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
 ) -> Response<Body> {
     //request for a file that is a directory
     let mut target_url =
@@ -76,10 +78,7 @@ pub fn redirect(
 }
 
 /// Open a file and get metadata.
-async fn open_with_metadata(
-    path: impl AsRef<Path>,
-    follow_symlinks: bool,
-) -> Result<(File, Metadata), IoError> {
+pub async fn open_with_metadata(path: impl AsRef<Path>) -> Result<(File, Metadata), IoError> {
     let mut opts = StdOpenOptions::new();
     opts.read(true);
 
@@ -88,28 +87,16 @@ async fn open_with_metadata(
     opts.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
 
     let file = OpenOptions::from(opts).open(&path).await?;
-    let metadata = if follow_symlinks {
-        file.metadata().await?
-    } else {
-        let metadata = tokio::fs::symlink_metadata(path).await?;
-        if metadata.file_type().is_symlink() {
-            return Err(IoError::new(
-                IoErrorKind::PermissionDenied,
-                "Symlinks are not allowed",
-            ));
-        }
-        metadata
-    };
+    let metadata = file.metadata().await?;
     Ok((file, metadata))
 }
 
 pub async fn resolve_path(
     full_path: &Path,
     is_dir_request: bool,
-    index_files: &Option<Vec<PathBuf>>,
-    follow_symlinks: bool,
+    index_files: &Option<Vec<Utf8PathBuf>>,
 ) -> Result<(PathBuf, ResolveResult), IoError> {
-    let (file, metadata) = open_with_metadata(&full_path, follow_symlinks).await?;
+    let (file, metadata) = open_with_metadata(&full_path).await?;
     debug!("have {:?}", metadata);
 
     // The resolved `full_path` doesn't contain the trailing slash anymore, so we may
@@ -135,9 +122,7 @@ pub async fn resolve_path(
         for index_file in ifiles {
             let full_path_index = full_path.join(index_file);
             debug!("checking for {:?}", full_path_index);
-            if let Ok((file, metadata)) =
-                open_with_metadata(&full_path_index, follow_symlinks).await
-            {
+            if let Ok((file, metadata)) = open_with_metadata(&full_path_index).await {
                 // The directory index cannot itself be a directory.
                 if metadata.is_dir() {
                     return Err(IoError::new(IoErrorKind::NotFound, ""));
@@ -157,17 +142,13 @@ pub async fn resolve_path(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env::temp_dir,
-        path::{Path, PathBuf},
-    };
-
     use crate::{
-        config::{StaticFiles, UseCase, WwwRoot},
+        config::{AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf, WwwRoot},
         dispatch::test::{TempDir, TempFile},
     };
     use hyper::body::to_bytes;
     use hyper::{Body, Request, Response};
+    use std::path::Path;
     //use crate::dispatch::test::
 
     #[test]
@@ -199,7 +180,7 @@ mod tests {
             req,
             &wwwr,
             crate::dispatch::WebPath::parsed(req_path),
-            Path::new("mount"),
+            &Utf8PathBuf::from("mount"),
             remote_addr,
         )
         .await
@@ -211,7 +192,7 @@ mod tests {
         let _tf = TempFile::create("test_resolve_file", file_content);
 
         let sf = StaticFiles {
-            dir: temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
             index: None,
             serve: None,
@@ -231,9 +212,9 @@ mod tests {
         let _tf = TempFile::create("test_index_file", file_content);
 
         let sf = StaticFiles {
-            dir: temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
-            index: Some(vec![PathBuf::from("test_index_file")]),
+            index: Some(vec![Utf8PathBuf::from("test_index_file")]),
             serve: None,
         };
         let req = Request::get("/mount/").body(Body::empty()).unwrap();
@@ -246,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn no_index() {
         let sf = StaticFiles {
-            dir: temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
             index: None,
             serve: None,
@@ -263,10 +244,10 @@ mod tests {
         let _tf = TempFile::create("test_allowlist", file_content);
 
         let sf = StaticFiles {
-            dir: temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
             index: None,
-            serve: Some(vec![PathBuf::from("allow")]),
+            serve: Some(vec![Utf8PathBuf::from("allow")]),
         };
         let req = Request::get("/mount/test_allowlist")
             .body(Body::empty())
@@ -282,10 +263,10 @@ mod tests {
         let _tf = TempFile::create("test_allowlist.allow", file_content);
 
         let sf = StaticFiles {
-            dir: temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
             index: None,
-            serve: Some(vec![PathBuf::from("allow")]),
+            serve: Some(vec![Utf8PathBuf::from("allow")]),
         };
 
         let req = Request::get("/mount/test_allowlist.allow")
@@ -303,7 +284,7 @@ mod tests {
         let _d = TempDir::create("test_dir_redir");
 
         let sf = StaticFiles {
-            dir: temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
             index: None,
             serve: None,
@@ -326,7 +307,7 @@ mod tests {
         let _d = TempDir::create("redirects_to_sanitized_path");
 
         let sf = StaticFiles {
-            dir: temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
             index: None,
             serve: None,
@@ -344,6 +325,121 @@ mod tests {
         assert_eq!(res.kind(), std::io::ErrorKind::NotFound);
     }
 
-    //TODO symlink
-    //std::os::unix::fs::symlink
+    #[tokio::test]
+    async fn resolve_nested_file() {
+        let file_content = &b"nested_resolve_file"[..];
+        let _tf = TempDir::create("nested");
+        std::fs::write(
+            std::env::temp_dir().join("nested/resolve_file"),
+            file_content,
+        )
+        .unwrap();
+
+        let sf = StaticFiles {
+            dir: AbsPathBuf::temp_dir(),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/nested/resolve_file")
+            .body(Body::empty())
+            .unwrap();
+        let res = handle_wwwroot(req, sf, "nested/resolve_file").await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = to_bytes(res.into_body()).await.unwrap();
+        assert_eq!(body, file_content);
+    }
+
+    #[tokio::test]
+    async fn symlink_dir() {
+        /*
+            {temp}/lnk_target
+            {temp}/lnk_nested/ <- MOUNT
+            {temp}/lnk_nested/lnk -> ..
+
+        */
+        let file_content = &b"lnk_followed"[..];
+        let _td1 = TempDir::create("lnk_nested");
+        let _tf = TempFile::create("lnk_target", file_content);
+        let link = &std::env::temp_dir().join("lnk_nested/lnk");
+        let org = Path::new("..");
+        let mm = std::env::temp_dir().join("lnk_nested");
+        let mount = mm.as_os_str().to_str().unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(org, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(org, link).unwrap();
+
+        let sf = StaticFiles {
+            dir: AbsPathBuf::from(mount),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/lnk/lnk_target")
+            .body(Body::empty())
+            .unwrap();
+        let res = handle_wwwroot(req, sf, "lnk/lnk_target").await.unwrap_err();
+        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let sf = StaticFiles {
+            dir: AbsPathBuf::from(mount),
+            follow_symlinks: true,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/lnk/lnk_target")
+            .body(Body::empty())
+            .unwrap();
+        let res = handle_wwwroot(req, sf, "lnk/lnk_target").await.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = to_bytes(res.into_body()).await.unwrap();
+        assert_eq!(body, file_content);
+    }
+
+    #[tokio::test]
+    async fn symlink_file() {
+        /*
+            {temp}/lnk_target2
+            {temp}/lnk_nested2/ <- MOUNT
+            {temp}/lnk_nested2/lnk -> ../lnk_target2
+
+        */
+        let file_content = &b"lnk_followed"[..];
+        let _td1 = TempDir::create("lnk_nested2");
+        let _tf = TempFile::create("lnk_target2", file_content);
+        let link = &std::env::temp_dir().join("lnk_nested2/lnk");
+        let org = Path::new("../lnk_target2");
+        let mm = std::env::temp_dir().join("lnk_nested2");
+        let mount = mm.as_os_str().to_str().unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(org, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(org, link).unwrap();
+
+        let sf = StaticFiles {
+            dir: AbsPathBuf::from(mount),
+            follow_symlinks: false,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/lnk").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "lnk").await.unwrap_err();
+        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let sf = StaticFiles {
+            dir: AbsPathBuf::from(mount),
+            follow_symlinks: true,
+            index: None,
+            serve: None,
+        };
+        let req = Request::get("/mount/lnk").body(Body::empty()).unwrap();
+        let res = handle_wwwroot(req, sf, "lnk").await.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = to_bytes(res.into_body()).await.unwrap();
+        assert_eq!(body, file_content);
+    }
 }

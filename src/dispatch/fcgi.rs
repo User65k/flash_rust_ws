@@ -4,7 +4,6 @@ use log::{debug, error, info, trace};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 use std::{
     io::{Error as IoError, ErrorKind},
@@ -13,7 +12,10 @@ use std::{
 use tokio::task::yield_now;
 use tokio::time::timeout;
 
-use crate::{body::FCGIBody, config::StaticFiles};
+use crate::{
+    body::FCGIBody,
+    config::{StaticFiles, Utf8PathBuf},
+};
 
 pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
 pub use async_fcgi::FCGIAddr;
@@ -34,7 +36,7 @@ pub async fn fcgi_call(
     fcgi_cfg: &FCGIApp,
     req: Request<Body>,
     req_path: &super::WebPath<'_>,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
     fs_full_path: Option<&Path>,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
@@ -98,7 +100,7 @@ fn create_params(
     fcgi_cfg: &FCGIApp,
     req: &Request<Body>,
     req_path: &super::WebPath,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
     fs_full_path: Option<&Path>,
     remote_addr: SocketAddr,
 ) -> HashMap<Bytes, Bytes> {
@@ -121,7 +123,7 @@ fn create_params(
         params.insert(
             // must CGI/1.1  4.1.13, everybody cares
             Bytes::from(SCRIPT_NAME),
-            path_to_bytes(abs_name),
+            Bytes::from(abs_name),
         );
 
         // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
@@ -129,19 +131,25 @@ fn create_params(
     } else {
         //no local FS
         //the wohle mount is a single FCGI App...
-        let mut abs_web_mount = PathBuf::from("/");
-        abs_web_mount.push(web_mount);
+
+        //let mut abs_web_mount = PathBuf::from("/");
+        //abs_web_mount.push(web_mount);
+        let mut abs_web_mount = String::with_capacity(web_mount.as_str().len() + 1);
+        abs_web_mount.push('/');
+        abs_web_mount.push_str(web_mount.as_str());
+
         params.insert(
             // must CGI/1.1  4.1.13, everybody cares
             Bytes::from(SCRIPT_NAME),
-            path_to_bytes(abs_web_mount),
+            //path_to_bytes(abs_web_mount),
+            Bytes::from(abs_web_mount),
         );
         //... so everything inside it is PATH_INFO
-        let abs_path = req_path.prefixed_as_abs_url_path(Path::new(""), 0);
+        let abs_path = req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0);
         params.insert(
             // opt CGI/1.1   4.1.5
             Bytes::from(PATH_INFO),
-            path_to_bytes(abs_path),
+            Bytes::from(abs_path),
         );
         //this matches what lighttpd does without check_local
     }
@@ -196,7 +204,7 @@ fn create_params(
                 path_to_bytes(full_path)
             } else {
                 // I am guessing here
-                path_to_bytes(req_path.prefixed_as_abs_url_path(Path::new(""), 0))
+                Bytes::from(req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0))
             },
         );
     }
@@ -228,7 +236,7 @@ pub async fn setup_fcgi_connection(
     let sock: FCGIAddr = (&fcgi_cfg.sock).into();
 
     if let Some(bin) = fcgi_cfg.bin.as_ref() {
-        let mut cmd = FCGIAppPool::prep_server(&bin.path, &sock).await?;
+        let mut cmd = FCGIAppPool::prep_server(bin.path.as_os_str(), &sock).await?;
         cmd.env_clear();
         if let Some(dir) = bin.wdir.as_ref() {
             cmd.current_dir(dir);
@@ -301,7 +309,7 @@ impl From<&FCGISock> for FCGIAddr {
 pub enum FCGISock {
     TCP(SocketAddr),
     #[cfg(unix)]
-    Unix(PathBuf),
+    Unix(Utf8PathBuf),
 }
 impl<'de> Deserialize<'de> for FCGISock {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -320,7 +328,7 @@ impl<'de> Deserialize<'de> for FCGISock {
             {
                 #[cfg(unix)]
                 if v.starts_with('/') || v.starts_with("./") {
-                    return Ok(FCGISock::Unix(PathBuf::from(v)));
+                    return Ok(FCGISock::Unix(Utf8PathBuf::from(v)));
                 }
                 Ok(FCGISock::TCP(v.parse().map_err(E::custom)?))
             }
@@ -333,8 +341,8 @@ impl<'de> Deserialize<'de> for FCGISock {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FCGIAppExec {
-    pub path: PathBuf,
-    pub wdir: Option<PathBuf>,
+    pub path: Utf8PathBuf,
+    pub wdir: Option<Utf8PathBuf>,
     pub environment: Option<HashMap<String, String>>,
     pub copy_environment: Option<Vec<String>>,
 }
@@ -344,7 +352,7 @@ pub struct FCGIAppExec {
 #[serde(deny_unknown_fields)]
 pub struct FCGIApp {
     pub sock: FCGISock,
-    pub exec: Option<Vec<PathBuf>>,
+    pub exec: Option<Vec<Utf8PathBuf>>,
     #[serde(default)]
     pub set_script_filename: bool,
     #[serde(default)]
@@ -398,7 +406,7 @@ mod tests {
     use std::path::Path;
 
     use crate::{
-        config::{group_config, UseCase},
+        config::{group_config, AbsPathBuf, UseCase, Utf8PathBuf},
         dispatch::WebPath,
     };
     #[test]
@@ -496,7 +504,7 @@ mod tests {
             &fcgi_cfg,
             &req,
             &WebPath::parsed(""),
-            &Path::new("php"),
+            &Utf8PathBuf::from("php"),
             Some(&Path::new("/opt/php/index.php")),
             "1.2.3.4:1337".parse().unwrap(),
         );
@@ -549,7 +557,7 @@ mod tests {
             &fcgi_cfg,
             &req,
             &WebPath::parsed("status"),
-            &Path::new("flup"),
+            &Utf8PathBuf::from("flup"),
             None,
             "[::1]:1337".parse().unwrap(),
         );
@@ -593,7 +601,7 @@ mod tests {
             req,
             &wwwr,
             crate::dispatch::WebPath::parsed(req_path),
-            Path::new("mount"),
+            &Utf8PathBuf::from("mount"),
             remote_addr,
         )
         .await
@@ -604,7 +612,7 @@ mod tests {
         let _tf = crate::dispatch::test::TempFile::create("test_fcgi_fallthroug", file_content);
 
         let sf = StaticFiles {
-            dir: std::env::temp_dir(),
+            dir: AbsPathBuf::temp_dir(),
             follow_symlinks: false,
             index: None,
             serve: None,
@@ -612,7 +620,7 @@ mod tests {
         let mount = UseCase::FCGI(FcgiMnt {
             fcgi: FCGIApp {
                 sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
-                exec: Some(vec![PathBuf::from("php")]),
+                exec: Some(vec![Utf8PathBuf::from("php")]),
                 set_script_filename: false,
                 set_request_uri: false,
                 timeout: 0,
@@ -632,4 +640,27 @@ mod tests {
         let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
         assert_eq!(body, file_content);
     }
+    /*#[tokio::test]
+    async fn body_no_len() {
+        let mount = UseCase::FCGI(FcgiMnt {
+            fcgi: FCGIApp {
+                sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+                exec: None,
+                set_script_filename: false,
+                set_request_uri: false,
+                timeout: 0,
+                params: None,
+                bin: None,
+                app: None,
+            },
+            static_files: None,
+        });
+
+        let req = Request::post("/mount/whatever")
+            .body(Body::empty())
+            .unwrap();
+        let res = handle_wwwroot(req, mount, "whatever").await;
+        let res = res.unwrap();
+        assert_eq!(res.status(), 411);
+    }*/
 }

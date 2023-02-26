@@ -10,10 +10,10 @@ mod webpath;
 pub mod websocket;
 pub use webpath::{decode_and_normalize_path, WebPath};
 
-use crate::config;
+use crate::config::{self, Utf8PathBuf};
 use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
-use staticf::ResolveResult;
 use log::{debug, error, info, trace};
+use staticf::ResolveResult;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
@@ -49,7 +49,7 @@ pub fn insert_default_headers(
     }
     Ok(())
 }
-fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &Path) -> bool {
+fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
     if let Some(whitelist) = list {
         if let Some(ext) = path.extension() {
             for e in whitelist {
@@ -72,7 +72,7 @@ async fn handle_wwwroot(
     req: Request<Body>,
     wwwr: &config::WwwRoot,
     req_path: WebPath<'_>,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     debug!("working root {:?}", wwwr);
@@ -116,15 +116,25 @@ async fn handle_wwwroot(
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
     let full_path = req_path.prefix_with(&sf.dir);
     trace!("full_path {:?}", full_path.canonicalize());
+    if !sf.follow_symlinks {
+        //check if the canonicalized version is still inside of the (abs) root path
+        let fp = full_path.canonicalize()?;
+        if !fp.starts_with(&sf.dir) {
+            return Err(IoError::new(
+                ErrorKind::PermissionDenied,
+                "Symlinks are not allowed",
+            ));
+        }
+    }
 
     let (full_path, resolved_file) =
-        staticf::resolve_path(&full_path, is_dir_request, &sf.index, sf.follow_symlinks).await?;
+        staticf::resolve_path(&full_path, is_dir_request, &sf.index).await?;
 
     match resolved_file {
         ResolveResult::IsDirectory => {
-            //request for a file that is a directory        
+            //request for a file that is a directory
             Ok(staticf::redirect(&req, &req_path, web_mount))
-        },
+        }
         ResolveResult::Found(file, metadata, mime) => {
             #[cfg(feature = "fcgi")]
             if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
@@ -141,7 +151,7 @@ async fn handle_wwwroot(
                     .await;
                 }
             }
-        
+
             if ext_in_list(&sf.serve, &full_path) {
                 staticf::return_file(&req, file, metadata, mime).await
             } else {
@@ -150,7 +160,7 @@ async fn handle_wwwroot(
                     "bad file extension",
                 ))
             }
-        },
+        }
     }
 }
 

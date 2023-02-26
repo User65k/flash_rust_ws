@@ -3,14 +3,14 @@ use super::*;
 #[derive(Debug, Default)]
 pub struct UnitTestUseCase {
     req_path: Option<&'static str>,
-    mount: Option<&'static Path>,
+    mount: Option<&'static str>,
     remote_addr: Option<SocketAddr>,
 }
 
 impl UnitTestUseCase {
     fn create_wwwroot(
         req_path: Option<&'static str>,
-        mount: Option<&'static Path>,
+        mount: Option<&'static str>,
         remote_addr: Option<SocketAddr>,
     ) -> config::WwwRoot {
         let sf = UnitTestUseCase {
@@ -27,14 +27,14 @@ impl UnitTestUseCase {
     pub fn body(
         &self,
         req_path: WebPath<'_>,
-        web_mount: &Path,
+        web_mount: &Utf8PathBuf,
         remote_addr: SocketAddr,
     ) -> Result<Response<Body>, IoError> {
         if let Some(r) = self.req_path {
             assert_eq!(req_path, r);
         }
         if let Some(m) = self.mount {
-            assert_eq!(web_mount, m);
+            assert_eq!(web_mount.as_str(), m);
         }
         if let Some(a) = self.remote_addr {
             assert_eq!(remote_addr, a);
@@ -44,15 +44,17 @@ impl UnitTestUseCase {
 }
 
 mod mount {
+    use crate::config::Utf8PathBuf;
+
     use super::*;
     #[tokio::test]
     async fn test_mount_params() {
         let req = Request::get("/abc/def/ghi").body(Body::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
-        let m = UnitTestUseCase::create_wwwroot(Some("def/ghi"), Some(Path::new("abc")), None);
+        let m = UnitTestUseCase::create_wwwroot(Some("def/ghi"), Some("abc"), None);
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("abc"), m);
+        cfg.paths.insert(Utf8PathBuf::from("abc"), m);
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
     }
@@ -60,10 +62,10 @@ mod mount {
     async fn test_barely_mounted() {
         let req = Request::get("/abc").body(Body::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
-        let m = UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("abc")), None);
+        let m = UnitTestUseCase::create_wwwroot(Some(""), Some("abc"), None);
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("abc"), m);
+        cfg.paths.insert(Utf8PathBuf::from("abc"), m);
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
     }
@@ -71,10 +73,10 @@ mod mount {
     async fn top_mount() {
         let req = Request::get("/abc").body(Body::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
-        let m = UnitTestUseCase::create_wwwroot(Some("abc"), Some(Path::new("")), None);
+        let m = UnitTestUseCase::create_wwwroot(Some("abc"), Some(""), None);
 
         let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from(""), m);
+        cfg.paths.insert(Utf8PathBuf::from(""), m);
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
     }
@@ -95,16 +97,16 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from(""),
-            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+            Utf8PathBuf::from(""),
+            UnitTestUseCase::create_wwwroot(None, Some("#wrong"), None),
         );
         cfg.paths.insert(
-            PathBuf::from("aa"),
-            UnitTestUseCase::create_wwwroot(None, Some(Path::new("aa")), None),
+            Utf8PathBuf::from("aa"),
+            UnitTestUseCase::create_wwwroot(None, Some("aa"), None),
         );
         cfg.paths.insert(
-            PathBuf::from("aaa"),
-            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+            Utf8PathBuf::from("aaa"),
+            UnitTestUseCase::create_wwwroot(None, Some("#wrong"), None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
@@ -116,12 +118,12 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from("aa"),
-            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+            Utf8PathBuf::from("aa"),
+            UnitTestUseCase::create_wwwroot(None, Some("#wrong"), None),
         );
         cfg.paths.insert(
-            PathBuf::from("aa/a"),
-            UnitTestUseCase::create_wwwroot(None, Some(Path::new("aa/a")), None),
+            Utf8PathBuf::from("aa/a"),
+            UnitTestUseCase::create_wwwroot(None, Some("aa/a"), None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
@@ -133,12 +135,12 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from("aa"),
-            UnitTestUseCase::create_wwwroot(None, Some(Path::new("#wrong")), None),
+            Utf8PathBuf::from("aa"),
+            UnitTestUseCase::create_wwwroot(None, Some("#wrong"), None),
         );
         cfg.paths.insert(
-            PathBuf::from("aa/a"),
-            UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("aa/a")), None),
+            Utf8PathBuf::from("aa/a"),
+            UnitTestUseCase::create_wwwroot(Some(""), Some("aa/a"), None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
@@ -150,7 +152,7 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from("a"),
+            Utf8PathBuf::from("a"),
             UnitTestUseCase::create_wwwroot(None, None, None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
@@ -165,7 +167,7 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from("b"),
+            Utf8PathBuf::from("b"),
             UnitTestUseCase::create_wwwroot(None, None, None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
@@ -180,7 +182,7 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from(""),
+            Utf8PathBuf::from(""),
             UnitTestUseCase::create_wwwroot(Some("c:/b"), None, None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
@@ -195,8 +197,8 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from("a/c:/b"),
-            UnitTestUseCase::create_wwwroot(Some("d"), Some(Path::new("a/c:/b")), None),
+            Utf8PathBuf::from("a/c:/b"),
+            UnitTestUseCase::create_wwwroot(Some("d"), Some("a/c:/b"), None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
@@ -208,8 +210,8 @@ mod mount {
 
         let mut cfg = config::VHost::new(sa);
         cfg.paths.insert(
-            PathBuf::from(""),
-            UnitTestUseCase::create_wwwroot(Some(""), Some(Path::new("")), None),
+            Utf8PathBuf::from(""),
+            UnitTestUseCase::create_wwwroot(Some(""), Some(""), None),
         );
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
@@ -286,7 +288,7 @@ impl TempFile {
 }
 impl Drop for TempFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        std::fs::remove_file(&self.0).unwrap();
     }
 }
 pub struct TempDir(PathBuf);
@@ -299,6 +301,6 @@ impl TempDir {
 }
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.0);
+        std::fs::remove_dir_all(&self.0).unwrap();
     }
 }

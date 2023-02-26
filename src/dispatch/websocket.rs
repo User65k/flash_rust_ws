@@ -200,26 +200,26 @@ pub enum WSSock {
 impl<'de> Deserialize<'de> for WSSock {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de> {
-            struct Visitor;
-            impl<'de> serde::de::Visitor<'de> for Visitor {
-                type Value = WSSock;
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("a String")
-                }
-                fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-                where
-                    E: serde::de::Error,
-                {
-                    #[cfg(unix)]
-                    if v.starts_with('/') || v.starts_with("./") {
-                        return Ok(WSSock::Unix(PathBuf::from(v)));
-                    }
-                    Ok(WSSock::TCP(v.parse().map_err(E::custom)?))
-                }
-
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = WSSock;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a String")
             }
-            deserializer.deserialize_str(Visitor)
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                #[cfg(unix)]
+                if v.starts_with('/') || v.starts_with("./") {
+                    return Ok(WSSock::Unix(PathBuf::from(v)));
+                }
+                Ok(WSSock::TCP(v.parse().map_err(E::custom)?))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
     }
 }
 
@@ -271,37 +271,29 @@ mod tests {
             assock = "127.0.0.1:9000"
         "#,
         ) {
-            assert!(matches!(u.assock,
-                WSSock::TCP(_)
-            ));
+            assert!(matches!(u.assock, WSSock::TCP(_)));
         }
-        if let Ok(UseCase::Websocket(f)) = toml::from_str(
+        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
             r#"
             assock = "localhost:9000"
         "#,
         ) {
-            assert!(matches!(u.assock,
-                WSSock::TCP(_)
-            ));
+            assert!(matches!(u.assock, WSSock::TCP(_)));
         }
-        if let Ok(UseCase::Websocket(f)) = toml::from_str(
+        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
             r#"
             assock = "[::1]:9000"
         "#,
         ) {
-            assert!(matches!(u.assock,
-                WSSock::TCP(_)
-            ));
+            assert!(matches!(u.assock, WSSock::TCP(_)));
         }
         #[cfg(unix)]
-        if let Ok(UseCase::Websocket(f)) = toml::from_str(
+        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
             r#"
             assock = "/path"
         "#,
         ) {
-            assert!(matches!(u.assock,
-                WSSock::Unix(_)
-            ));
+            assert!(matches!(u.assock, WSSock::Unix(_)));
         }
     }
 }

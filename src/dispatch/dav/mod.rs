@@ -1,3 +1,5 @@
+use crate::config::{AbsPathBuf, Utf8PathBuf};
+
 use super::staticf::{self, resolve_path, return_file, ResolveResult};
 use bytes::{BufMut, Bytes, BytesMut};
 use hyper::{body::HttpBody, header, Body, Request, Response, StatusCode};
@@ -26,7 +28,7 @@ pub async fn do_dav(
     req: Request<Body>,
     req_path: &super::WebPath<'_>,
     config: &Config,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
     _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     let abs_doc_root = config.dav.canonicalize()?;
@@ -117,11 +119,10 @@ async fn handle_get(
     req: Request<Body>,
     full_path: &Path,
     req_path: &super::WebPath<'_>,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
 ) -> Result<Response<Body>, IoError> {
-    let follow_symlinks = false;
     //we could serve dir listings as well. with a litte webdav client :-D
-    let (_, file_lookup) = resolve_path(full_path, false, &None, follow_symlinks).await?;
+    let (_, file_lookup) = resolve_path(full_path, false, &None).await?;
 
     match file_lookup {
         ResolveResult::IsDirectory => {
@@ -328,7 +329,7 @@ async fn handle_move(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub dav: PathBuf,
+    pub dav: AbsPathBuf,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]

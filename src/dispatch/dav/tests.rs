@@ -1,14 +1,11 @@
-use std::{env::temp_dir, net::SocketAddr, path::Path};
+use std::{env::temp_dir, net::SocketAddr};
 
 use hyper::{body::to_bytes, Body, Request};
 
 use super::{do_dav, Config};
 use crate::{
-    config::{group_config, UseCase},
-    dispatch::{
-        test::{TempDir, TempFile},
-        WebPath,
-    },
+    config::{AbsPathBuf, UseCase, Utf8PathBuf},
+    dispatch::{test::TempFile, WebPath},
 };
 #[test]
 fn basic_config() {
@@ -23,17 +20,16 @@ dav = "."
         panic!("not a webdav");
     }
 }
-#[tokio::test]
-async fn dir_nonexistent() {
-    let mut cfg: crate::config::Configuration = toml::from_str(
+#[test]
+fn dir_nonexistent() {
+    let cfg: Result<crate::config::Configuration, _> = toml::from_str(
         r#"
 [host]
 ip = "0.0.0.0:1337"
 dav = "blablahui"
 "#,
-    )
-    .expect("parse err");
-    assert!(group_config(&mut cfg).await.is_err());
+    );
+    assert!(cfg.is_err());
 }
 async fn handle_req(
     req: hyper::http::request::Builder,
@@ -45,7 +41,7 @@ async fn handle_req(
 
     let addr: SocketAddr = "1.2.3.4:1234".parse().unwrap();
 
-    do_dav(req, &req_path, config, Path::new("mount"), addr).await
+    do_dav(req, &req_path, config, &Utf8PathBuf::from("mount"), addr).await
 }
 
 #[tokio::test]
@@ -54,7 +50,7 @@ async fn get_file() {
     let _tf = TempFile::create("test_resolve_file_dav", file_content);
 
     let config = Config {
-        dav: temp_dir(),
+        dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
     };
@@ -74,7 +70,7 @@ async fn get_file() {
 #[tokio::test]
 async fn options() {
     let config = Config {
-        dav: temp_dir(),
+        dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
     };
@@ -103,7 +99,7 @@ async fn options() {
 #[tokio::test]
 async fn put_move_delete() {
     let config = Config {
-        dav: temp_dir(),
+        dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
     };
@@ -159,7 +155,7 @@ async fn put_move_delete() {
 #[tokio::test]
 async fn mkcol_propfind() {
     let config = Config {
-        dav: temp_dir(),
+        dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
     };
@@ -195,7 +191,8 @@ async fn mkcol_propfind() {
     let res = handle_req(
         Request::builder()
             .method("PROPFIND")
-            .uri("/mount/test_create_dir/"),
+            .uri("/mount/test_create_dir/")
+            .header("Depth", "0"),
         Body::from(
             r##"<?xml version="1.0"?>
 <a:propfind xmlns:a="DAV:">
@@ -230,8 +227,7 @@ async fn mkcol_propfind() {
     let res = handle_req(
         Request::builder()
             .method("PROPFIND")
-            .uri("/mount/test_create_dir/")
-            .header("Depth", "10"),
+            .uri("/mount/test_create_dir/"),
         Body::from(
             r##"<?xml version="1.0"?>
 <a:propfind xmlns:a="DAV:">

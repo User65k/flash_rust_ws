@@ -1,7 +1,10 @@
 use hyper::Uri;
 use std::borrow::{Borrow, Cow};
+use std::ffi::{OsStr, OsString};
 use std::io::{Error as IoError, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+
+use crate::config::Utf8PathBuf;
 
 pub fn decode_and_normalize_path(uri: &Uri) -> Result<WebPath<'_>, IoError> {
     let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
@@ -59,13 +62,25 @@ impl<'a> WebPath<'a> {
     /// turn it into a path by appending. Never replace the existing root!
     /// rustsec_2022_0072
     pub fn prefix_with(&self, pre: &Path) -> PathBuf {
-        let r: &std::ffi::OsStr = pre.as_ref();
-        let mut r = r.to_os_string();
-        if let Some(false) = r.to_str().map(|s| s.ends_with(std::path::MAIN_SEPARATOR)) {
-            r.push::<String>(std::path::MAIN_SEPARATOR.into());
+        let pres: &OsStr = pre.as_ref();
+        let mut r = OsString::with_capacity(pres.len() + 1 + self.0.len());
+        r.push(pres);
+        if let Some(false) = pres.to_str().map(|s| s.ends_with(MAIN_SEPARATOR)) {
+            r.push::<String>(MAIN_SEPARATOR.into());
         }
         //does never start with a separator
+        #[cfg(not(windows))]
         r.push(self.0.as_ref());
+        #[cfg(windows)]
+        {
+            //we only need to this if path starts with "\\?\"
+            let mut path = self.0.split('/');
+            r.push(path.next().unwrap());
+            for p in path {
+                r.push::<String>(MAIN_SEPARATOR.into());
+                r.push(p);
+            }
+        }
         PathBuf::from(r)
     }
     pub fn strip_prefix(&'a self, base: &'_ Path) -> Result<WebPath<'a>, ()> {
@@ -85,23 +100,22 @@ impl<'a> WebPath<'a> {
         }
         Ok(WebPath(Cow::from(&self.0[offset..])))
     }
-    pub fn prefixed_as_abs_url_path(&self, pre: &Path, extra_cap: usize) -> String {
+    /// Create "/{pre}/{WebPath}" and leave extra_cap of free space at the end
+    pub fn prefixed_as_abs_url_path(&self, pre: &Utf8PathBuf, extra_cap: usize) -> String {
         //https://docs.rs/hyper-staticfile/latest/src/hyper_staticfile/response_builder.rs.html#75-123
-        if let Some(pre) = pre.to_str() {
-            let s = self.0.as_ref();
-            let capa = pre.len() + s.len() + extra_cap + 2;
-            let mut r = String::with_capacity(capa);
-            if !pre.is_empty() && !pre.starts_with('/') {
-                r.push('/');
-            }
-            r.push_str(pre);
-            if !pre.ends_with('/') {
-                r.push('/');
-            }
-            r.push_str(s);
-            return r;
+        let pre = pre.as_str();
+        let s = self.0.as_ref();
+        let capa = pre.len() + s.len() + extra_cap + 2;
+        let mut r = String::with_capacity(capa);
+        if !pre.is_empty() && !pre.starts_with('/') {
+            r.push('/');
         }
-        String::new()
+        r.push_str(pre);
+        if !pre.ends_with('/') {
+            r.push('/');
+        }
+        r.push_str(s);
+        r
     }
     pub fn clone<'b>(&self) -> WebPath<'b> {
         // not as trait as we change lifetime
