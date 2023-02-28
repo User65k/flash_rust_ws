@@ -53,6 +53,7 @@ async fn get_file() {
         dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
+        follow_symlinks: false,
     };
     let res = handle_req(
         Request::get("/mount/test_resolve_file_dav"),
@@ -73,6 +74,7 @@ async fn options() {
         dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
+        follow_symlinks: false,
     };
     let res = handle_req(
         Request::options("/mount/"),
@@ -102,6 +104,7 @@ async fn put_move_delete() {
         dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
+        follow_symlinks: false,
     };
 
     // ---PUT---
@@ -158,6 +161,7 @@ async fn mkcol_propfind() {
         dav: AbsPathBuf::temp_dir(),
         read_only: false,
         dont_overwrite: false,
+        follow_symlinks: false,
     };
     // ---MKCOL fail---
     let res = handle_req(
@@ -286,3 +290,4 @@ async fn mkcol_propfind() {
 //Request::builder().method("COPY").uri(uri)
 //Request::builder().method("COPY").uri(uri).header("Overwrite", "F")
 //Request::builder().method("PROPPATCH").uri(uri)
+//dont_override, read_only, symlinks

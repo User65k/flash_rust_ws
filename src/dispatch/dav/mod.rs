@@ -91,9 +91,8 @@ pub async fn do_dav(
         return Err(IoError::new(ErrorKind::PermissionDenied, "read only mount"));
     }
     let full_path = req_path.prefix_with(&config.dav);
-    let follow_symlinks = false;
 
-    if !follow_symlinks {
+    if !config.follow_symlinks {
         let fp = if matches!(m, DavMethod::PUT | DavMethod::MKCOL) {
             //Path will be created -> check dad:
             match full_path.parent() {
@@ -132,16 +131,30 @@ pub async fn do_dav(
         DavMethod::GET => handle_get(req, &full_path, req_path, web_mount).await,
         DavMethod::PUT => handle_put(req, &full_path, config.dont_overwrite).await,
         DavMethod::MKCOL => handle_mkdir(&full_path).await,
-        DavMethod::COPY if !config.dont_overwrite => {
-            handle_copy(req.headers(), &full_path, &config.dav, web_mount).await
+        DavMethod::COPY => {
+            handle_copy(
+                req.headers(),
+                &full_path,
+                &config.dav,
+                web_mount,
+                config.dont_overwrite,
+            )
+            .await
         }
-        DavMethod::MOVE if !config.dont_overwrite => {
-            handle_move(req.headers(), &full_path, &config.dav, web_mount).await
+        DavMethod::MOVE => {
+            handle_move(
+                req.headers(),
+                &full_path,
+                &config.dav,
+                web_mount,
+                config.dont_overwrite,
+            )
+            .await
         }
         DavMethod::DELETE if !config.dont_overwrite => handle_delete(&full_path).await,
-        _ => Err(IoError::new(
+        DavMethod::DELETE => Err(IoError::new(
             ErrorKind::PermissionDenied,
-            "properties are read only",
+            "dont_overwrite forbids delete",
         )),
     }
 }
@@ -332,8 +345,8 @@ fn get_dst(
         .and_then(|s| hyper::Uri::try_from(s).ok())
         .ok_or_else(|| IoError::new(ErrorKind::InvalidData, "no valid destination path"))?;
 
-    let request_path = decode_and_normalize_path(&dst)?;
-    let path = request_path.strip_prefix(web_mount).map_err(|_| {
+        let request_path = decode_and_normalize_path(&dst)?;
+        let path = request_path.strip_prefix(web_mount).map_err(|_| {
         IoError::new(
             ErrorKind::PermissionDenied,
             "destination path outside of mount",
@@ -347,6 +360,7 @@ async fn handle_copy(
     src_path: &Path,
     root: &Path,
     web_mount: &Path,
+    mut dont_overwrite: bool,
 ) -> Result<Response<Body>, IoError> {
     let dst_path = get_dst(header, root, web_mount)?;
     log::info!("Copy {:?} -> {:?}", src_path, dst_path);
@@ -358,10 +372,11 @@ async fn handle_copy(
     }
     //If a COPY request has an Overwrite header with a value of "F", and a resource exists at the Destination URL, the server MUST fail the request.
     if let Some(b"F") = header.get("Overwrite").map(|v| v.as_bytes()) {
-        if metadata(&dst_path).await.is_ok() {
-            *res.status_mut() = StatusCode::PRECONDITION_FAILED;
-            return Ok(res);
-        }
+        dont_overwrite = true;
+    }
+    if dont_overwrite && metadata(&dst_path).await.is_ok() {
+        *res.status_mut() = StatusCode::PRECONDITION_FAILED;
+        return Ok(res);
     }
     copy(src_path, dst_path).await?;
     //resulted in the creation of a new resource.
@@ -392,6 +407,7 @@ async fn handle_move(
     src_path: &Path,
     root: &Path,
     web_mount: &Path,
+    mut dont_overwrite: bool,
 ) -> Result<Response<Body>, IoError> {
     let dst_path = get_dst(header, root, web_mount)?;
     log::info!("Move {:?} -> {:?}", src_path, dst_path);
@@ -403,16 +419,17 @@ async fn handle_move(
     }
     match header.get("Overwrite").map(|v| v.as_bytes()) {
         Some(b"F") => {
-            if metadata(&dst_path).await.is_ok() {
-                *res.status_mut() = StatusCode::PRECONDITION_FAILED;
-                return Ok(res);
-            }
+            dont_overwrite = true;
         }
         Some(b"T") => {
             //MUST perform a DELETE with "Depth: infinity" on the destination resource.
             handle_delete(&dst_path).await?;
         }
         _ => {}
+    }
+    if dont_overwrite && metadata(&dst_path).await.is_ok() {
+        *res.status_mut() = StatusCode::PRECONDITION_FAILED;
+        return Ok(res);
     }
     rename(src_path, dst_path).await?;
     //a new URL mapping was created at the destination.
@@ -435,6 +452,8 @@ pub struct Config {
     pub read_only: bool,
     #[serde(default)]
     pub dont_overwrite: bool,
+    #[serde(default)]
+    pub follow_symlinks: bool,
 }
 impl Config {
     pub async fn setup(&self) -> Result<(), String> {
