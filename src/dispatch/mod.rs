@@ -8,7 +8,7 @@ pub mod test;
 mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
-pub use webpath::{decode_and_normalize_path, WebPath};
+pub use webpath::WebPath;
 
 use crate::config::{self, Utf8PathBuf};
 use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
@@ -172,7 +172,7 @@ async fn handle_vhost(
     cfg: &config::VHost,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-    let req_path = decode_and_normalize_path(req.uri())?;
+    let req_path: WebPath = req.uri().try_into()?;
     debug!("req_path {:?}", req_path);
 
     //we want the longest match

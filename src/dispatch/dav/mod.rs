@@ -21,7 +21,6 @@ use tokio::{
     io::AsyncRead,
 };
 mod propfind;
-use super::decode_and_normalize_path;
 #[cfg(test)]
 mod tests;
 
@@ -345,8 +344,8 @@ fn get_dst(
         .and_then(|s| hyper::Uri::try_from(s).ok())
         .ok_or_else(|| IoError::new(ErrorKind::InvalidData, "no valid destination path"))?;
 
-        let request_path = decode_and_normalize_path(&dst)?;
-        let path = request_path.strip_prefix(web_mount).map_err(|_| {
+    let request_path = super::WebPath::try_from(&dst)?;
+    let path = request_path.strip_prefix(web_mount).map_err(|_| {
         IoError::new(
             ErrorKind::PermissionDenied,
             "destination path outside of mount",

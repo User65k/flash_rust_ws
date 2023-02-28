@@ -315,7 +315,7 @@ mod tests {
         let req = Request::get("/mount//foo.org/redirects_to_sanitized_path")
             .body(Body::empty())
             .unwrap();
-        let req_path = crate::dispatch::decode_and_normalize_path(req.uri()).unwrap();
+        let req_path = crate::dispatch::WebPath::try_from(req.uri()).unwrap();
         let rel_path = req_path.strip_prefix(Path::new("mount")).unwrap();
 
         assert_eq!(rel_path, "foo.org/redirects_to_sanitized_path");

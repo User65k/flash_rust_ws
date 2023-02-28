@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
 use crate::config::Utf8PathBuf;
 
-pub fn decode_and_normalize_path(uri: &Uri) -> Result<WebPath<'_>, IoError> {
-    let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
+impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
+    type Error = IoError;
+    fn try_from(uri: &'a Uri) -> Result<Self, Self::Error> {
+        let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
 
         #[cfg(windows)]
         if path.contains('\\') {
@@ -60,6 +62,7 @@ pub fn decode_and_normalize_path(uri: &Uri) -> Result<WebPath<'_>, IoError> {
             Ok(WebPath(Cow::from(r)))
         }
     }
+}
 
 #[repr(transparent)]
 #[derive(Debug)]
@@ -150,31 +153,25 @@ mod tests {
     #[test]
     fn normalize() {
         assert_eq!(
-            decode_and_normalize_path(&"/a/../b".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/a/../b".parse().unwrap()).unwrap().0,
             "b"
         );
         assert_eq!(
-            decode_and_normalize_path(&"/../../".parse().unwrap())
+            WebPath::try_from(&"/../../".parse().unwrap())
                 .unwrap_err()
                 .kind(),
             ErrorKind::PermissionDenied
         );
         assert_eq!(
-            decode_and_normalize_path(&"/a/c:/b".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/a/c:/b".parse().unwrap()).unwrap().0,
             "a/c:/b"
         );
         assert_eq!(
-            decode_and_normalize_path(&"/c:/b".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/c:/b".parse().unwrap()).unwrap().0,
             "c:/b"
         );
         assert_eq!(
-            decode_and_normalize_path(&"/a/b/c".parse().unwrap())
+            WebPath::try_from(&"/a/b/c".parse().unwrap())
                 .unwrap()
                 .strip_prefix(Path::new("a"))
                 .unwrap()
@@ -185,14 +182,14 @@ mod tests {
     #[test]
     fn rustsec_2022_0072() {
         assert_eq!(
-            decode_and_normalize_path(&"/c:/b".parse().unwrap())
+            WebPath::try_from(&"/c:/b".parse().unwrap())
                 .unwrap()
                 .prefix_with(Path::new("test")),
             Path::new("test/c:/b")
         );
 
         assert_eq!(
-            decode_and_normalize_path(&"/a/c:/b/d".parse().unwrap())
+            WebPath::try_from(&"/a/c:/b/d".parse().unwrap())
                 .unwrap()
                 .prefix_with(Path::new("test")),
             Path::new("test/a/c:/b/d")
@@ -201,33 +198,23 @@ mod tests {
     #[test]
     fn cow() {
         assert!(matches!(
-            decode_and_normalize_path(&"/a/b".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/a/b".parse().unwrap()).unwrap().0,
             Cow::Borrowed(_)
         ));
         assert!(matches!(
-            decode_and_normalize_path(&"/c:/d".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/c:/d".parse().unwrap()).unwrap().0,
             Cow::Borrowed(_)
         ));
         assert!(matches!(
-            decode_and_normalize_path(&"/e//f".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/e//f".parse().unwrap()).unwrap().0,
             Cow::Owned(_)
         ));
         assert!(matches!(
-            decode_and_normalize_path(&"/g/h/../i".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/g/h/../i".parse().unwrap()).unwrap().0,
             Cow::Owned(_)
         ));
         assert!(matches!(
-            decode_and_normalize_path(&"//./j/../k".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"//./j/../k".parse().unwrap()).unwrap().0,
             Cow::Borrowed("k")
         ));
     }
@@ -235,7 +222,7 @@ mod tests {
     #[test]
     fn windows_path_sep() {
         assert_eq!(
-            decode_and_normalize_path(&"/a\\..\\..\\..\\..\\..\\".parse().unwrap())
+            WebPath::try_from(&"/a\\..\\..\\..\\..\\..\\".parse().unwrap())
                 .unwrap_err()
                 .kind(),
             ErrorKind::InvalidData
