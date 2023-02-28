@@ -411,7 +411,7 @@ mod tests {
         let _td1 = TempDir::create("lnk_nested2");
         let _tf = TempFile::create("lnk_target2", file_content);
         let link = &std::env::temp_dir().join("lnk_nested2/lnk");
-        let org = Path::new("../lnk_target2");
+        let org = Path::new("..").join("lnk_target2");
         let mm = std::env::temp_dir().join("lnk_nested2");
         let mount = mm.as_os_str().to_str().unwrap();
 

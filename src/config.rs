@@ -616,7 +616,7 @@ mod tests {
             r#"
     [host]
     ip = "0.0.0.0:1337"
-    dir = "{}"
+    dir = '{}'
     "#,
             tf.get_path().to_str().unwrap()
         ))
