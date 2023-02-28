@@ -8,52 +8,58 @@ use crate::config::Utf8PathBuf;
 
 pub fn decode_and_normalize_path(uri: &Uri) -> Result<WebPath<'_>, IoError> {
     let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
-    let mut parts = Vec::new();
-    let mut len = 0;
-    let mut offset = 0;
-    let mut skip = 0;
-    for p in path.split('/') {
-        match p {
-            "" => {
-                skip += 1;
-            }
-            "." => {
-                skip += 2;
-            }
-            ".." => {
-                if parts.pop().is_none() {
-                    return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
-                }
-                skip += 3;
-                if parts.is_empty() {
-                    offset = skip + len;
-                }
-            }
-            comp => {
-                parts.push(comp);
-                len += 1 + comp.len();
-            }
-        }
-    }
-    len = len.saturating_sub(1); //leading sep
 
-    if len == path.len() {
-        Ok(WebPath(path))
-    } else {
-        if offset != 0 {
-            if let Cow::Borrowed(p) = path {
-                return Ok(WebPath(Cow::from(&p[offset..])));
+        #[cfg(windows)]
+        if path.contains('\\') {
+            return Err(IoError::new(ErrorKind::InvalidData, "win dir sep"));
+        }
+
+        let mut parts = Vec::new();
+        let mut len = 0;
+        let mut offset = 0;
+        let mut skip = 0;
+        for p in path.split('/') {
+            match p {
+                "" => {
+                    skip += 1;
+                }
+                "." => {
+                    skip += 2;
+                }
+                ".." => {
+                    if parts.pop().is_none() {
+                        return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
+                    }
+                    skip += 3;
+                    if parts.is_empty() {
+                        offset = skip + len;
+                    }
+                }
+                comp => {
+                    parts.push(comp);
+                    len += 1 + comp.len();
+                }
             }
         }
-        let mut r = String::with_capacity(len);
-        for p in parts {
-            r.push_str(p);
-            r.push('/');
+        len = len.saturating_sub(1); //leading sep
+
+        if len == path.len() {
+            Ok(WebPath(path))
+        } else {
+            if offset != 0 {
+                if let Cow::Borrowed(p) = path {
+                    return Ok(WebPath(Cow::from(&p[offset..])));
+                }
+            }
+            let mut r = String::with_capacity(len);
+            for p in parts {
+                r.push_str(p);
+                r.push('/');
+            }
+            r.pop();
+            Ok(WebPath(Cow::from(r)))
         }
-        r.pop();
-        Ok(WebPath(Cow::from(r)))
     }
-}
 
 #[repr(transparent)]
 #[derive(Debug)]
@@ -224,5 +230,15 @@ mod tests {
                 .0,
             Cow::Borrowed("k")
         ));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_sep() {
+        assert_eq!(
+            decode_and_normalize_path(&"/a\\..\\..\\..\\..\\..\\".parse().unwrap())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidData
+        );
     }
 }
