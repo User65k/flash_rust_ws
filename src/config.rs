@@ -35,7 +35,7 @@ pub enum Authenticatoin {
 #[repr(transparent)]
 pub struct Utf8PathBuf(PathBuf);
 impl Utf8PathBuf {
-    pub fn new() -> Utf8PathBuf {
+    pub fn empty() -> Utf8PathBuf {
         Utf8PathBuf(PathBuf::new())
     }
     pub fn as_str(&self) -> &str {
@@ -113,9 +113,10 @@ impl AsRef<std::path::Path> for AbsPathBuf {
         self.0.as_path()
     }
 }
+#[cfg(test)]
 impl From<&str> for AbsPathBuf {
     fn from(s: &str) -> Self {
-        AbsPathBuf(PathBuf::from(s))
+        AbsPathBuf(PathBuf::from(s).canonicalize().expect("could not canonicalize"))
     }
 }
 
@@ -137,6 +138,7 @@ impl StaticFiles {
     }
 }
 
+/// Purpose of a single `WwwRoot`
 #[derive(Debug)]
 pub enum UseCase {
     #[cfg(feature = "fcgi")]
@@ -197,7 +199,7 @@ impl<'de> Deserialize<'de> for UseCase {
     }
 }
 
-/// A single directory
+/// A single directory under a `VHost`
 #[derive(Debug, Deserialize)]
 pub struct WwwRoot {
     #[serde(flatten)]
@@ -233,6 +235,8 @@ impl VHost {
 }
 
 /// Gernal configuration
+/// 
+/// Parsed from TOML Config file
 #[derive(Debug, Deserialize)]
 pub struct Configuration {
     pub logfile: Option<Utf8PathBuf>,
@@ -310,6 +314,7 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     Ok(cfg)
 }
 
+/// Internal representation of `Configuration`.
 pub struct HostCfg {
     pub default_host: Option<VHost>,
     pub vhosts: HashMap<String, VHost>,
@@ -465,6 +470,17 @@ fn do_tcp_socket_activation() -> HashMap<SocketAddr, TcpListener> {
     ret
 }
 
+/// this is like
+/// ```
+/// #[serde(flatten)]
+/// pub paths: Map<Utf8PathBuf, WwwRoot>,
+/// #[serde(flatten)]
+/// pub webroot: Option<WwwRoot>
+/// ```
+/// but puts webroot also in the paths Map (with path "")
+/// and strips acute from all the paths to allow field names as paths.
+/// 
+/// Also works as `#[serde(deny_unknown_fields)]`
 fn gather_mounts<'de, D>(deserializer: D) -> Result<BTreeMap<Utf8PathBuf, WwwRoot>, D::Error>
 where
     D: Deserializer<'de>,
@@ -514,7 +530,7 @@ where
                 let iter = lefties.into_iter();
                 let mapde = serde::de::value::MapDeserializer::new(iter);
                 mounts.insert(
-                    Utf8PathBuf::new(),
+                    Utf8PathBuf::empty(),
                     WwwRoot::deserialize(mapde)
                         .map_err(|e| DeError::custom(format!("webroot: {}", e)))?,
                 );
