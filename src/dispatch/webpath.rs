@@ -33,14 +33,17 @@ impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
                         return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
                     }
                     skip += 3;
-                    if parts.is_empty() {
-                        offset = skip + len;
-                    }
                 }
                 comp => {
                     parts.push(comp);
                     len += 1 + comp.len();
+                    continue;
                 }
+            }
+            if parts.is_empty() {
+                offset = skip + len;
+            } else if offset > 0 {
+                offset = 0;
             }
         }
         len = len.saturating_sub(1); //leading sep
@@ -224,6 +227,34 @@ mod tests {
             WebPath::try_from(&"//./j/../k".parse().unwrap()).unwrap().0,
             Cow::Borrowed("k")
         ));
+        assert_eq!(
+            WebPath::try_from(&"//./j/../a/b/../k".parse().unwrap())
+                .unwrap()
+                .0,
+            "a/k"
+        );
+        assert!(matches!(
+            WebPath::try_from(&"//./j/../a/b/../k".parse().unwrap())
+                .unwrap()
+                .0,
+            Cow::Owned(_)
+        ));
+        assert!(matches!(
+            WebPath::try_from(&"//./j/../a/b/.././../c".parse().unwrap()).unwrap().0,
+            Cow::Borrowed("c")
+        ));
+        assert_eq!(
+            WebPath::try_from(&"//./j/../a/.././../".parse().unwrap())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            WebPath::try_from(&"//./j/../a/./k".parse().unwrap())
+                .unwrap()
+                .0,
+            "a/k"
+        );
     }
     #[cfg(windows)]
     #[test]
