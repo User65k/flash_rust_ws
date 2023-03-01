@@ -278,8 +278,8 @@ impl TempFile {
     pub fn create(file_name: &str, content: &[u8]) -> TempFile {
         let mut path = std::env::temp_dir();
         path.push(file_name);
-        let mut file = std::fs::File::create(&path).expect("could not create htdigest file");
-        std::io::Write::write_all(&mut file, content).expect("could not write htdigest file");
+        let mut file = std::fs::File::create(&path).expect("could not create file");
+        std::io::Write::write_all(&mut file, content).expect("could not write file");
         TempFile(path)
     }
     pub fn get_path(&self) -> &Path {
