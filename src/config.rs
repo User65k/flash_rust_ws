@@ -116,7 +116,11 @@ impl AsRef<std::path::Path> for AbsPathBuf {
 #[cfg(test)]
 impl From<&str> for AbsPathBuf {
     fn from(s: &str) -> Self {
-        AbsPathBuf(PathBuf::from(s).canonicalize().expect("could not canonicalize"))
+        AbsPathBuf(
+            PathBuf::from(s)
+                .canonicalize()
+                .expect("could not canonicalize"),
+        )
     }
 }
 
@@ -235,7 +239,7 @@ impl VHost {
 }
 
 /// Gernal configuration
-/// 
+///
 /// Parsed from TOML Config file
 #[derive(Debug, Deserialize)]
 pub struct Configuration {
@@ -479,7 +483,7 @@ fn do_tcp_socket_activation() -> HashMap<SocketAddr, TcpListener> {
 /// ```
 /// but puts webroot also in the paths Map (with path "")
 /// and strips acute from all the paths to allow field names as paths.
-/// 
+///
 /// Also works as `#[serde(deny_unknown_fields)]`
 fn gather_mounts<'de, D>(deserializer: D) -> Result<BTreeMap<Utf8PathBuf, WwwRoot>, D::Error>
 where

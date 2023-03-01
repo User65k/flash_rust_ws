@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
-use crate::config::{Utf8PathBuf, AbsPathBuf};
+use crate::config::{AbsPathBuf, Utf8PathBuf};
 
 impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
     type Error = IoError;
@@ -189,15 +189,17 @@ mod tests {
         assert_eq!(
             WebPath::try_from(&"/c:/b".parse().unwrap())
                 .unwrap()
-                .prefix_with(&AbsPathBuf::temp_dir()).as_os_str(),
-                OsString::from(format!("{0}{1}c:{1}b", temp, MAIN_SEPARATOR))
+                .prefix_with(&AbsPathBuf::temp_dir())
+                .as_os_str(),
+            OsString::from(format!("{0}{1}c:{1}b", temp, MAIN_SEPARATOR))
         );
 
         assert_eq!(
             WebPath::try_from(&"/a/c:/b/d".parse().unwrap())
                 .unwrap()
-                .prefix_with(&AbsPathBuf::temp_dir()).as_os_str(),
-                OsString::from(format!("{0}{1}a{1}c:{1}b{1}d", temp, MAIN_SEPARATOR))
+                .prefix_with(&AbsPathBuf::temp_dir())
+                .as_os_str(),
+            OsString::from(format!("{0}{1}a{1}c:{1}b{1}d", temp, MAIN_SEPARATOR))
         );
     }
     #[test]
