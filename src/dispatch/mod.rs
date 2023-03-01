@@ -3,18 +3,22 @@ pub mod dav;
 #[cfg(feature = "fcgi")]
 pub mod fcgi;
 mod staticf;
+#[cfg(test)]
+pub mod test;
+mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
+pub use webpath::WebPath;
 
-use crate::config;
+use crate::config::{self, Utf8PathBuf};
 use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
-use hyper_staticfile::{ResolveResult, ResponseBuilder as FileResponseBuilder};
 use log::{debug, error, info, trace};
+use staticf::ResolveResult;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn insert_default_headers(
@@ -45,7 +49,7 @@ pub fn insert_default_headers(
     }
     Ok(())
 }
-fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &Path) -> bool {
+fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
     if let Some(whitelist) = list {
         if let Some(ext) = path.extension() {
             for e in whitelist {
@@ -59,29 +63,6 @@ fn ext_in_list(list: &Option<Vec<PathBuf>>, path: &Path) -> bool {
     true // no list == all is ok
 }
 
-#[inline]
-fn decode_percents(string: &str) -> String {
-    percent_encoding::percent_decode_str(string)
-        .decode_utf8_lossy()
-        .into_owned()
-}
-
-/// Path.canonicalize for non existend paths
-fn normalize_path(path: &Path) -> PathBuf {
-    path.components()
-        .fold(PathBuf::new(), |mut result, p| match p {
-            Component::Normal(x) => {
-                result.push(x);
-                result
-            }
-            Component::ParentDir => {
-                result.pop();
-                result
-            }
-            _ => result,
-        })
-}
-
 /// handle a request by
 /// - checking for authentication
 /// - building the absolute file path
@@ -90,8 +71,8 @@ fn normalize_path(path: &Path) -> PathBuf {
 async fn handle_wwwroot(
     req: Request<Body>,
     wwwr: &config::WwwRoot,
-    req_path: &Path,
-    web_mount: &Path,
+    req_path: WebPath<'_>,
+    web_mount: &Utf8PathBuf,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     debug!("working root {:?}", wwwr);
@@ -111,7 +92,7 @@ async fn handle_wwwroot(
         config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, static_files }) => {
             if fcgi.exec.is_none() {
                 //FCGI + dont check for file -> always FCGI
-                return fcgi::fcgi_call(fcgi, req, req_path, web_mount, None, remote_addr).await;
+                return fcgi::fcgi_call(fcgi, req, &req_path, web_mount, None, remote_addr).await;
             }
             match static_files {
                 Some(sf) => sf,
@@ -120,45 +101,66 @@ async fn handle_wwwroot(
         }
         #[cfg(feature = "websocket")]
         config::UseCase::Websocket(ws) => {
-            return websocket::upgrade(req, ws, req_path, remote_addr).await;
+            return websocket::upgrade(req, ws, &req_path, remote_addr).await;
         }
         #[cfg(feature = "webdav")]
         config::UseCase::Webdav(dav) => {
-            return dav::do_dav(req, req_path, dav, web_mount, remote_addr).await;
+            return dav::do_dav(req, &req_path, dav, web_mount, remote_addr).await;
+        }
+        #[cfg(test)]
+        config::UseCase::UnitTest(ut) => {
+            return ut.body(req_path, web_mount, remote_addr);
         }
     };
 
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
-    let full_path = sf.dir.join(req_path);
+    let full_path = req_path.prefix_with(&sf.dir);
     trace!("full_path {:?}", full_path.canonicalize());
-
-    let (full_path, resolved_file) =
-        staticf::resolve_path(&full_path, is_dir_request, &sf.index, sf.follow_symlinks).await?;
-
-    if let ResolveResult::IsDirectory = resolved_file {
-        //request for a file that is a directory
-        return Ok(FileResponseBuilder::new()
-            .request(&req)
-            .build(ResolveResult::IsDirectory)
-            .expect("unable to build response"));
-    }
-
-    #[cfg(feature = "fcgi")]
-    if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
-        //FCGI + check for file
-        if ext_in_list(&fcgi.exec, &full_path) {
-            return fcgi::fcgi_call(fcgi, req, &full_path, web_mount, Some(&sf.dir), remote_addr)
-                .await;
+    if !sf.follow_symlinks {
+        //check if the canonicalized version is still inside of the (abs) root path
+        let fp = full_path.canonicalize()?;
+        if !fp.starts_with(&sf.dir) {
+            return Err(IoError::new(
+                ErrorKind::PermissionDenied,
+                "Symlinks are not allowed",
+            ));
         }
     }
 
-    if ext_in_list(&sf.serve, &full_path) {
-        staticf::return_file(&req, resolved_file).await
-    } else {
-        Err(IoError::new(
-            ErrorKind::PermissionDenied,
-            "bad file extension",
-        ))
+    let (full_path, resolved_file) =
+        staticf::resolve_path(&full_path, is_dir_request, &sf.index).await?;
+
+    match resolved_file {
+        ResolveResult::IsDirectory => {
+            //request for a file that is a directory
+            Ok(staticf::redirect(&req, &req_path, web_mount))
+        }
+        ResolveResult::Found(file, metadata, mime) => {
+            #[cfg(feature = "fcgi")]
+            if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
+                //FCGI + check for file
+                if ext_in_list(&fcgi.exec, &full_path) {
+                    return fcgi::fcgi_call(
+                        fcgi,
+                        req,
+                        &req_path,
+                        web_mount,
+                        Some(&full_path),
+                        remote_addr,
+                    )
+                    .await;
+                }
+            }
+
+            if ext_in_list(&sf.serve, &full_path) {
+                staticf::return_file(&req, file, metadata, mime).await
+            } else {
+                Err(IoError::new(
+                    ErrorKind::PermissionDenied,
+                    "bad file extension",
+                ))
+            }
+        }
     }
 }
 
@@ -170,9 +172,7 @@ async fn handle_vhost(
     cfg: &config::VHost,
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-    let request_path = PathBuf::from(decode_percents(req.uri().path()));
-
-    let req_path = normalize_path(&request_path);
+    let req_path: WebPath = req.uri().try_into()?;
     debug!("req_path {:?}", req_path);
 
     //we want the longest match
@@ -180,7 +180,8 @@ async fn handle_vhost(
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
         if let Ok(full_path) = req_path.strip_prefix(mount_path) {
-            let mut resp = handle_wwwroot(req, wwwr, full_path, mount_path, remote_addr).await?;
+            let req_path = full_path.into_owned(); // T_T
+            let mut resp = handle_wwwroot(req, wwwr, req_path, mount_path, remote_addr).await?;
             insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
             return Ok(resp);
         }
@@ -190,91 +191,6 @@ async fn handle_vhost(
         ErrorKind::PermissionDenied,
         "not a mount path",
     ))
-}
-
-#[cfg(test)]
-mod mount_tests {
-    use super::*;
-    fn create_wwwroot(dir: &str) -> config::WwwRoot {
-        let sf = config::StaticFiles {
-            dir: PathBuf::from(dir),
-            follow_symlinks: false,
-            index: None,
-            serve: None,
-        };
-        config::WwwRoot {
-            mount: config::UseCase::StaticFiles(sf),
-            header: None,
-            auth: None,
-        }
-    }
-    #[tokio::test]
-    async fn no_mounts() {
-        let req = Request::new(Body::empty());
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let cfg = config::VHost::new(sa);
-        let res = handle_vhost(req, &cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
-    }
-    #[tokio::test]
-    async fn full_folder_names_as_mounts() {
-        let req = Request::get("/aa").body(Body::empty()).unwrap();
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from(""), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aaa"), create_wwwroot("."));
-        let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap();
-        assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/aa/");
-    }
-    #[tokio::test]
-    async fn longest_mount() {
-        let req = Request::get("/aa/a").body(Body::empty()).unwrap();
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aa/a"), create_wwwroot("."));
-        let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap();
-        assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/aa/a/");
-    }
-    #[tokio::test]
-    async fn uri_encode() {
-        let req = Request::get("/aa%2Fa").body(Body::empty()).unwrap();
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("aa"), create_wwwroot("."));
-        cfg.paths.insert(PathBuf::from("aa/a"), create_wwwroot("."));
-        let res = handle_vhost(req, &cfg, sa).await;
-        let res = res.unwrap();
-        assert_eq!(res.status(), 301);
-        assert_eq!(res.headers().get("location").unwrap(), "/aa%2Fa/");
-    }
-    #[tokio::test]
-    async fn root() {
-        let req = Request::get("/a/../b").body(Body::empty()).unwrap();
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let mut cfg = config::VHost::new(sa);
-        cfg.paths.insert(PathBuf::from("a"), create_wwwroot("."));
-        let res = handle_vhost(req, &cfg, sa).await;
-        let _res = res.unwrap_err();
-    }
-    #[test]
-    fn normalize() {
-        let req = PathBuf::from("a/../b");
-        assert_eq!(normalize_path(&req), PathBuf::from("b"));
-        let req = PathBuf::from("../../");
-        assert_eq!(normalize_path(&req), PathBuf::from(""));
-    }
 }
 
 /// return the Host header
@@ -311,59 +227,6 @@ async fn dispatch_to_vhost(
         return handle_vhost(req, hcfg, remote_addr).await;
     }
     Err(IoError::new(ErrorKind::PermissionDenied, "no vHost found"))
-}
-
-#[cfg(test)]
-mod vhost_tests {
-    use super::*;
-    fn make_host_cfg(default_host: Option<config::VHost>, named: Option<(String, config::VHost)>) -> Arc<config::HostCfg> {
-        let mut map: HashMap<String, config::VHost> = HashMap::new();
-        if let Some((k,v)) = named {
-            map.insert(k, v);
-        }
-        Arc::new(config::HostCfg {
-            default_host,
-            vhosts: map,
-            listener: None,
-            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
-            tls: None,
-        })
-    }
-    #[tokio::test]
-    async fn unknown_vhost() {
-        let req = Request::new(Body::empty());
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let cfg = make_host_cfg(None, Some(("1".to_string(), config::VHost::new(sa))));
-        let res = dispatch_to_vhost(req, cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "no vHost found");
-    }
-    #[tokio::test]
-    async fn specific_vhost() {
-        let mut req = Request::new(Body::empty());
-        req.headers_mut()
-            .insert("Host", header::HeaderValue::from_static("1:8080"));
-
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let cfg = make_host_cfg(None, Some(("1".to_string(), config::VHost::new(sa))));
-
-        let res = dispatch_to_vhost(req, cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
-    }
-    #[tokio::test]
-    async fn default_vhost() {
-        let req = Request::new(Body::empty());
-        let sa = "127.0.0.1:8080".parse().unwrap();
-
-        let cfg = make_host_cfg(Some(config::VHost::new(sa)), None);
-
-        let res = dispatch_to_vhost(req, cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
-    }
 }
 
 /// new request on a `SocketAddr`.

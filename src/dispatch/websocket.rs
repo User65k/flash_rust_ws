@@ -1,14 +1,12 @@
 use bytes::BytesMut;
 use hyper::{header, upgrade::Upgraded, Body, HeaderMap, Request, Response, StatusCode};
 use log::error;
+use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
-use std::{
-    io::{Error as IoError, ErrorKind},
-    path::{Path, PathBuf},
-};
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
+use crate::config::Utf8PathBuf;
 use async_fcgi::stream::{FCGIAddr, Stream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -17,16 +15,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub async fn upgrade(
     req: Request<Body>,
     ws: &Websocket,
-    req_path: &Path,
+    req_path: &super::WebPath<'_>,
     _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-    //check if path is deeper than it should -> 404
-    if !req_path.as_os_str().is_empty() {
-        return Err(IoError::new(ErrorKind::NotFound, "WS mount had path"));
-    }
-
     //update the request
     let mut res = Response::new(Body::empty());
+    //TODO? check if path is deeper than it should -> 404
+    if !req_path.is_empty() {
+        *res.status_mut() = StatusCode::NOT_FOUND;
+        return Ok(res);
+    }
     match *req.method() {
         hyper::Method::GET => {}
         hyper::Method::OPTIONS => {
@@ -154,17 +152,7 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
                         };
 
                         match msg.opcode() {
-                            Opcode::Text => {
-                                /*match &wscfg.encoding {
-                                    None => {*/
-                                        error!("websocket without encoding got text");break
-                                   /* },
-                                    Some(enc) => {
-                                        //TODO encode to bytes
-                                    }
-                                }*/
-                            },
-                            Opcode::Binary => {
+                            Opcode::Text  | Opcode::Binary => {
                                 if let Err(e) = backend.write_all(&msg.into_data()).await {
                                     error!("backend socket error: {}", e);
                                     break;
@@ -199,15 +187,41 @@ impl From<&WSSock> for FCGIAddr {
     fn from(addr: &WSSock) -> FCGIAddr {
         match addr {
             WSSock::TCP(s) => FCGIAddr::Inet(*s),
+            #[cfg(unix)]
             WSSock::Unix(p) => FCGIAddr::Unix(p.to_path_buf()),
         }
     }
 }
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum WSSock {
     TCP(SocketAddr),
-    Unix(PathBuf),
+    #[cfg(unix)]
+    Unix(Utf8PathBuf),
+}
+impl<'de> Deserialize<'de> for WSSock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = WSSock;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a String")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                #[cfg(unix)]
+                if v.starts_with('/') || v.starts_with("./") {
+                    return Ok(WSSock::Unix(Utf8PathBuf::from(v)));
+                }
+                Ok(WSSock::TCP(v.parse().map_err(E::custom)?))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,7 +238,6 @@ pub struct UnwrapedWS {
     assock: WSSock,
     #[serde(default)]
     forward_header: bool, // = false
-    encoding: Option<String>,
 }
 impl Websocket {
     pub async fn setup(&self) -> Result<(), String> {
@@ -243,13 +256,42 @@ mod tests {
             assock = "127.0.0.1:1337"
         "#,
         ) {
-            if let Websocket::Unwraped(u) = w {
-                assert_eq!(u.forward_header, false);
-            } else {
-                panic!("not a Unwraped webdav");
-            }
+            let Websocket::Unwraped(u) = w;
+            assert_eq!(u.forward_header, false);
         } else {
             panic!("not a webdav");
+        }
+    }
+    #[test]
+    fn parse_addr() {
+        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+            r#"
+            assock = "127.0.0.1:9000"
+        "#,
+        ) {
+            assert!(matches!(u.assock, WSSock::TCP(_)));
+        }
+        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+            r#"
+            assock = "localhost:9000"
+        "#,
+        ) {
+            assert!(matches!(u.assock, WSSock::TCP(_)));
+        }
+        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+            r#"
+            assock = "[::1]:9000"
+        "#,
+        ) {
+            assert!(matches!(u.assock, WSSock::TCP(_)));
+        }
+        #[cfg(unix)]
+        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+            r#"
+            assock = "/path"
+        "#,
+        ) {
+            assert!(matches!(u.assock, WSSock::Unix(_)));
         }
     }
 }

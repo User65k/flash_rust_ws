@@ -2,6 +2,8 @@
 use crate::dispatch::dav::Config as webdav;
 #[cfg(feature = "fcgi")]
 use crate::dispatch::fcgi::FcgiMnt;
+#[cfg(test)]
+use crate::dispatch::test::UnitTestUseCase;
 #[cfg(feature = "websocket")]
 use crate::dispatch::websocket::Websocket;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
@@ -14,9 +16,9 @@ use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
 use serde::Deserialize;
 use serde_value::Value as SerdeContent;
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsStr;
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
+use std::fs::read_to_string;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 
@@ -27,14 +29,109 @@ pub enum Authenticatoin {
                                                  //FCGI{server: FCGIApp}
 }
 
+/// We parse the Path from the config File (utf8)
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Deserialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct Utf8PathBuf(PathBuf);
+impl Utf8PathBuf {
+    pub fn empty() -> Utf8PathBuf {
+        Utf8PathBuf(PathBuf::new())
+    }
+    pub fn as_str(&self) -> &str {
+        /*match self.0.as_os_str().to_str() {
+            Some(s) => s,
+            None => unreachable!()
+        }*/
+        // SAFETY: every Utf8Path constructor ensures that self is valid UTF-8
+        unsafe { &*(self.0.as_os_str() as *const OsStr as *const str) }
+    }
+}
+impl std::ops::Deref for Utf8PathBuf {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        self.0.as_path()
+    }
+}
+impl AsRef<std::path::Path> for Utf8PathBuf {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.as_path()
+    }
+}
+impl PartialEq<OsStr> for Utf8PathBuf {
+    fn eq(&self, other: &OsStr) -> bool {
+        self.0 == other
+    }
+}
+impl From<&str> for Utf8PathBuf {
+    fn from(s: &str) -> Self {
+        Utf8PathBuf(PathBuf::from(s))
+    }
+}
+
+/// An absolute folder on the filesystem
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
+#[repr(transparent)]
+pub struct AbsPathBuf(PathBuf);
+impl AbsPathBuf {
+    #[cfg(test)]
+    pub fn temp_dir() -> AbsPathBuf {
+        AbsPathBuf(std::env::temp_dir().canonicalize().unwrap())
+    }
+}
+impl<'de> Deserialize<'de> for AbsPathBuf {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = AbsPathBuf;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a String")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(AbsPathBuf(
+                    PathBuf::from(v).canonicalize().map_err(E::custom)?,
+                ))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
+impl std::ops::Deref for AbsPathBuf {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        self.0.as_path()
+    }
+}
+impl AsRef<std::path::Path> for AbsPathBuf {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.as_path()
+    }
+}
+#[cfg(test)]
+impl From<&str> for AbsPathBuf {
+    fn from(s: &str) -> Self {
+        AbsPathBuf(
+            PathBuf::from(s)
+                .canonicalize()
+                .expect("could not canonicalize"),
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticFiles {
-    pub dir: PathBuf,
+    pub dir: AbsPathBuf,
     #[serde(default)]
     pub follow_symlinks: bool, // = false
-    pub index: Option<Vec<PathBuf>>,
-    pub serve: Option<Vec<PathBuf>>,
+    pub index: Option<Vec<Utf8PathBuf>>,
+    pub serve: Option<Vec<Utf8PathBuf>>,
 }
 impl StaticFiles {
     pub async fn setup(&self) -> Result<(), String> {
@@ -45,6 +142,7 @@ impl StaticFiles {
     }
 }
 
+/// Purpose of a single `WwwRoot`
 #[derive(Debug)]
 pub enum UseCase {
     #[cfg(feature = "fcgi")]
@@ -55,6 +153,8 @@ pub enum UseCase {
     //Proxy{host: String, path: String},
     #[cfg(feature = "webdav")]
     Webdav(webdav),
+    #[cfg(test)]
+    UnitTest(UnitTestUseCase),
 }
 /// use own deserializer to get the variant from the "main" key
 /// this helps to preserve usefull error messages
@@ -103,7 +203,7 @@ impl<'de> Deserialize<'de> for UseCase {
     }
 }
 
-/// A single directory
+/// A single directory under a `VHost`
 #[derive(Debug, Deserialize)]
 pub struct WwwRoot {
     #[serde(flatten)]
@@ -122,7 +222,7 @@ pub struct VHost {
     pub validate_server_name: bool, // = false
     #[serde(flatten)]
     #[serde(deserialize_with = "gather_mounts")]
-    pub paths: BTreeMap<PathBuf, WwwRoot>,
+    pub paths: BTreeMap<Utf8PathBuf, WwwRoot>,
 }
 
 #[cfg(test)]
@@ -139,10 +239,12 @@ impl VHost {
 }
 
 /// Gernal configuration
+///
+/// Parsed from TOML Config file
 #[derive(Debug, Deserialize)]
 pub struct Configuration {
-    pub logfile: Option<PathBuf>,
-    pub pidfile: Option<PathBuf>,
+    pub logfile: Option<Utf8PathBuf>,
+    pub pidfile: Option<Utf8PathBuf>,
     pub user: Option<String>,
     pub group: Option<String>,
     pub log: Option<LogConfig>,
@@ -181,7 +283,7 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     #[cfg(not(test))]
     let path = {
         let mut path = None;
-        for cfg_path in ["./config.toml", "/etc/defaults/frws.toml"].iter() {
+        for cfg_path in ["./config.toml", "/etc/default/frws.toml"].iter() {
             let p: PathBuf = cfg_path.into();
             if p.is_file() {
                 path = Some(p);
@@ -202,16 +304,11 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     #[cfg(test)]
     let path = "./test_cfg.toml";
 
-    let mut f =
-        File::open(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
-    //.metadata()?.len()
-    let mut buffer = Vec::new();
-
     // read the whole file
-    f.read_to_end(&mut buffer)
-        .with_context(|| format!("Failed to read config from {:?}", path))?;
+    let buffer =
+        read_to_string(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
 
-    let mut cfg = toml::from_slice::<Configuration>(&buffer)?;
+    let mut cfg = toml::from_str::<Configuration>(&buffer)?;
     for (host_name, vhost) in cfg.hosts.iter_mut() {
         info!("host: {} @ {}", host_name, vhost.ip);
         if vhost.paths.is_empty() {
@@ -221,6 +318,7 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     Ok(cfg)
 }
 
+/// Internal representation of `Configuration`.
 pub struct HostCfg {
     pub default_host: Option<VHost>,
     pub vhosts: HashMap<String, VHost>,
@@ -268,6 +366,8 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                 UseCase::Webdav(dav) => dav.setup().await,
                 #[cfg(feature = "websocket")]
                 UseCase::Websocket(f) => f.setup().await,
+                #[cfg(test)]
+                UseCase::UnitTest(_) => unreachable!(),
                 UseCase::StaticFiles(sf) => sf.setup().await,
             } {
                 errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
@@ -374,14 +474,25 @@ fn do_tcp_socket_activation() -> HashMap<SocketAddr, TcpListener> {
     ret
 }
 
-fn gather_mounts<'de, D>(deserializer: D) -> Result<BTreeMap<PathBuf, WwwRoot>, D::Error>
+/// this is like
+/// ```
+/// #[serde(flatten)]
+/// pub paths: Map<Utf8PathBuf, WwwRoot>,
+/// #[serde(flatten)]
+/// pub webroot: Option<WwwRoot>
+/// ```
+/// but puts webroot also in the paths Map (with path "")
+/// and strips acute from all the paths to allow field names as paths.
+///
+/// Also works as `#[serde(deny_unknown_fields)]`
+fn gather_mounts<'de, D>(deserializer: D) -> Result<BTreeMap<Utf8PathBuf, WwwRoot>, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct MountVisitor();
 
     impl<'de> Visitor<'de> for MountVisitor {
-        type Value = BTreeMap<PathBuf, WwwRoot>;
+        type Value = BTreeMap<Utf8PathBuf, WwwRoot>;
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             formatter.write_str("mountpoint must be a map")
         }
@@ -405,7 +516,7 @@ where
                         } else {
                             &key
                         };
-                        mounts.insert(PathBuf::from(k), r);
+                        mounts.insert(Utf8PathBuf::from(k), r);
                     }
                     Err(e) => {
                         if format!("{}", &e).ends_with("Expected struct WwwRoot") {
@@ -423,7 +534,7 @@ where
                 let iter = lefties.into_iter();
                 let mapde = serde::de::value::MapDeserializer::new(iter);
                 mounts.insert(
-                    PathBuf::new(),
+                    Utf8PathBuf::empty(),
                     WwwRoot::deserialize(mapde)
                         .map_err(|e| DeError::custom(format!("webroot: {}", e)))?,
                 );
@@ -459,11 +570,11 @@ mod tests {
     pidfile = 'bar'
 
     your.ip = "[::1]:1234" # hah
-    your.dir = "~"
+    your.dir = "."
     [host]
     ip = "0.0.0.0:1337"
     [host.path]
-    dir = "/var/www/"
+    dir = "./"
     index = ["index.html", "index.htm"]
     "#,
         );
@@ -502,20 +613,33 @@ mod tests {
             .unwrap()
             .paths
             .into_keys()
+            .map(|p| p.0)
             .collect();
         //eprintln!("{:?}", mounts);
         assert!(mounts == [PathBuf::from(""), PathBuf::from("`b"), PathBuf::from("a")]);
     }
-
-    #[tokio::test]
-    async fn dir_nonexistent() {
-        let mut cfg: Configuration = toml::from_str(
+    #[test]
+    fn dir_nonexistent() {
+        let cfg: Result<Configuration, _> = toml::from_str(
             r#"
     [host]
     ip = "0.0.0.0:1337"
     dir = "blablahui"
     "#,
-        )
+        );
+        cfg.expect_err("dir should not pass canonicalize");
+    }
+    #[tokio::test]
+    async fn dir_is_file() {
+        let tf = crate::dispatch::test::TempFile::create("bla", b"bla");
+        let mut cfg: Configuration = toml::from_str(&format!(
+            r#"
+    [host]
+    ip = "0.0.0.0:1337"
+    dir = '{}'
+    "#,
+            tf.get_path().to_str().unwrap()
+        ))
         .expect("parse err");
         assert!(group_config(&mut cfg).await.is_err());
     }

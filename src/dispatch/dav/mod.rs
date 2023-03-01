@@ -1,6 +1,12 @@
-use super::staticf::{resolve_path, return_file};
-use bytes::{Bytes, BytesMut, BufMut};
-use hyper::{body::HttpBody, header, Body, Request, Response, StatusCode};
+use crate::config::{AbsPathBuf, Utf8PathBuf};
+
+use super::staticf::{self, resolve_path, return_file, ResolveResult};
+use bytes::{BufMut, Bytes, BytesMut};
+use hyper::{
+    body::HttpBody, header, http::HeaderValue, Body, HeaderMap, Method, Request, Response,
+    StatusCode,
+};
+use serde::Deserialize;
 use std::{
     convert::TryFrom,
     io::{Error as IoError, ErrorKind, Write},
@@ -9,36 +15,37 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use hyper_staticfile::ResolveResult;
-use serde::Deserialize;
-use tokio::io::copy as redirect;
+use tokio::{fs::metadata, io::copy as redirect};
 use tokio::{
-    fs::{copy, create_dir, metadata, remove_dir_all, remove_file, rename, File},
+    fs::{copy, create_dir, remove_dir_all, remove_file, rename, File},
     io::AsyncRead,
 };
 mod propfind;
-use super::{decode_percents, normalize_path};
+#[cfg(test)]
+mod tests;
+
+#[allow(clippy::upper_case_acronyms)]
+enum DavMethod {
+    PROPFIND,
+    GET,
+    PUT,
+    COPY,
+    MOVE,
+    DELETE,
+    MKCOL,
+}
 
 /// req_path is relative from config.root
 /// web_mount is config.root from the client perspective
 pub async fn do_dav(
     req: Request<Body>,
-    req_path: &Path,
+    req_path: &super::WebPath<'_>,
     config: &Config,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
     _remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
-    let abs_doc_root = config.dav.canonicalize()?;
-    let full_path = abs_doc_root.join(req_path);
-    let mut abs_web_mount = PathBuf::from("/");
-    abs_web_mount.push(web_mount);
-    match req.method().as_ref() {
-        //strip root
-        //prepent mount
-        "PROPFIND" => {
-            propfind::handle_propfind(req, &full_path, abs_doc_root, &abs_web_mount).await
-        }
-        "OPTIONS" => {
+    let m = match req.method() {
+        &Method::OPTIONS => {
             let rb = Response::builder()
                 .status(StatusCode::OK)
                 .header(
@@ -46,34 +53,111 @@ pub async fn do_dav(
                     "GET,PUT,OPTIONS,DELETE,PROPFIND,COPY,MOVE,MKCOL",
                 )
                 .header("DAV", "1");
-            Ok(rb.body(Body::empty()).unwrap())
+            return Ok(rb.body(Body::empty()).unwrap());
         }
-        "GET" => handle_get(req, &full_path).await,
-        "PROPPATCH" => Err(IoError::new(
+        &Method::DELETE => DavMethod::DELETE,
+        &Method::GET => DavMethod::GET,
+        &Method::PUT => DavMethod::PUT,
+        m => match m.as_str() {
+            "PROPFIND" => DavMethod::PROPFIND,
+            "COPY" => DavMethod::COPY,
+            "MOVE" => DavMethod::MOVE,
+            "MKCOL" => DavMethod::MKCOL,
+            "PROPPATCH" => {
+                return Err(IoError::new(
+                    ErrorKind::PermissionDenied,
+                    "properties are read only",
+                ))
+            }
+            _ => {
+                return Ok(Response::builder()
+                    .status(StatusCode::METHOD_NOT_ALLOWED)
+                    .body(Body::empty())
+                    .expect("unable to build response"))
+            }
+        },
+    };
+    if config.read_only
+        && matches!(
+            m,
+            DavMethod::PUT
+                | DavMethod::COPY
+                | DavMethod::MOVE
+                | DavMethod::DELETE
+                | DavMethod::MKCOL
+        )
+    {
+        return Err(IoError::new(ErrorKind::PermissionDenied, "read only mount"));
+    }
+    let full_path = req_path.prefix_with(&config.dav);
+
+    if !config.follow_symlinks {
+        let fp = if matches!(m, DavMethod::PUT | DavMethod::MKCOL) {
+            //Path will be created -> check dad:
+            match full_path.parent() {
+                None => {
+                    return Err(IoError::new(
+                        ErrorKind::Other, //should not be reachable
+                        "No Parent",
+                    ));
+                }
+                Some(p) => match p.canonicalize() {
+                    Ok(c) => c,
+                    Err(ref e) if e.kind() == ErrorKind::NotFound => {
+                        let mut res = Response::new(Body::empty());
+                        *res.status_mut() = StatusCode::CONFLICT;
+                        return Ok(res);
+                    }
+                    Err(e) => return Err(e),
+                },
+            }
+        } else {
+            full_path.canonicalize()?
+        };
+        //check if the canonicalized version is still inside of the (abs) root path
+        if !fp.starts_with(&config.dav) {
+            return Err(IoError::new(
+                ErrorKind::PermissionDenied,
+                "Symlinks are not allowed",
+            ));
+        }
+    }
+
+    match m {
+        DavMethod::PROPFIND => {
+            propfind::handle_propfind(req, full_path, &config.dav, web_mount).await
+        }
+        DavMethod::GET => handle_get(req, &full_path, req_path, web_mount).await,
+        DavMethod::PUT => handle_put(req, &full_path, config.dont_overwrite).await,
+        DavMethod::MKCOL => handle_mkdir(&full_path).await,
+        DavMethod::COPY => {
+            handle_copy(
+                req.headers(),
+                &full_path,
+                &config.dav,
+                web_mount,
+                config.dont_overwrite,
+            )
+            .await
+        }
+        DavMethod::MOVE => {
+            handle_move(
+                req.headers(),
+                &full_path,
+                &config.dav,
+                web_mount,
+                config.dont_overwrite,
+            )
+            .await
+        }
+        DavMethod::DELETE if !config.dont_overwrite => handle_delete(&full_path).await,
+        DavMethod::DELETE => Err(IoError::new(
             ErrorKind::PermissionDenied,
-            "properties are read only",
+            "dont_overwrite forbids delete",
         )),
-        "PUT" if !config.read_only => handle_put(req, &full_path, config.dont_overwrite).await,
-        "COPY" if !config.read_only && !config.dont_overwrite => {
-            handle_copy(req, &full_path, &abs_doc_root, &abs_web_mount).await
-        }
-        "MOVE" if !config.read_only && !config.dont_overwrite => {
-            handle_move(req, &full_path, &abs_doc_root, &abs_web_mount).await
-        }
-        "DELETE" if !config.read_only && !config.dont_overwrite => {
-            handle_delete(req, &full_path).await
-        }
-        "MKCOL" if !config.read_only => handle_mkdir(req, &full_path).await,
-        "PUT" | "COPY" | "MOVE" | "DELETE" | "MKCOL" => {
-            Err(IoError::new(ErrorKind::PermissionDenied, "read only"))
-        }
-        _ => Ok(Response::builder()
-                .status(StatusCode::METHOD_NOT_ALLOWED)
-                .body(Body::empty())
-                .expect("unable to build response")),
     }
 }
-async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
+async fn list_dir(full_path: &Path, url_path: String) -> Result<Response<Body>, IoError> {
     let mut dir = tokio::fs::read_dir(full_path).await?;
     let mut buf = BytesMut::new().writer();
     buf.write_all(b"<html><body>")?;
@@ -89,30 +173,55 @@ async fn list_dir(req: Request<Body>, full_path: &Path) -> Result<Response<Body>
         //percent_encoding::percent_encode_byte(byte)
 
         if meta.is_dir() {
-            buf.write_all(format!("<a href=\"{0}{1}/\">{1}/</a><br/>", req.uri().path(), f.file_name().to_string_lossy()).as_bytes())?;
-        }else{
-            buf.write_all(format!("<a href=\"{0}{1}\">{1}</a> {2}<br/>", req.uri().path(), f.file_name().to_string_lossy(), meta.len()).as_bytes())?;
+            buf.write_all(
+                format!(
+                    "<a href=\"{0}{1}/\">{1}/</a><br/>",
+                    url_path,
+                    f.file_name().to_string_lossy()
+                )
+                .as_bytes(),
+            )?;
+        } else {
+            buf.write_all(
+                format!(
+                    "<a href=\"{0}{1}\">{1}</a> {2}<br/>",
+                    url_path,
+                    f.file_name().to_string_lossy(),
+                    meta.len()
+                )
+                .as_bytes(),
+            )?;
         }
     }
     buf.write_all(b"</body></html>")?;
     let res = Response::builder()
         .header(header::CONTENT_TYPE, &b"text/html; charset=UTF-8"[..])
-        .body(Body::from(buf.into_inner().freeze())).expect("unable to build response");
+        .body(Body::from(buf.into_inner().freeze()))
+        .expect("unable to build response");
     Ok(res)
 }
-async fn handle_get(req: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
-    let follow_symlinks = false;
+async fn handle_get(
+    req: Request<Body>,
+    full_path: &Path,
+    req_path: &super::WebPath<'_>,
+    web_mount: &Utf8PathBuf,
+) -> Result<Response<Body>, IoError> {
     //we could serve dir listings as well. with a litte webdav client :-D
-    let (_, file_lookup) = resolve_path(full_path, false, &None, follow_symlinks).await?;
-    if let ResolveResult::IsDirectory = file_lookup {
-        let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
-        if is_dir_request {
-            return list_dir(req, full_path).await;
-        } //else -> redirect to "path/"
+    let (_, file_lookup) = resolve_path(full_path, false, &None).await?;
+
+    match file_lookup {
+        ResolveResult::IsDirectory => {
+            let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
+            if is_dir_request {
+                list_dir(full_path, req_path.prefixed_as_abs_url_path(web_mount, 0)).await
+            } else {
+                Ok(staticf::redirect(&req, req_path, web_mount))
+            }
+        }
+        ResolveResult::Found(file, metadata, mime) => return_file(&req, file, metadata, mime).await,
     }
-    return_file(&req, file_lookup).await
 }
-async fn handle_delete(_: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
+async fn handle_delete(full_path: &Path) -> Result<Response<Body>, IoError> {
     let res = Response::new(Body::empty());
 
     let meta = metadata(full_path).await?;
@@ -125,20 +234,33 @@ async fn handle_delete(_: Request<Body>, full_path: &Path) -> Result<Response<Bo
     //HTTP NO_CONTENT ?
     Ok(res)
 }
-async fn handle_mkdir(_: Request<Body>, full_path: &Path) -> Result<Response<Body>, IoError> {
+async fn parent_exists(path: &Path) -> Result<bool, IoError> {
+    match path.parent() {
+        None => Err(IoError::new(
+            std::io::ErrorKind::PermissionDenied,
+            "No parent",
+        )),
+        Some(p) => match metadata(p).await {
+            Ok(m) => Ok(m.is_dir()),
+            Err(ref e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        },
+    }
+}
+
+async fn handle_mkdir(full_path: &Path) -> Result<Response<Body>, IoError> {
     let mut res = Response::new(Body::empty());
-    match create_dir(full_path).await {
-        Ok(_) => *res.status_mut() = StatusCode::CREATED,
-        Err(ref e) if e.kind() == ErrorKind::NotFound => {
-            /*
-            A collection cannot be made at the Request-URI until
-            one or more intermediate collections have been created.  The server
-            MUST NOT create those intermediate collections automatically.
-            */
-            *res.status_mut() = StatusCode::CONFLICT;
-        }
-        Err(e) => return Err(e),
-    };
+    if !parent_exists(full_path).await? {
+        /*
+        A collection cannot be made at the Request-URI until
+        one or more intermediate collections have been created.  The server
+        MUST NOT create those intermediate collections automatically.
+        */
+        *res.status_mut() = StatusCode::CONFLICT;
+        return Ok(res);
+    }
+    create_dir(full_path).await?;
+    *res.status_mut() = StatusCode::CREATED;
     log::info!("Created {:?}", full_path);
     /*
     415 (Unsupported Media Type) - A body was sent
@@ -180,13 +302,23 @@ impl AsyncRead for BodyW {
         }
     }
 }
-async fn handle_put(req: Request<Body>, full_path: &Path, dont_overwrite: bool) -> Result<Response<Body>, IoError> {
+async fn handle_put(
+    req: Request<Body>,
+    full_path: &Path,
+    dont_overwrite: bool,
+) -> Result<Response<Body>, IoError> {
     // Check if file exists before proceeding
-    if full_path.exists() && dont_overwrite {
+    if dont_overwrite && metadata(full_path).await.is_ok() {
         return Err(IoError::new(
             ErrorKind::AlreadyExists,
             "file overwriting is disabled",
         ));
+    }
+    if !parent_exists(full_path).await? {
+        //MUST 409 if folder does not exist
+        let mut res = Response::new(Body::empty());
+        *res.status_mut() = StatusCode::CONFLICT;
+        return Ok(res);
     }
     log::info!("about to store {:?}", full_path);
     let mut f = File::create(full_path).await?;
@@ -196,45 +328,54 @@ async fn handle_put(req: Request<Body>, full_path: &Path, dont_overwrite: bool) 
     };
     redirect(&mut b, &mut f).await?;
     let res = Response::new(Body::empty());
-    //MUST 409 if folder does not exist
     //MAY 405 if file is a folder
     Ok(res)
 }
 /// get the absolute local destination dir from the request
-fn get_dst(req: &Request<Body>, root: &Path, web_mount: &Path) -> Result<PathBuf, IoError> {
+fn get_dst(
+    header: &HeaderMap<HeaderValue>,
+    root: &AbsPathBuf,
+    web_mount: &Path,
+) -> Result<PathBuf, IoError> {
     // Get the destination
-    let dst = req
-        .headers()
+    let dst = header
         .get("Destination")
         .map(|hv| hv.as_bytes())
         .and_then(|s| hyper::Uri::try_from(s).ok())
         .ok_or_else(|| IoError::new(ErrorKind::InvalidData, "no valid destination path"))?;
 
-    let request_path = PathBuf::from(decode_percents(dst.path()));
-    let a = request_path.strip_prefix(web_mount).map_err(|_| {
+    let request_path = super::WebPath::try_from(&dst)?;
+    let path = request_path.strip_prefix(web_mount).map_err(|_| {
         IoError::new(
             ErrorKind::PermissionDenied,
             "destination path outside of mount",
         )
     })?;
-    let req_path = root.join(normalize_path(a));
+    let req_path = path.prefix_with(root);
     Ok(req_path)
 }
 async fn handle_copy(
-    req: Request<Body>,
+    header: &HeaderMap<HeaderValue>,
     src_path: &Path,
-    root: &Path,
+    root: &AbsPathBuf,
     web_mount: &Path,
+    mut dont_overwrite: bool,
 ) -> Result<Response<Body>, IoError> {
-    let dst_path = get_dst(&req, root, web_mount)?;
+    let dst_path = get_dst(header, root, web_mount)?;
     log::info!("Copy {:?} -> {:?}", src_path, dst_path);
     let mut res = Response::new(Body::empty());
+    if !parent_exists(&dst_path).await? {
+        //409 (Conflict) - No parent folder
+        *res.status_mut() = StatusCode::CONFLICT;
+        return Ok(res);
+    }
     //If a COPY request has an Overwrite header with a value of "F", and a resource exists at the Destination URL, the server MUST fail the request.
-    if let Some(b"F") = req.headers().get("Overwrite").map(|v| v.as_bytes()) {
-        if let Ok(_) = metadata(&dst_path).await {
-            *res.status_mut() = StatusCode::PRECONDITION_FAILED;
-            return Ok(res);
-        }
+    if let Some(b"F") = header.get("Overwrite").map(|v| v.as_bytes()) {
+        dont_overwrite = true;
+    }
+    if dont_overwrite && metadata(&dst_path).await.is_ok() {
+        *res.status_mut() = StatusCode::PRECONDITION_FAILED;
+        return Ok(res);
     }
     copy(src_path, dst_path).await?;
     //resulted in the creation of a new resource.
@@ -254,8 +395,6 @@ async fn handle_copy(
     COPY could be that the source and destination resources are the same
     resource.
 
-    409 (Conflict) - No parent folder
-
     423 (Locked)
     502 (Bad Gateway)
     507 (Insufficient Storage)
@@ -263,26 +402,33 @@ async fn handle_copy(
     Ok(res)
 }
 async fn handle_move(
-    req: Request<Body>,
+    header: &HeaderMap<HeaderValue>,
     src_path: &Path,
-    root: &Path,
+    root: &AbsPathBuf,
     web_mount: &Path,
+    mut dont_overwrite: bool,
 ) -> Result<Response<Body>, IoError> {
-    let dst_path = get_dst(&req, root, web_mount)?;
+    let dst_path = get_dst(header, root, web_mount)?;
     log::info!("Move {:?} -> {:?}", src_path, dst_path);
     let mut res = Response::new(Body::empty());
-    match req.headers().get("Overwrite").map(|v| v.as_bytes()) {
+    if !parent_exists(&dst_path).await? {
+        //409 (Conflict) - No parent folder
+        *res.status_mut() = StatusCode::CONFLICT;
+        return Ok(res);
+    }
+    match header.get("Overwrite").map(|v| v.as_bytes()) {
         Some(b"F") => {
-            if let Ok(_) = metadata(&dst_path).await {
-                *res.status_mut() = StatusCode::PRECONDITION_FAILED;
-                return Ok(res);
-            }
+            dont_overwrite = true;
         }
         Some(b"T") => {
             //MUST perform a DELETE with "Depth: infinity" on the destination resource.
-            handle_delete(req, &dst_path).await?;
+            handle_delete(&dst_path).await?;
         }
         _ => {}
+    }
+    if dont_overwrite && metadata(&dst_path).await.is_ok() {
+        *res.status_mut() = StatusCode::PRECONDITION_FAILED;
+        return Ok(res);
     }
     rename(src_path, dst_path).await?;
     //a new URL mapping was created at the destination.
@@ -291,7 +437,6 @@ async fn handle_move(
     204 (No Content) -> see copy
     207 (Multi-Status) -> see copy
     403 (Forbidden) -> see copy
-    409 (Conflict) -> see copy
     423 (Locked)
     502 (Bad Gateway)
     */
@@ -301,11 +446,13 @@ async fn handle_move(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub dav: PathBuf,
+    pub dav: AbsPathBuf,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
     pub dont_overwrite: bool,
+    #[serde(default)]
+    pub follow_symlinks: bool,
 }
 impl Config {
     pub async fn setup(&self) -> Result<(), String> {
@@ -313,35 +460,5 @@ impl Config {
             return Err(format!("{:?} ist not a directory", self.dav));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::config::{UseCase, group_config};
-    #[test]
-    fn basic_config() {
-        if let Ok(UseCase::Webdav(w)) = toml::from_str(
-            r#"
-    dav = "."
-        "#,
-        ) {
-            assert_eq!(w.read_only,false);
-            assert_eq!(w.dont_overwrite,false);
-        }else{
-            panic!("not a webdav");
-        }
-    }
-    #[tokio::test]
-    async fn dir_nonexistent() {
-        let mut cfg: crate::config::Configuration = toml::from_str(
-            r#"
-    [host]
-    ip = "0.0.0.0:1337"
-    dav = "blablahui"
-    "#,
-        )
-        .expect("parse err");
-        assert!(group_config(&mut cfg).await.is_err());
     }
 }

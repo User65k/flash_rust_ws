@@ -1,6 +1,9 @@
 use bytes::{Buf, BufMut, BytesMut};
 use chrono::{DateTime, Utc};
-use hyper::{body::{aggregate, HttpBody}, Body, Request, Response, StatusCode};
+use hyper::{
+    body::{aggregate, HttpBody},
+    Body, Request, Response, StatusCode,
+};
 use std::{
     fs::Metadata,
     io::{Error as IoError, ErrorKind, Read, Write},
@@ -16,11 +19,13 @@ use xml::{
     EmitterConfig, ParserConfig,
 };
 
+use crate::config::{AbsPathBuf, Utf8PathBuf};
+
 pub async fn handle_propfind(
-    mut req: Request<Body>,
-    path: &Path,
-    root: PathBuf,
-    web_mount: &Path,
+    req: Request<Body>,
+    path: PathBuf,
+    root: &AbsPathBuf,
+    web_mount: &Utf8PathBuf,
 ) -> Result<Response<Body>, IoError> {
     // Get the depth
     let depth = req
@@ -28,41 +33,13 @@ pub async fn handle_propfind(
         .get("Depth")
         .and_then(|hv| hv.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
+        .unwrap_or(u32::MAX); //infinity
 
-    let props = if let Some(0) = req.body().size_hint().exact() {
-        //Windows explorer does not send a body
-        vec![
-            OwnedName::qualified("resourcetype", "DAV", Option::<String>::None),
-            OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
-        ]
-    }else{
-        let read = aggregate(req.body_mut())
-            .await
-            .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
-            .reader();
-
-        let xml = EventReader::new_with_config(
-            read,
-            ParserConfig {
-                trim_whitespace: true,
-                ..Default::default()
-            },
-        );
-        let mut props = Vec::new();
-        if parse_propfind(xml, |prop| {
-            props.push(prop);
-        })
-        .is_err()
-        {
-            return Err(IoError::new(ErrorKind::InvalidData, "xml parse error"));
-        }
-        props
-    };
+    let props = get_props_wanted(req).await?;
 
     //log::debug!("Propfind {:?} {:?}", path, props);
 
-    let meta = metadata(path).await?;
+    let meta = metadata(&path).await?;
 
     let mut buf = BytesMut::new().writer();
     let mut xmlwriter = EventWriter::new_with_config(
@@ -83,13 +60,10 @@ pub async fn handle_propfind(
         .write(XmlWEvent::start_element("D:multistatus").ns("D", "DAV:"))
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
 
-    //if depth==0 && meta.is_dir(){
-    //    log::info!("ls {} {:?} {:?} {:?}", depth, path, &root, web_mount);
-    handle_propfind_path(&mut xmlwriter, path, &root, web_mount, &meta, &props)
+    handle_propfind_path(&mut xmlwriter, &path, root, web_mount, &meta, &props)
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
-    //}
-    if meta.is_dir() {
-        handle_propfind_path_recursive(path, &root, web_mount, depth, &mut xmlwriter, &props)
+    if meta.is_dir() && depth > 0 {
+        handle_propfind_path_recursive(&path, root, web_mount, depth, &mut xmlwriter, &props)
             .await
             .map_err(|se| IoError::new(ErrorKind::Other, se))?;
     }
@@ -103,6 +77,36 @@ pub async fn handle_propfind(
     *res.status_mut() = StatusCode::MULTI_STATUS;
     Ok(res)
 }
+
+async fn get_props_wanted(mut req: Request<Body>) -> Result<Vec<OwnedName>, IoError> {
+    if let Some(0) = req.body().size_hint().exact() {
+        //Windows explorer does not send a body
+        Ok(vec![
+            OwnedName::qualified("resourcetype", "DAV", Option::<String>::None),
+            OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
+        ])
+    } else {
+        let read = aggregate(req.body_mut())
+            .await
+            .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
+            .reader();
+
+        let xml = EventReader::new_with_config(
+            read,
+            ParserConfig {
+                trim_whitespace: true,
+                ..Default::default()
+            },
+        );
+        let mut props = Vec::new();
+        parse_propfind(xml, |prop| {
+            props.push(prop);
+        })
+        .map_err(|_| IoError::new(ErrorKind::InvalidData, "xml parse error"))?;
+        Ok(props)
+    }
+}
+
 fn parse_propfind<R: Read, F: FnMut(OwnedName)>(
     mut xml: EventReader<R>,
     mut f: F,
@@ -155,24 +159,31 @@ fn handle_propfind_path<W: Write>(
     xmlwriter: &mut EventWriter<W>,
     abs_path: &Path,
     root: &Path,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
     meta: &Metadata,
     props: &[OwnedName],
 ) -> Result<(), XmlWError> {
     xmlwriter.write(XmlWEvent::start_element("D:response"))?;
     xmlwriter.write(XmlWEvent::start_element("D:href"))?;
 
-    let url = match abs_path
+    let url = abs_path
         .strip_prefix(root)
         .ok()
-        .map(|rel_path| web_mount.join(rel_path).into_os_string())
-        .and_then(|web_path| web_path.into_string().ok())
+        .and_then(|p| p.to_str())
+        .ok_or_else(|| IoError::new(ErrorKind::Other, "path is outside of root"))?;
+
+    xmlwriter.write(XmlWEvent::characters("/"))?;
+    xmlwriter.write(XmlWEvent::characters(web_mount.as_str()))?;
+    #[cfg(unix)]
     {
-        Some(url) => url,
-        None => return Err(IoError::new(ErrorKind::Other, "path is outside of root").into()),
-    };
-    log::trace!("Entry: {}", url);
-    xmlwriter.write(XmlWEvent::characters(&url))?;
+        xmlwriter.write(XmlWEvent::characters("/"))?;
+        xmlwriter.write(XmlWEvent::characters(&url))?;
+    }
+    #[cfg(windows)]
+    for p in url.split('\\') {
+        xmlwriter.write(XmlWEvent::characters("/"))?;
+        xmlwriter.write(XmlWEvent::characters(p))?;
+    }
     xmlwriter.write(XmlWEvent::end_element())?; // href
 
     let mut failed_props = Vec::with_capacity(props.len());
@@ -218,7 +229,7 @@ fn handle_propfind_path<W: Write>(
 async fn handle_propfind_path_recursive<W: Write>(
     path: &Path,
     root: &Path,
-    web_mount: &Path,
+    web_mount: &Utf8PathBuf,
     depth: u32,
     xmlwriter: &mut EventWriter<W>,
     props: &[OwnedName],
@@ -240,7 +251,11 @@ async fn handle_propfind_path_recursive<W: Write>(
         // Ignore errors in order to try the other files. This could fail for
         // connection reasons (not file I/O), but those should retrigger and
         // get passed up on subsequent xml writes
-        let _ = handle_propfind_path_recursive(&path, root, web_mount, depth - 1, xmlwriter, props);
+        if meta.is_dir() && depth > 1 {
+            //no symlinks
+            let _ =
+                handle_propfind_path_recursive(&path, root, web_mount, depth - 1, xmlwriter, props);
+        }
     }
     Ok(())
 }

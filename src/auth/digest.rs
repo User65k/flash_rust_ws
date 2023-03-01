@@ -239,9 +239,8 @@ pub async fn check_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::test::TempFile;
     use crate::logging::init_stderr_logging;
-    use std::fs::File;
-    use std::io::prelude::*;
     use std::path::PathBuf;
 
     fn create_req(header: Option<&str>) -> Request<Body> {
@@ -265,70 +264,66 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_success() {
-        let path = PathBuf::from(r"/tmp/auth_suc");
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a")
-            .expect("could not write cfg file");
+        let f = TempFile::create(
+            r"auth_suc",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm"))
+        let e = check_digest(f.get_path(), &h, &String::from("a realm"))
             .await
             .unwrap();
-        println!("{:?}", e);
         assert!(e.is_none());
     }
     #[tokio::test]
     async fn auth_success_multi() {
-        let path = PathBuf::from(r"/tmp/auth_suc0");
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(b"egal:1:1\r\ndani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a\r\n")
-            .expect("could not write cfg file");
+        let f = TempFile::create(
+            r"auth_suc0",
+            b"egal:1:1\r\ndani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a\r\n",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm"))
+        let e = check_digest(f.get_path(), &h, &String::from("a realm"))
             .await
             .unwrap();
-        println!("{:?}", e);
         assert!(e.is_none());
     }
     #[tokio::test]
     async fn auth_success_sess() {
-        let path = PathBuf::from(r"/tmp/auth_suc2");
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a")
-            .expect("could not write cfg file");
+        let f = TempFile::create(
+            r"auth_suc2",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/favicon.ico\", algorithm=MD5-sess, response=\"f02dcc493b488cc25d503c15765a3005\", qop=auth, nc=00000002, cnonce=\"30d60c5e1664d9cb\""));
-        let e = check_digest(&path, &h, &String::from("a realm"))
+        let e = check_digest(f.get_path(), &h, &String::from("a realm"))
             .await
             .unwrap();
-        println!("{:?}", e);
         assert!(e.is_none());
     }
     #[tokio::test]
     async fn auth_success_qop_auth() {
-        let path = PathBuf::from(r"/tmp/auth_suc3");
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a")
-            .expect("could not write cfg file");
+        let f = TempFile::create(
+            r"auth_suc3",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/\", response=\"d2f5ad3b664dd98d2dcb700d8027afec\", qop=auth, nc=00000001, cnonce=\"ceee320d38ca229e\""));
-        let e = check_digest(&path, &h, &String::from("a realm"))
+        let e = check_digest(f.get_path(), &h, &String::from("a realm"))
             .await
             .unwrap();
-        println!("{:?}", e);
         assert!(e.is_none());
     }
     #[tokio::test]
     async fn auth_wrong_pw() {
         init_stderr_logging();
-        let path = PathBuf::from(r"/tmp/auth_fail");
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a")
-            .expect("could not write cfg file");
+        let f = TempFile::create(
+            r"auth_fail",
+            b"dani:a realm:0d1bfde1dbff91ac4b0c219dec6fc86a",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"7a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm"))
+        let e = check_digest(f.get_path(), &h, &String::from("a realm"))
             .await
             .unwrap()
             .unwrap();
@@ -336,13 +331,13 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_wrong_user() {
-        let path = PathBuf::from(r"/tmp/auth_nouser");
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(b"daniel:a realm:109c7da4a649a1da4a35843583146140")
-            .expect("could not write cfg file");
+        let f = TempFile::create(
+            r"auth_nouser",
+            b"daniel:a realm:109c7da4a649a1da4a35843583146140",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm"))
+        let e = check_digest(f.get_path(), &h, &String::from("a realm"))
             .await
             .unwrap()
             .unwrap();
@@ -350,13 +345,13 @@ mod tests {
     }
     #[tokio::test]
     async fn auth_wrong_realm() {
-        let path = PathBuf::from(r"/tmp/auth_realm");
-        let mut file = File::create(&path).expect("could not create htdigest file");
-        file.write_all(b"dani:another realm:1a30634ead89d6934aa82b933863acf3")
-            .expect("could not write cfg file");
+        let f = TempFile::create(
+            r"auth_realm",
+            b"dani:another realm:1a30634ead89d6934aa82b933863acf3",
+        );
 
         let h = create_req(Some("Digest username=\"dani\", realm=\"a realm\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", uri=\"/cool\", response=\"8a1415c70ae45a88a2a83f896b30bfc3\""));
-        let e = check_digest(&path, &h, &String::from("a realm"))
+        let e = check_digest(f.get_path(), &h, &String::from("a realm"))
             .await
             .unwrap()
             .unwrap();
