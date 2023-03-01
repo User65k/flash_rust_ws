@@ -334,7 +334,7 @@ async fn handle_put(
 /// get the absolute local destination dir from the request
 fn get_dst(
     header: &HeaderMap<HeaderValue>,
-    root: &Path,
+    root: &AbsPathBuf,
     web_mount: &Path,
 ) -> Result<PathBuf, IoError> {
     // Get the destination
@@ -357,7 +357,7 @@ fn get_dst(
 async fn handle_copy(
     header: &HeaderMap<HeaderValue>,
     src_path: &Path,
-    root: &Path,
+    root: &AbsPathBuf,
     web_mount: &Path,
     mut dont_overwrite: bool,
 ) -> Result<Response<Body>, IoError> {
@@ -404,7 +404,7 @@ async fn handle_copy(
 async fn handle_move(
     header: &HeaderMap<HeaderValue>,
     src_path: &Path,
-    root: &Path,
+    root: &AbsPathBuf,
     web_mount: &Path,
     mut dont_overwrite: bool,
 ) -> Result<Response<Body>, IoError> {

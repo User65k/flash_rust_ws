@@ -180,8 +180,7 @@ async fn handle_vhost(
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
         if let Ok(full_path) = req_path.strip_prefix(mount_path) {
-            let req_path = full_path.clone(); // T_T
-            drop(full_path);
+            let req_path = full_path.into_owned(); // T_T
             let mut resp = handle_wwwroot(req, wwwr, req_path, mount_path, remote_addr).await?;
             insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
             return Ok(resp);

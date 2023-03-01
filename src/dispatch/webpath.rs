@@ -1,10 +1,10 @@
 use hyper::Uri;
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
-use crate::config::Utf8PathBuf;
+use crate::config::{Utf8PathBuf, AbsPathBuf};
 
 impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
     type Error = IoError;
@@ -70,8 +70,8 @@ pub struct WebPath<'a>(Cow<'a, str>);
 impl<'a> WebPath<'a> {
     /// turn it into a path by appending. Never replace the existing root!
     /// rustsec_2022_0072
-    pub fn prefix_with(&self, pre: &Path) -> PathBuf {
-        let pres: &OsStr = pre.as_ref();
+    pub fn prefix_with(&self, pre: &AbsPathBuf) -> PathBuf {
+        let pres: &OsStr = pre.as_os_str();
         let mut r = OsString::with_capacity(pres.len() + 1 + self.0.len());
         r.push(pres);
         if let Some(false) = pres.to_str().map(|s| s.ends_with(MAIN_SEPARATOR)) {
@@ -82,7 +82,7 @@ impl<'a> WebPath<'a> {
         r.push(self.0.as_ref());
         #[cfg(windows)]
         {
-            //we only need to this if path starts with "\\?\"
+            //we only need to this if path starts with "\\?\" - AbsPathBuf does
             let mut path = self.0.split('/');
             r.push(path.next().unwrap());
             for p in path {
@@ -99,9 +99,9 @@ impl<'a> WebPath<'a> {
         loop {
             match (strip.next(), path.next()) {
                 (None, None) => {
-                    offset -= 1;
+                    offset -= 1; //no next dir -> no final separator
                     break;
-                } //no next dir -> no final separator
+                }
                 (Some(c), p @ Some(s)) if c.as_os_str().to_str() == p => offset += 1 + s.len(),
                 (None, Some(_)) => break,
                 _ => return Err(()),
@@ -129,10 +129,13 @@ impl<'a> WebPath<'a> {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    pub fn clone<'b>(&self) -> WebPath<'b> {
+    /// Get rid of the linked lifetime
+    pub fn into_owned<'b>(self) -> WebPath<'b> {
         // not as trait as we change lifetime
-        let s: &str = self.0.borrow();
-        WebPath(Cow::Owned(s.to_owned()))
+        match self.0 {
+            Cow::Borrowed(b) => WebPath(Cow::Owned(b.to_owned())),
+            Cow::Owned(o) => WebPath(Cow::Owned(o)),
+        }
     }
     #[cfg(test)]
     pub fn parsed(v: &'a str) -> WebPath<'a> {
@@ -181,18 +184,20 @@ mod tests {
     }
     #[test]
     fn rustsec_2022_0072() {
+        let td = AbsPathBuf::temp_dir();
+        let temp = td.to_str().expect("Temp dir needs to be utf8 for testing");
         assert_eq!(
             WebPath::try_from(&"/c:/b".parse().unwrap())
                 .unwrap()
-                .prefix_with(Path::new("test")),
-            Path::new("test/c:/b")
+                .prefix_with(&AbsPathBuf::temp_dir()).as_os_str(),
+                OsString::from(format!("{0}{1}c:{1}b", temp, MAIN_SEPARATOR))
         );
 
         assert_eq!(
             WebPath::try_from(&"/a/c:/b/d".parse().unwrap())
                 .unwrap()
-                .prefix_with(Path::new("test")),
-            Path::new("test/a/c:/b/d")
+                .prefix_with(&AbsPathBuf::temp_dir()).as_os_str(),
+                OsString::from(format!("{0}{1}a{1}c:{1}b{1}d", temp, MAIN_SEPARATOR))
         );
     }
     #[test]
