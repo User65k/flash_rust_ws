@@ -14,7 +14,6 @@ use log::info;
 use log4rs::config::RawConfig as LogConfig;
 use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
 use serde::Deserialize;
-use toml::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fmt;
@@ -163,42 +162,37 @@ impl<'de> Deserialize<'de> for UseCase {
     where
         D: Deserializer<'de>,
     {
-        let content = Value::deserialize(deserializer)?;
+        let tree = toml::Table::deserialize(deserializer)?;
 
-        match &content {
-            Value::Table(tree) => {
-                if tree.contains_key("fcgi") {
-                    #[cfg(feature = "fcgi")]
-                    return Ok(UseCase::FCGI(
-                        FcgiMnt::deserialize(content).map_err(DeError::custom)?,
-                    ));
-                    #[cfg(not(feature = "fcgi"))]
-                    return Err(DeError::custom("fcgi support is disabled"));
-                } else if tree.contains_key("assock") {
-                    #[cfg(feature = "websocket")]
-                    return Ok(UseCase::Websocket(
-                        Websocket::deserialize(content).map_err(DeError::custom)?,
-                    ));
-                    #[cfg(not(feature = "websocket"))]
-                    return Err(DeError::custom("websocket support is disabled"));
-                } else if tree.contains_key("dav") {
-                    #[cfg(feature = "webdav")]
-                    return Ok(UseCase::Webdav(
-                        webdav::deserialize(content).map_err(DeError::custom)?,
-                    ));
-                    #[cfg(not(feature = "webdav"))]
-                    return Err(DeError::custom("webdav support is disabled"));
-                } else if tree.contains_key("dir") {
-                    Ok(UseCase::StaticFiles(
-                        StaticFiles::deserialize(content).map_err(DeError::custom)?,
-                    ))
-                } else {
-                    Err(DeError::custom(
-                        "Missing one of fcgi, assock, dav, dir - expected struct WwwRoot",
-                    ))
-                }
-            }
-            _ => Err(DeError::custom(format!("Invalid type {} - expected struct WwwRoot", content.type_str()))),
+        if tree.contains_key("fcgi") {
+            #[cfg(feature = "fcgi")]
+            return Ok(UseCase::FCGI(
+                FcgiMnt::deserialize(tree).map_err(DeError::custom)?,
+            ));
+            #[cfg(not(feature = "fcgi"))]
+            return Err(DeError::custom("fcgi support is disabled"));
+        } else if tree.contains_key("assock") {
+            #[cfg(feature = "websocket")]
+            return Ok(UseCase::Websocket(
+                Websocket::deserialize(tree).map_err(DeError::custom)?,
+            ));
+            #[cfg(not(feature = "websocket"))]
+            return Err(DeError::custom("websocket support is disabled"));
+        } else if tree.contains_key("dav") {
+            #[cfg(feature = "webdav")]
+            return Ok(UseCase::Webdav(
+                webdav::deserialize(tree).map_err(DeError::custom)?,
+            ));
+            #[cfg(not(feature = "webdav"))]
+            return Err(DeError::custom("webdav support is disabled"));
+        } else if tree.contains_key("dir") {
+            Ok(UseCase::StaticFiles(
+                StaticFiles::deserialize(tree).map_err(DeError::custom)?,
+            ))
+        } else {
+            Err(DeError::custom(
+                "Missing one of fcgi, assock, dav, dir - expected struct WwwRoot",
+            ))
         }
     }
 }
@@ -501,10 +495,10 @@ where
             M: MapAccess<'de>,
         {
             let mut mounts = BTreeMap::new();
-            let mut lefties = HashMap::new();
+            let mut lefties = toml::Table::new();
 
             while let Some(key) = map.next_key::<String>()? {
-                let content: Value = map
+                let content: toml::Value = map
                     .next_value()
                     .map_err(|e| DeError::custom(format!("{}: {}", &key, e)))?;
                 let de = content.clone();
@@ -519,7 +513,7 @@ where
                         mounts.insert(Utf8PathBuf::from(k), r);
                     }
                     Err(e) => {
-                        if format!("{}", &e).ends_with("expected struct WwwRoot\n") {
+                        if e.message().ends_with("expected struct WwwRoot") {
                             //UseCase error -> maybe ok
                             lefties.insert(key, content);
                         } else {
@@ -531,11 +525,9 @@ where
             }
 
             if !lefties.is_empty() {
-                let iter = lefties.into_iter();
-                let mapde = serde::de::value::MapDeserializer::new(iter);
                 mounts.insert(
                     Utf8PathBuf::empty(),
-                    WwwRoot::deserialize(mapde)
+                    WwwRoot::deserialize(lefties)
                         .map_err(|e| DeError::custom(format!("webroot: {}", e)))?,
                 );
             }
