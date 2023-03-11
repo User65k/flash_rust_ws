@@ -173,6 +173,7 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
                             Ok(data) => data,
                             Err(e) => {error!("backend socket error: {}", e);break},
                         };
+                        if data==0 {break;}
                         let _ = frontend.send(Message::binary(buffer.split_to(data))).await;
                     }
                 }
