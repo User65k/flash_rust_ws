@@ -459,6 +459,7 @@ mod tests {
     }
     #[tokio::test]
     async fn wrong_cfg() {
+        //no static files
         let mut cfg: crate::config::Configuration = toml::from_str(
             r#"
     [host]
@@ -470,6 +471,7 @@ mod tests {
         )
         .expect("parse err");
         assert!(group_config(&mut cfg).await.is_err());
+        //no exec filter
         let mut cfg: crate::config::Configuration = toml::from_str(
             r#"
     [host]
@@ -639,6 +641,38 @@ mod tests {
         assert_eq!(res.status(), 200);
         let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
         assert_eq!(body, file_content);
+    }
+    #[tokio::test]
+    async fn dont_resolve_file() {
+        let file_content = &b"test_fcgi_fallthroug"[..];
+        let _tf = crate::dispatch::test::TempFile::create("dont_fallthroug.php", file_content);
+
+        let sf = StaticFiles {
+            dir: AbsPathBuf::temp_dir(),
+            follow_symlinks: true,//less checks
+            index: None,
+            serve: None,
+        };
+        let mount = UseCase::FCGI(FcgiMnt {
+            fcgi: FCGIApp {
+                sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+                exec: Some(vec![Utf8PathBuf::from("php")]),
+                set_script_filename: false,
+                set_request_uri: false,
+                timeout: 0,
+                params: None,
+                bin: None,
+                app: None,
+            },
+            static_files: Some(sf),
+        });
+
+        let req = Request::get("/mount/dont_fallthroug.php%00.txt")
+            .body(Body::empty())
+            .unwrap();
+        let res = handle_wwwroot(req, mount, "dont_fallthroug.php\0.txt").await;
+        let res = res.unwrap_err();
+        assert_eq!(res.kind(), std::io::ErrorKind::InvalidInput);
     }
     /*#[tokio::test]
     async fn body_no_len() {

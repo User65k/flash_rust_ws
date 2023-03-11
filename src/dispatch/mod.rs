@@ -261,7 +261,7 @@ pub(crate) async fn handle_request(
                 ErrorKind::PermissionDenied => Response::builder()
                     .status(StatusCode::FORBIDDEN)
                     .body(Body::empty()),
-                ErrorKind::InvalidData => Response::builder()
+                ErrorKind::InvalidInput | ErrorKind::InvalidData => Response::builder()
                     .status(StatusCode::BAD_REQUEST)
                     .body(Body::empty()),
                 ErrorKind::BrokenPipe
