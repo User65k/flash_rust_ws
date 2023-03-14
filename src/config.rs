@@ -87,7 +87,7 @@ impl<'de> Deserialize<'de> for AbsPathBuf {
         impl<'de> serde::de::Visitor<'de> for Visitor {
             type Value = AbsPathBuf;
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a String")
+                formatter.write_str("a path on the file system")
             }
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
             where
@@ -303,10 +303,9 @@ pub fn load_config() -> anyhow::Result<Configuration> {
         read_to_string(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
 
     let mut cfg = toml::from_str::<Configuration>(&buffer)?;
-    for (host_name, vhost) in cfg.hosts.iter_mut() {
-        info!("host: {} @ {}", host_name, vhost.ip);
-        if vhost.paths.is_empty() {
-            anyhow::bail!("vHost \"{}\" does not serve anything", host_name);
+    if log::log_enabled!(log::Level::Info) {
+        for (host_name, vhost) in cfg.hosts.iter_mut() {
+                info!("host: {} @ {}", host_name, vhost.ip);
         }
     }
     Ok(cfg)
@@ -532,10 +531,14 @@ where
                 );
             }
 
+            if mounts.is_empty() {
+                return Err(DeError::custom("vHost does not serve anything"));
+            }
+
             Ok(mounts)
         }
     }
-    deserializer.deserialize_any(MountVisitor())
+    deserializer.deserialize_map(MountVisitor())
 }
 
 #[cfg(test)]
