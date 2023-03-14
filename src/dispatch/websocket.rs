@@ -250,6 +250,13 @@ impl Websocket {
 mod tests {
     use super::*;
     use crate::config::UseCase;
+    use tokio::net::TcpListener;
+    pub(crate) async fn local_socket_pair() -> Result<(TcpListener, SocketAddr),std::io::Error> {
+        let a: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let app_listener = TcpListener::bind(a).await?;
+        let a = app_listener.local_addr()?;
+        Ok((app_listener, a))
+    }
     #[test]
     fn basic_config() {
         if let Ok(UseCase::Websocket(w)) = toml::from_str(
@@ -294,5 +301,22 @@ mod tests {
         ) {
             assert!(matches!(u.assock, WSSock::Unix(_)));
         }
+    }
+    #[tokio::test]
+    async fn insert_header() {
+        let (l, a) = local_socket_pair().await.unwrap();
+        tokio::spawn(async move {
+            let (mut s, _a) = l.accept().await.unwrap();
+            let mut buf = Vec::with_capacity(400);
+            let _l = s.read_buf(&mut buf).await.unwrap();
+            assert_eq!(buf,
+                b"accept: *\r\npragma: no-cache\r\n\r\n");
+        });
+        let mut backend = Stream::connect(&a.into()).await.unwrap();
+        let mut header = HeaderMap::new();
+        header.insert("accept", "*".parse().unwrap());
+        header.insert("pragma", "no-cache".parse().unwrap());
+        header.insert("upgrade", "upgrade".parse().unwrap());
+        send_header(&mut backend, header).await.unwrap();
     }
 }
