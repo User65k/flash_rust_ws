@@ -320,7 +320,7 @@ pub struct HostCfg {
     pub tls: Option<ParsedTLSConfig>,
 }
 impl HostCfg {
-    fn new(listener: TcpListener) -> HostCfg {
+    pub fn new(listener: TcpListener) -> HostCfg {
         HostCfg {
             default_host: None,
             vhosts: HashMap::new(),

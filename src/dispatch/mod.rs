@@ -4,7 +4,7 @@ pub mod dav;
 pub mod fcgi;
 mod staticf;
 #[cfg(test)]
-pub mod test;
+pub(crate) mod test;
 mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
