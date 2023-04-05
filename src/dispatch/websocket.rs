@@ -248,15 +248,13 @@ impl Websocket {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
+    use tokio::task::JoinHandle;
+
     use super::*;
-    use crate::config::UseCase;
-    use tokio::net::TcpListener;
-    pub(crate) async fn local_socket_pair() -> Result<(TcpListener, SocketAddr),std::io::Error> {
-        let a: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let app_listener = TcpListener::bind(a).await?;
-        let a = app_listener.local_addr()?;
-        Ok((app_listener, a))
-    }
+    use crate::config::*;
+    use crate::tests::local_socket_pair;
     #[test]
     fn basic_config() {
         if let Ok(UseCase::Websocket(w)) = toml::from_str(
@@ -318,5 +316,68 @@ mod tests {
         header.insert("pragma", "no-cache".parse().unwrap());
         header.insert("upgrade", "upgrade".parse().unwrap());
         send_header(&mut backend, header).await.unwrap();
+    }
+    async fn connect_to_ws(ws_cfg: Websocket) -> Result<tokio::net::TcpStream, Box<dyn Error>> {
+        //We can not use a Request Object for the test,
+        //as it has no associated connection
+        let (l, a) = local_socket_pair().await?;
+
+        let mut listening_ifs = std::collections::HashMap::new();
+        let mut cfg = HostCfg::new(l.into_std()?);
+        let mut vh = VHost::new(a);
+        vh.paths.insert(Utf8PathBuf::from("a"), 
+        WwwRoot {
+            mount: UseCase::Websocket(ws_cfg),
+            header: None,
+            auth: None,
+        });
+        cfg.default_host = Some(vh);
+        listening_ifs.insert(a, cfg);
+
+        let _s = crate::prepare_hyper_servers(listening_ifs).await?;
+
+        let mut test = tokio::net::TcpStream::connect(a).await?;
+        test.write_all(b"GET /a/ HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==\r\n\r\n\r\n").await?;
+        Ok(test)
+    }
+    #[tokio::test]
+    async fn as_sock() {
+        let (l, a) = local_socket_pair().await.unwrap();
+
+        let ws_cfg = Websocket::Unwraped(UnwrapedWS { assock: WSSock::TCP(a), forward_header: false });
+
+        let t: JoinHandle<Result<(),std::io::Error>> = tokio::spawn(async move {
+            let (mut s, _a) = l.accept().await?;
+            //println!("connected");
+            /*
+            let mut buf = Vec::with_capacity(400);
+            let _l = s.read_buf(&mut buf).await.unwrap();*/
+/*
+            let mut buf = [0u8;12];
+            let i = s.read_exact(&mut buf).await?;
+            println!("got {}", i);
+            assert_eq!(&buf[..i], b"test message");
+            println!("got data");*/
+            s.write_all(b"answ").await?;
+            Ok(())
+        });
+
+        let mut test = connect_to_ws(ws_cfg).await.unwrap();
+
+        let mut buf = [0u8;512];
+        let i = test.read(&mut buf).await.unwrap();
+        assert!(i > 15);
+        assert_eq!(&buf[..15], b"HTTP/1.1 101 Sw");
+        //println!("{}", String::from_utf8_lossy(&buf[..i]));
+
+        //test.write_all(b"\x81\x8c\xe1\x7e\x8e\xb9\x95\x1b\xfd\xcd\xc1\x13\xeb\xca\x92\x1f\xe9\xdc").await.unwrap();
+        //test.write_all(b"\x81\x8c\0\0\0\0test message").await.unwrap();
+        //println!("written");
+    
+        let mut vec = Vec::new();
+        test.read_to_end(&mut vec).await.unwrap();
+
+        t.await.unwrap().unwrap();
+        assert_eq!(vec, b"\x82\x04answ\x88\0");
     }
 }
