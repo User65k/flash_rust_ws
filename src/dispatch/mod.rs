@@ -18,18 +18,17 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 pub fn insert_default_headers(
     header: &mut header::HeaderMap<header::HeaderValue>,
-    config_header: &Option<HashMap<String, String>>,
-) -> Result<(), Box<dyn Error>> {
+    config_header: &Option<HashMap<crate::config::HeaderNameCfg, crate::config::HeaderValueCfg>>,
+) {
     if let Some(config_header) = config_header {
-        for (key, value) in config_header.iter() {
-            let key = header::HeaderName::from_bytes(key.as_bytes())?;
-            if !header.contains_key(&key) {
-                header.insert(key, header::HeaderValue::from_str(value)?);
+        for (key, val) in config_header.iter() {
+            if !header.contains_key(&key.0) {
+                header.insert(key.0.clone(), val.0.clone());
             }
         }
     }
@@ -47,7 +46,6 @@ pub fn insert_default_headers(
             header.insert(key, header::HeaderValue::from_static(value));
         }
     }
-    Ok(())
 }
 fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
     if let Some(whitelist) = list {
@@ -182,7 +180,7 @@ async fn handle_vhost(
         if let Ok(full_path) = req_path.strip_prefix(mount_path) {
             let req_path = full_path.into_owned(); // T_T
             let mut resp = handle_wwwroot(req, wwwr, req_path, mount_path, remote_addr).await?;
-            insert_default_headers(resp.headers_mut(), &wwwr.header).unwrap(); //save bacause checked at server start
+            insert_default_headers(resp.headers_mut(), &wwwr.header);
             return Ok(resp);
         }
     }
