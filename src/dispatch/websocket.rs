@@ -337,7 +337,7 @@ mod tests {
         let _s = crate::prepare_hyper_servers(listening_ifs).await?;
 
         let mut test = tokio::net::TcpStream::connect(a).await?;
-        test.write_all(b"GET /a/ HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==\r\n\r\n\r\n").await?;
+        test.write_all(b"GET /a HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==\r\n\r\n").await?;
         Ok(test)
     }
     #[tokio::test]
@@ -348,16 +348,11 @@ mod tests {
 
         let t: JoinHandle<Result<(),std::io::Error>> = tokio::spawn(async move {
             let (mut s, _a) = l.accept().await?;
-            //println!("connected");
-            /*
-            let mut buf = Vec::with_capacity(400);
-            let _l = s.read_buf(&mut buf).await.unwrap();*/
-/*
+
             let mut buf = [0u8;12];
             let i = s.read_exact(&mut buf).await?;
-            println!("got {}", i);
             assert_eq!(&buf[..i], b"test message");
-            println!("got data");*/
+            
             s.write_all(b"answ").await?;
             Ok(())
         });
@@ -368,16 +363,28 @@ mod tests {
         let i = test.read(&mut buf).await.unwrap();
         assert!(i > 15);
         assert_eq!(&buf[..15], b"HTTP/1.1 101 Sw");
-        //println!("{}", String::from_utf8_lossy(&buf[..i]));
 
-        //test.write_all(b"\x81\x8c\xe1\x7e\x8e\xb9\x95\x1b\xfd\xcd\xc1\x13\xeb\xca\x92\x1f\xe9\xdc").await.unwrap();
-        //test.write_all(b"\x81\x8c\0\0\0\0test message").await.unwrap();
-        //println!("written");
-    
+        /*WebSocket
+            1... .... = Fin: True
+            .000 .... = Reserved: 0x0
+            .... 0001 = Opcode: Text (1)
+            1... .... = Mask: True
+            .000 1100 = Payload length: 12
+            Masking-Key: e17e8eb9
+            Masked payload
+            Payload
+        JavaScript Object Notation
+        Line-based text data
+            test message*/
+        test.write_all(b"\x81\x8c\xe1\x7e\x8e\xb9\x95\x1b\xfd\xcd\xc1\x13\xeb\xca\x92\x1f\xe9\xdc").await.unwrap();
+        
         let mut vec = Vec::new();
         test.read_to_end(&mut vec).await.unwrap();
 
         t.await.unwrap().unwrap();
+        /*
+        Opcode Binary + Opcode Close
+         */
         assert_eq!(vec, b"\x82\x04answ\x88\0");
     }
 }
