@@ -649,7 +649,7 @@ mod tests {
 
         let sf = StaticFiles {
             dir: AbsPathBuf::temp_dir(),
-            follow_symlinks: true,//less checks
+            follow_symlinks: true, //less checks
             index: None,
             serve: None,
         };
@@ -699,13 +699,17 @@ mod tests {
     }*/
     #[tokio::test]
     async fn simple_fcgi_post() {
-        use tokio::{net::TcpListener, io::{AsyncWriteExt, AsyncReadExt}};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
         async fn mock_app(app_listener: TcpListener) {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             let mut buf = BytesMut::with_capacity(4096);
             //FCGI startup
             app_socket.read_buf(&mut buf).await.unwrap();
-            let from_php = b"\x01\x0a\0\0\0!\x07\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\0MAX_CONNS\0\0\0\0\0\0\0";
+            let from_php =
+                b"\x01\x0a\0\0\0!\x07\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\0MAX_CONNS\0\0\0\0\0\0\0";
             app_socket
                 .write_buf(&mut Bytes::from(&from_php[..]))
                 .await
@@ -750,8 +754,10 @@ mod tests {
             &Utf8PathBuf::from(""),
             Some(Path::new("/home/daniel/Public/test.php")),
             "127.0.0.1:1337".parse().unwrap(),
-        ).await.expect("forward failed");
-        
+        )
+        .await
+        .expect("forward failed");
+
         assert_eq!(res.status(), hyper::StatusCode::CREATED);
         let read1 = res.data().await;
         assert!(read1.is_some());

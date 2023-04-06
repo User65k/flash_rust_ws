@@ -216,7 +216,9 @@ impl<'de> Deserialize<'de> for HeaderNameCfg {
             where
                 E: serde::de::Error,
             {
-                Ok(HeaderNameCfg(HeaderName::from_bytes(v.as_bytes()).map_err(E::custom)?))
+                Ok(HeaderNameCfg(
+                    HeaderName::from_bytes(v.as_bytes()).map_err(E::custom)?,
+                ))
             }
         }
         deserializer.deserialize_str(Visitor)
@@ -355,7 +357,7 @@ pub fn load_config() -> anyhow::Result<Configuration> {
     let mut cfg = toml::from_str::<Configuration>(&buffer)?;
     if log::log_enabled!(log::Level::Info) {
         for (host_name, vhost) in cfg.hosts.iter_mut() {
-                info!("host: {} @ {}", host_name, vhost.ip);
+            info!("host: {} @ {}", host_name, vhost.ip);
         }
     }
     Ok(cfg)

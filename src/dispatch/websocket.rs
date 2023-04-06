@@ -307,8 +307,7 @@ mod tests {
             let (mut s, _a) = l.accept().await.unwrap();
             let mut buf = Vec::with_capacity(400);
             let _l = s.read_buf(&mut buf).await.unwrap();
-            assert_eq!(buf,
-                b"accept: *\r\npragma: no-cache\r\n\r\n");
+            assert_eq!(buf, b"accept: *\r\npragma: no-cache\r\n\r\n");
         });
         let mut backend = Stream::connect(&a.into()).await.unwrap();
         let mut header = HeaderMap::new();
@@ -325,12 +324,14 @@ mod tests {
         let mut listening_ifs = std::collections::HashMap::new();
         let mut cfg = HostCfg::new(l.into_std()?);
         let mut vh = VHost::new(a);
-        vh.paths.insert(Utf8PathBuf::from("a"), 
-        WwwRoot {
-            mount: UseCase::Websocket(ws_cfg),
-            header: None,
-            auth: None,
-        });
+        vh.paths.insert(
+            Utf8PathBuf::from("a"),
+            WwwRoot {
+                mount: UseCase::Websocket(ws_cfg),
+                header: None,
+                auth: None,
+            },
+        );
         cfg.default_host = Some(vh);
         listening_ifs.insert(a, cfg);
 
@@ -344,22 +345,25 @@ mod tests {
     async fn as_sock() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let ws_cfg = Websocket::Unwraped(UnwrapedWS { assock: WSSock::TCP(a), forward_header: false });
+        let ws_cfg = Websocket::Unwraped(UnwrapedWS {
+            assock: WSSock::TCP(a),
+            forward_header: false,
+        });
 
-        let t: JoinHandle<Result<(),std::io::Error>> = tokio::spawn(async move {
+        let t: JoinHandle<Result<(), std::io::Error>> = tokio::spawn(async move {
             let (mut s, _a) = l.accept().await?;
 
-            let mut buf = [0u8;12];
+            let mut buf = [0u8; 12];
             let i = s.read_exact(&mut buf).await?;
             assert_eq!(&buf[..i], b"test message");
-            
+
             s.write_all(b"answ").await?;
             Ok(())
         });
 
         let mut test = connect_to_ws(ws_cfg).await.unwrap();
 
-        let mut buf = [0u8;512];
+        let mut buf = [0u8; 512];
         let i = test.read(&mut buf).await.unwrap();
         assert!(i > 15);
         assert_eq!(&buf[..15], b"HTTP/1.1 101 Sw");
@@ -376,8 +380,10 @@ mod tests {
         JavaScript Object Notation
         Line-based text data
             test message*/
-        test.write_all(b"\x81\x8c\xe1\x7e\x8e\xb9\x95\x1b\xfd\xcd\xc1\x13\xeb\xca\x92\x1f\xe9\xdc").await.unwrap();
-        
+        test.write_all(b"\x81\x8c\xe1\x7e\x8e\xb9\x95\x1b\xfd\xcd\xc1\x13\xeb\xca\x92\x1f\xe9\xdc")
+            .await
+            .unwrap();
+
         let mut vec = Vec::new();
         test.read_to_end(&mut vec).await.unwrap();
 

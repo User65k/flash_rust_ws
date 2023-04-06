@@ -192,15 +192,17 @@ async fn main() {
     };
 }
 
-
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::*;
     use crate::config::Utf8PathBuf;
     use crate::dispatch::test::UnitTestUseCase;
-    use super::*;
     use config::{HostCfg, VHost};
-    use tokio::{net::{TcpListener, TcpStream}, io::{AsyncWriteExt, AsyncReadExt}};
-    pub(crate) async fn local_socket_pair() -> Result<(TcpListener, SocketAddr),std::io::Error> {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+    pub(crate) async fn local_socket_pair() -> Result<(TcpListener, SocketAddr), std::io::Error> {
         let a: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let app_listener = TcpListener::bind(a).await?;
         let a = app_listener.local_addr()?;
@@ -213,7 +215,10 @@ pub(crate) mod tests {
         let mut listening_ifs = HashMap::new();
         let mut cfg = HostCfg::new(l.into_std().unwrap());
         let mut vh = VHost::new(a);
-        vh.paths.insert(Utf8PathBuf::from("a"), UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None));
+        vh.paths.insert(
+            Utf8PathBuf::from("a"),
+            UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
+        );
         cfg.default_host = Some(vh);
         listening_ifs.insert(a, cfg);
 
@@ -221,10 +226,10 @@ pub(crate) mod tests {
 
         let mut test = TcpStream::connect(a).await.unwrap();
         test.write_all(b"GET /a/b HTTP/1.1\r\n\r\n").await.unwrap();
-        let mut buf = [0u8;15];
+        let mut buf = [0u8; 15];
         test.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf[..15], b"HTTP/1.1 200 OK");
-        
+
         /*s.get(0).unwrap().abort();
         drop(s);
         let mut vec = Vec::new();
