@@ -719,6 +719,16 @@ mod tests {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             //actual request
             app_socket.read_buf(&mut buf).await.unwrap();
+
+            fn find_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+                haystack.windows(needle.len()).any(|window| window == needle)
+            }
+
+            assert!(find_subsequence(&buf, b"\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php"));
+            assert!(find_subsequence(&buf, b"\x0c\0QUERY_STRING"));
+            assert!(find_subsequence(&buf, b"\x0e\x01CONTENT_LENGTH8"));
+            assert!(find_subsequence(&buf, b"\x01\x05\0\x01\0\x08\0\0test=123"));
+
             let from_php = b"\x01\x06\0\x01\x00\x23\x05\0Status: 201 Created\r\n\r\n<html><body>#+#+#\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
             app_socket
                 .write_buf(&mut Bytes::from(&from_php[..]))
