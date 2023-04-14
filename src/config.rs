@@ -9,7 +9,8 @@ use crate::dispatch::websocket::Websocket;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 use crate::transport::tls::{ParsedTLSConfig, TLSBuilderTrait, TlsUserConfig};
 use anyhow::{Context, Result};
-use hyper::header::HeaderMap;
+use hyper::header::HeaderName;
+use hyper::http::HeaderValue;
 use log::info;
 use log4rs::config::RawConfig as LogConfig;
 use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
@@ -87,7 +88,7 @@ impl<'de> Deserialize<'de> for AbsPathBuf {
         impl<'de> serde::de::Visitor<'de> for Visitor {
             type Value = AbsPathBuf;
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a String")
+                formatter.write_str("a path on the file system")
             }
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
             where
@@ -197,12 +198,63 @@ impl<'de> Deserialize<'de> for UseCase {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct HeaderNameCfg(pub HeaderName);
+impl<'de> Deserialize<'de> for HeaderNameCfg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = HeaderNameCfg;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a HeaderName")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(HeaderNameCfg(
+                    HeaderName::from_bytes(v.as_bytes()).map_err(E::custom)?,
+                ))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct HeaderValueCfg(pub HeaderValue);
+impl<'de> Deserialize<'de> for HeaderValueCfg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = HeaderValueCfg;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a HeaderValue")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(HeaderValueCfg(HeaderValue::from_str(v).map_err(E::custom)?))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
+
 /// A single directory under a `VHost`
 #[derive(Debug, Deserialize)]
 pub struct WwwRoot {
     #[serde(flatten)]
     pub mount: UseCase,
-    pub header: Option<HashMap<String, String>>,
+    pub header: Option<HashMap<HeaderNameCfg, HeaderValueCfg>>,
     pub auth: Option<Authenticatoin>,
 }
 
@@ -303,10 +355,9 @@ pub fn load_config() -> anyhow::Result<Configuration> {
         read_to_string(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
 
     let mut cfg = toml::from_str::<Configuration>(&buffer)?;
-    for (host_name, vhost) in cfg.hosts.iter_mut() {
-        info!("host: {} @ {}", host_name, vhost.ip);
-        if vhost.paths.is_empty() {
-            anyhow::bail!("vHost \"{}\" does not serve anything", host_name);
+    if log::log_enabled!(log::Level::Info) {
+        for (host_name, vhost) in cfg.hosts.iter_mut() {
+            info!("host: {} @ {}", host_name, vhost.ip);
         }
     }
     Ok(cfg)
@@ -321,7 +372,7 @@ pub struct HostCfg {
     pub tls: Option<ParsedTLSConfig>,
 }
 impl HostCfg {
-    fn new(listener: TcpListener) -> HostCfg {
+    pub fn new(listener: TcpListener) -> HostCfg {
         HostCfg {
             default_host: None,
             vhosts: HashMap::new(),
@@ -364,14 +415,6 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                 UseCase::UnitTest(_) => unreachable!(),
                 UseCase::StaticFiles(sf) => sf.setup().await,
             } {
-                errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
-            }
-            //check if header are parseable
-            if wwwroot.header.is_none() {
-                continue;
-            }
-            let mut _h = HeaderMap::new();
-            if let Err(e) = crate::dispatch::insert_default_headers(&mut _h, &wwwroot.header) {
                 errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
             }
         }
@@ -532,10 +575,14 @@ where
                 );
             }
 
+            if mounts.is_empty() {
+                return Err(DeError::custom("vHost does not serve anything"));
+            }
+
             Ok(mounts)
         }
     }
-    deserializer.deserialize_any(MountVisitor())
+    deserializer.deserialize_map(MountVisitor())
 }
 
 #[cfg(test)]
@@ -641,8 +688,10 @@ mod tests {
             r#"
     [host]
     ip = "0.0.0.0:1337"
+    dir = "."
     [another]
     ip = "0.0.0.0:1337"
+    dir = "."
     "#,
         )
         .expect("parse err");
@@ -650,7 +699,7 @@ mod tests {
     }
     #[tokio::test]
     async fn bad_header() {
-        let mut cfg: Configuration = toml::from_str(
+        assert!(toml::from_str::<Configuration>(
             r#"
     [host]
     ip = "0.0.0.0:1338"
@@ -659,10 +708,9 @@ mod tests {
     header = {test = "bad\u0000header"}
     "#,
         )
-        .expect("parse err");
-        assert!(group_config(&mut cfg).await.is_err());
+        .is_err());
 
-        let mut cfg: Configuration = toml::from_str(
+        assert!(toml::from_str::<Configuration>(
             r#"
     [host]
     ip = "0.0.0.0:1339"
@@ -671,10 +719,9 @@ mod tests {
     header = {"test\n" = "1"}
     "#,
         )
-        .expect("parse err");
-        assert!(group_config(&mut cfg).await.is_err());
+        .is_err());
 
-        let mut cfg: Configuration = toml::from_str(
+        assert!(toml::from_str::<Configuration>(
             r#"
     [host]
     ip = "0.0.0.0:1339"
@@ -683,8 +730,7 @@ mod tests {
     header = {"X-ok" = "1"}
     "#,
         )
-        .expect("parse err");
-        assert!(group_config(&mut cfg).await.is_ok());
+        .is_ok());
     }
 
     #[tokio::test]
@@ -693,6 +739,7 @@ mod tests {
             r#"
     [host]
     ip = "8.8.8.8:22"
+    dir = "."
     "#,
         )
         .expect("parse err");
@@ -706,11 +753,13 @@ mod tests {
             r#"
     [host]
     ip = "8.8.8.8:22"
+    dir = "."
     [[host.tls.host.Files]]
     cert = ""
     key = ""
     [host2]
     ip = "8.8.8.8:22"
+    dir = "."
     "#,
         )
         .expect("parse err");

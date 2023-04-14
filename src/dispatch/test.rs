@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::*;
 
 #[derive(Debug, Default)]
@@ -8,7 +10,7 @@ pub struct UnitTestUseCase {
 }
 
 impl UnitTestUseCase {
-    fn create_wwwroot(
+    pub fn create_wwwroot(
         req_path: Option<&'static str>,
         mount: Option<&'static str>,
         remote_addr: Option<SocketAddr>,

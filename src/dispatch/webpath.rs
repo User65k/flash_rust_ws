@@ -240,7 +240,9 @@ mod tests {
             Cow::Owned(_)
         ));
         assert!(matches!(
-            WebPath::try_from(&"//./j/../a/b/.././../c".parse().unwrap()).unwrap().0,
+            WebPath::try_from(&"//./j/../a/b/.././../c".parse().unwrap())
+                .unwrap()
+                .0,
             Cow::Borrowed("c")
         ));
         assert_eq!(

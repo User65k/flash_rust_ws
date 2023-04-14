@@ -649,7 +649,7 @@ mod tests {
 
         let sf = StaticFiles {
             dir: AbsPathBuf::temp_dir(),
-            follow_symlinks: true,//less checks
+            follow_symlinks: true, //less checks
             index: None,
             serve: None,
         };
@@ -697,4 +697,88 @@ mod tests {
         let res = res.unwrap();
         assert_eq!(res.status(), 411);
     }*/
+    #[tokio::test]
+    async fn simple_fcgi_post() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        async fn mock_app(app_listener: TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            //FCGI startup
+            app_socket.read_buf(&mut buf).await.unwrap();
+            let from_php =
+                b"\x01\x0a\0\0\0!\x07\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\0MAX_CONNS\0\0\0\0\0\0\0";
+            app_socket
+                .write_buf(&mut Bytes::from(&from_php[..]))
+                .await
+                .unwrap();
+
+            buf.clear();
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            //actual request
+            app_socket.read_buf(&mut buf).await.unwrap();
+
+            fn find_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+                haystack.windows(needle.len()).any(|window| window == needle)
+            }
+
+            assert!(find_subsequence(&buf, b"\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php"));
+            assert!(find_subsequence(&buf, b"\x0c\0QUERY_STRING"));
+            assert!(find_subsequence(&buf, b"\x0e\x01CONTENT_LENGTH8"));
+            assert!(find_subsequence(&buf, b"\x01\x05\0\x01\0\x08\0\0test=123"));
+
+            let from_php = b"\x01\x06\0\x01\x00\x23\x05\0Status: 201 Created\r\n\r\n<html><body>#+#+#\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
+            app_socket
+                .write_buf(&mut Bytes::from(&from_php[..]))
+                .await
+                .unwrap();
+        }
+
+        let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
+        let m = tokio::spawn(mock_app(app_listener));
+        let sock = FCGISock::TCP(a);
+        let sock_addr: FCGIAddr = (&sock).into();
+
+        let fcgi_cfg = FCGIApp {
+            sock,
+            exec: None,
+            set_script_filename: true,
+            set_request_uri: false,
+            timeout: 100,
+            params: None,
+            bin: None,
+            app: Some(FCGIAppPool::new(&sock_addr).await.expect("ConPool failed")),
+        };
+        let req = Request::post("http://1/Public/test.php")
+            .header("Content-Length", "8")
+            .header("Content-Type", "multipart/form-data")
+            .body(Body::from("test=123"))
+            .unwrap();
+
+        let mut res = fcgi_call(
+            &fcgi_cfg,
+            req,
+            &super::super::WebPath::parsed("Public/test.php"),
+            &Utf8PathBuf::from(""),
+            Some(Path::new("/home/daniel/Public/test.php")),
+            "127.0.0.1:1337".parse().unwrap(),
+        )
+        .await
+        .expect("forward failed");
+
+        assert_eq!(res.status(), hyper::StatusCode::CREATED);
+        let read1 = res.data().await;
+        assert!(read1.is_some());
+        let read1 = read1.unwrap();
+        assert!(read1.is_ok());
+        if let Ok(d) = read1 {
+            let body = b"<html><body>";
+            assert_eq!(d, &body[..]);
+        }
+        let read2 = res.data().await;
+        assert!(read2.is_none());
+        m.await.unwrap();
+    }
 }
