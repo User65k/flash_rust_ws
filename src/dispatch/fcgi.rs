@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
-pub use async_fcgi::FCGIAddr;
+pub use async_stream_connection::Addr;
 
 const SCRIPT_NAME: &[u8] = b"SCRIPT_NAME";
 const PATH_INFO: &[u8] = b"PATH_INFO";
@@ -233,7 +233,7 @@ fn path_to_bytes<P: AsRef<Path>>(path: P) -> Bytes {
 pub async fn setup_fcgi_connection(
     fcgi_cfg: &mut FCGIApp,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sock: FCGIAddr = (&fcgi_cfg.sock).into();
+    let sock = &fcgi_cfg.sock;
 
     if let Some(bin) = fcgi_cfg.bin.as_ref() {
         let mut cmd = FCGIAppPool::prep_server(bin.path.as_os_str(), &sock).await?;
@@ -256,7 +256,7 @@ pub async fn setup_fcgi_connection(
         let mut running_cmd = cmd.kill_on_drop(true).spawn()?;
         info!("Started {:?} @ {}", &bin.path, &sock);
         #[cfg(unix)]
-        let delete_after_use = if let FCGIAddr::Unix(a) = &sock {
+        let delete_after_use = if let Addr::Unix(a) = &sock {
             Some(a.to_path_buf())
         } else {
             None
@@ -295,48 +295,6 @@ pub async fn setup_fcgi_connection(
     Ok(())
 }
 
-impl From<&FCGISock> for FCGIAddr {
-    fn from(addr: &FCGISock) -> FCGIAddr {
-        match addr {
-            FCGISock::TCP(s) => FCGIAddr::Inet(*s),
-            #[cfg(unix)]
-            FCGISock::Unix(p) => FCGIAddr::Unix(p.to_path_buf()),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum FCGISock {
-    TCP(SocketAddr),
-    #[cfg(unix)]
-    Unix(Utf8PathBuf),
-}
-impl<'de> Deserialize<'de> for FCGISock {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = FCGISock;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a String")
-            }
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                #[cfg(unix)]
-                if v.starts_with('/') || v.starts_with("./") {
-                    return Ok(FCGISock::Unix(Utf8PathBuf::from(v)));
-                }
-                Ok(FCGISock::TCP(v.parse().map_err(E::custom)?))
-            }
-        }
-        deserializer.deserialize_str(Visitor)
-    }
-}
-
 /// Information to execute a FCGI App
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -351,7 +309,7 @@ pub struct FCGIAppExec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FCGIApp {
-    pub sock: FCGISock,
+    pub sock: Addr,
     pub exec: Option<Vec<Utf8PathBuf>>,
     #[serde(default)]
     pub set_script_filename: bool,
@@ -416,21 +374,21 @@ mod tests {
                 fcgi.sock = "127.0.0.1:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, FCGISock::TCP(_)));
+            assert!(matches!(f.fcgi.sock, Addr::Inet(_)));
         }
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
             r#"
                 fcgi.sock = "localhost:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, FCGISock::TCP(_)));
+            assert!(matches!(f.fcgi.sock, Addr::Inet(_)));
         }
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
             r#"
                 fcgi.sock = "[::1]:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, FCGISock::TCP(_)));
+            assert!(matches!(f.fcgi.sock, Addr::Inet(_)));
         }
         #[cfg(unix)]
         if let Ok(UseCase::FCGI(f)) = toml::from_str(
@@ -438,7 +396,7 @@ mod tests {
                 fcgi.sock = "/path"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, FCGISock::Unix(_)));
+            assert!(matches!(f.fcgi.sock, Addr::Unix(_)));
         }
     }
     #[test]
@@ -487,7 +445,7 @@ mod tests {
     #[test]
     fn params_php_example() {
         let fcgi_cfg = FCGIApp {
-            sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+            sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
             exec: None,
             set_script_filename: true,
             set_request_uri: false,
@@ -540,7 +498,7 @@ mod tests {
     #[test]
     fn params_flup_example() {
         let fcgi_cfg = FCGIApp {
-            sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+            sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
             exec: None,
             set_script_filename: false,
             set_request_uri: true,
@@ -621,7 +579,7 @@ mod tests {
         };
         let mount = UseCase::FCGI(FcgiMnt {
             fcgi: FCGIApp {
-                sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+                sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
                 exec: Some(vec![Utf8PathBuf::from("php")]),
                 set_script_filename: false,
                 set_request_uri: false,
@@ -655,7 +613,7 @@ mod tests {
         };
         let mount = UseCase::FCGI(FcgiMnt {
             fcgi: FCGIApp {
-                sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+                sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
                 exec: Some(vec![Utf8PathBuf::from("php")]),
                 set_script_filename: false,
                 set_request_uri: false,
@@ -678,7 +636,7 @@ mod tests {
     async fn body_no_len() {
         let mount = UseCase::FCGI(FcgiMnt {
             fcgi: FCGIApp {
-                sock: FCGISock::TCP("127.0.0.1:1234".parse().unwrap()),
+                sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
                 exec: None,
                 set_script_filename: false,
                 set_request_uri: false,
@@ -738,18 +696,17 @@ mod tests {
 
         let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
         let m = tokio::spawn(mock_app(app_listener));
-        let sock = FCGISock::TCP(a);
-        let sock_addr: FCGIAddr = (&sock).into();
+        let sock = Addr::Inet(a);
 
         let fcgi_cfg = FCGIApp {
-            sock,
+            sock: sock.clone(),
             exec: None,
             set_script_filename: true,
             set_request_uri: false,
             timeout: 100,
             params: None,
             bin: None,
-            app: Some(FCGIAppPool::new(&sock_addr).await.expect("ConPool failed")),
+            app: Some(FCGIAppPool::new(&sock).await.expect("ConPool failed")),
         };
         let req = Request::post("http://1/Public/test.php")
             .header("Content-Length", "8")

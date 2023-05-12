@@ -6,8 +6,7 @@ use std::net::SocketAddr;
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
 pub type AsyncClient = Framed<Upgraded, MessageCodec>;
-use crate::config::Utf8PathBuf;
-use async_fcgi::stream::{FCGIAddr, Stream};
+use async_stream_connection::{Addr, Stream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,7 +58,7 @@ pub async fn upgrade(
     //TODO Sec-WebSocket-Protocol
     //TODO Sec-WebSocket-Extensions
 
-    let addr: FCGIAddr = (&wscfg.assock).into();
+    let addr = wscfg.assock.clone(); //TODO config lives long enough
     let forward_header = wscfg.forward_header;
 
     tokio::task::spawn(async move {
@@ -72,7 +71,7 @@ pub async fn upgrade(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let client = MessageCodec::server().framed(upgraded);
-                websocket(addr, header, client).await;
+                websocket(&addr, header, client).await;
             }
             Err(e) => error!("upgrade error: {}", e),
         }
@@ -129,8 +128,8 @@ async fn send_header(backend: &mut Stream, header: HeaderMap) -> Result<(), IoEr
     Ok(())
 }
 
-async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: AsyncClient) {
-    match Stream::connect(&addr).await {
+async fn websocket(addr: &Addr, header: Option<HeaderMap>, mut frontend: AsyncClient) {
+    match Stream::connect(addr).await {
         Ok(mut backend) => {
             if let Some(header) = header {
                 //send headers
@@ -184,46 +183,6 @@ async fn websocket(addr: FCGIAddr, header: Option<HeaderMap>, mut frontend: Asyn
     let _ = frontend.send(Message::close(None)).await;
 }
 
-impl From<&WSSock> for FCGIAddr {
-    fn from(addr: &WSSock) -> FCGIAddr {
-        match addr {
-            WSSock::TCP(s) => FCGIAddr::Inet(*s),
-            #[cfg(unix)]
-            WSSock::Unix(p) => FCGIAddr::Unix(p.to_path_buf()),
-        }
-    }
-}
-#[derive(Debug)]
-pub enum WSSock {
-    TCP(SocketAddr),
-    #[cfg(unix)]
-    Unix(Utf8PathBuf),
-}
-impl<'de> Deserialize<'de> for WSSock {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = WSSock;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a String")
-            }
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                #[cfg(unix)]
-                if v.starts_with('/') || v.starts_with("./") {
-                    return Ok(WSSock::Unix(Utf8PathBuf::from(v)));
-                }
-                Ok(WSSock::TCP(v.parse().map_err(E::custom)?))
-            }
-        }
-        deserializer.deserialize_str(Visitor)
-    }
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -236,7 +195,7 @@ pub enum Websocket {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnwrapedWS {
-    assock: WSSock,
+    assock: Addr,
     #[serde(default)]
     forward_header: bool, // = false
 }
@@ -275,21 +234,21 @@ mod tests {
             assock = "127.0.0.1:9000"
         "#,
         ) {
-            assert!(matches!(u.assock, WSSock::TCP(_)));
+            assert!(matches!(u.assock, Addr::Inet(_)));
         }
         if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
             r#"
             assock = "localhost:9000"
         "#,
         ) {
-            assert!(matches!(u.assock, WSSock::TCP(_)));
+            assert!(matches!(u.assock, Addr::Inet(_)));
         }
         if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
             r#"
             assock = "[::1]:9000"
         "#,
         ) {
-            assert!(matches!(u.assock, WSSock::TCP(_)));
+            assert!(matches!(u.assock, Addr::Inet(_)));
         }
         #[cfg(unix)]
         if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
@@ -297,7 +256,7 @@ mod tests {
             assock = "/path"
         "#,
         ) {
-            assert!(matches!(u.assock, WSSock::Unix(_)));
+            assert!(matches!(u.assock, Addr::Unix(_)));
         }
     }
     #[tokio::test]
@@ -346,7 +305,7 @@ mod tests {
         let (l, a) = local_socket_pair().await.unwrap();
 
         let ws_cfg = Websocket::Unwraped(UnwrapedWS {
-            assock: WSSock::TCP(a),
+            assock: Addr::Inet(a),
             forward_header: false,
         });
 
