@@ -29,7 +29,7 @@ percent-encoding = "2"
 mime_guess = "2.0"
 hyper-staticfile = "0.9"    # GET+HEAD for Files
 #fcgi:
-async-fcgi = {version = "0.4", features = ["app_start"], optional = true}
+async-fcgi = {version = "^0.4.1", features = ["app_start"], optional = true}
 #rproxy
 #hyper-reverse-proxy = "0.4"
 #https:
@@ -51,6 +51,7 @@ xml-rs = { version = "0.8", optional = true }
 chrono = { version = "0.4", optional = true }
 
 anyhow = "1.0"
+async-stream-connection = {version="^1.0.1", features=["serde"], optional = true}
 
 [target.'cfg(unix)'.dependencies]
 users = "0.11.0"
@@ -62,8 +63,8 @@ default = ["tlsrust", "tlsrust_acme", "fcgi", "webdav"]
 tlsrust = ["tokio-rustls", "rustls-pemfile"]
 tlsrust_acme = ["async-acme/hyper_rustls"]
 logrot = ["log4rs/background_rotation"]
-fcgi = ["async-fcgi"]
-websocket = ["websocket-codec", "tokio-util", "futures-util/sink"]
+fcgi = ["async-fcgi", "async-stream-connection"]
+websocket = ["websocket-codec", "tokio-util", "futures-util/sink", "async-stream-connection"]
 webdav = ["xml-rs", "chrono"]
 
 
