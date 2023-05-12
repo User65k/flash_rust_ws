@@ -369,35 +369,43 @@ mod tests {
     };
     #[test]
     fn parse_addr() {
-        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+        assert!(if let Ok(UseCase::FCGI(FcgiMnt { fcgi: FCGIApp { sock: Addr::Inet(a), ..}, .. })) = toml::from_str(
             r#"
                 fcgi.sock = "127.0.0.1:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, Addr::Inet(_)));
-        }
-        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+            a.port() == 9000 && a.is_ipv4() && a.ip().is_loopback()
+        }else{
+            false
+        });
+        assert!(if let Ok(UseCase::FCGI(FcgiMnt { fcgi: FCGIApp { sock: Addr::Inet(a), ..}, .. })) = toml::from_str(
             r#"
                 fcgi.sock = "localhost:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, Addr::Inet(_)));
-        }
-        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+            a.port() == 9000
+        }else{
+            false
+        });
+        assert!(if let Ok(UseCase::FCGI(FcgiMnt { fcgi: FCGIApp { sock: Addr::Inet(a), ..}, .. })) = toml::from_str(
             r#"
                 fcgi.sock = "[::1]:9000"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, Addr::Inet(_)));
-        }
+            a.port() == 9000 && a.is_ipv6() && a.ip().is_loopback()
+        }else{
+            false
+        });
         #[cfg(unix)]
-        if let Ok(UseCase::FCGI(f)) = toml::from_str(
+        assert!(if let Ok(UseCase::FCGI(FcgiMnt { fcgi: FCGIApp { sock: Addr::Unix(a), ..}, .. })) = toml::from_str(
             r#"
                 fcgi.sock = "/path"
         "#,
         ) {
-            assert!(matches!(f.fcgi.sock, Addr::Unix(_)));
-        }
+            a == Path::new("/path")
+        }else{
+            false
+        });
     }
     #[test]
     fn basic_config() {

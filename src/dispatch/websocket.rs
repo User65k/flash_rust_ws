@@ -229,35 +229,43 @@ mod tests {
     }
     #[test]
     fn parse_addr() {
-        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Inet(a), ..}))) = toml::from_str(
             r#"
             assock = "127.0.0.1:9000"
         "#,
         ) {
-            assert!(matches!(u.assock, Addr::Inet(_)));
-        }
-        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+            a.port() == 9000 && a.is_ipv4() && a.ip().is_loopback()
+        }else{
+            false
+        });
+        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Inet(a), ..}))) = toml::from_str(
             r#"
             assock = "localhost:9000"
         "#,
         ) {
-            assert!(matches!(u.assock, Addr::Inet(_)));
-        }
-        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+            a.port() == 9000
+        }else{
+            false
+        });
+        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Inet(a), ..}))) = toml::from_str(
             r#"
             assock = "[::1]:9000"
         "#,
         ) {
-            assert!(matches!(u.assock, Addr::Inet(_)));
-        }
+            a.port() == 9000 && a.is_ipv6() && a.ip().is_loopback()
+        }else{
+            false
+        });
         #[cfg(unix)]
-        if let Ok(UseCase::Websocket(Websocket::Unwraped(u))) = toml::from_str(
+        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Unix(a), ..}))) = toml::from_str(
             r#"
             assock = "/path"
         "#,
         ) {
-            assert!(matches!(u.assock, Addr::Unix(_)));
-        }
+            a == std::path::Path::new("/path")
+        }else{
+            false
+        });
     }
     #[tokio::test]
     async fn insert_header() {
