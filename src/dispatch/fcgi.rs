@@ -1,3 +1,4 @@
+use async_fcgi::client::connection::{HeaderMultilineStrategy, MultiHeaderStrategy};
 use bytes::{Bytes, BytesMut};
 use hyper::{body::HttpBody, Body, Request, Response};
 use log::{debug, error, info, trace};
@@ -278,7 +279,7 @@ pub async fn setup_fcgi_connection(
     let sock = &fcgi_cfg.sock;
 
     if let Some(bin) = fcgi_cfg.bin.as_ref() {
-        let mut cmd = FCGIAppPool::prep_server(bin.path.as_os_str(), &sock).await?;
+        let mut cmd = FCGIAppPool::prep_server(bin.path.as_os_str(), sock).await?;
         cmd.env_clear();
         if let Some(dir) = bin.wdir.as_ref() {
             cmd.current_dir(dir);
@@ -321,7 +322,17 @@ pub async fn setup_fcgi_connection(
         });
         yield_now().await;
     }
-    let app = match timeout(Duration::from_secs(3), FCGIAppPool::new(&sock)).await {
+    let mh = match fcgi_cfg.multiple_header {
+        None => MultiHeaderStrategy::OnlyFirst,
+        Some(MultHeader::Last) => MultiHeaderStrategy::OnlyLast,
+        Some(MultHeader::Combine) => MultiHeaderStrategy::Combine,
+    };
+    let ml = if fcgi_cfg.allow_multiline_header{
+        HeaderMultilineStrategy::Ignore
+    }else{
+        HeaderMultilineStrategy::ReturnError
+    };
+    let app = match timeout(Duration::from_secs(3), FCGIAppPool::new_with_strategy(sock, mh, ml)).await {
         Err(_) => {
             return Err(Box::new(IoError::new(
                 ErrorKind::TimedOut,
@@ -346,7 +357,11 @@ pub struct FCGIAppExec {
     pub environment: Option<HashMap<String, String>>,
     pub copy_environment: Option<Vec<String>>,
 }
-
+#[derive(Debug, Deserialize)]
+pub enum MultHeader{
+    Combine,
+    Last
+}
 /// A FCGI Application
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -357,6 +372,9 @@ pub struct FCGIApp {
     pub set_script_filename: bool,
     #[serde(default)]
     pub set_request_uri: bool,
+    #[serde(default)]
+    pub allow_multiline_header: bool,
+    pub multiple_header: Option<MultHeader>,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
     pub buffer_request: Option<usize>,
@@ -390,7 +408,7 @@ impl FcgiMnt {
             );
         }
         if let Some(sf) = &self.static_files {
-            let _ = sf.setup().await?;
+            sf.setup().await?;
         }
         if let Err(e) = setup_fcgi_connection(&mut self.fcgi).await {
             return Err(format!("{}", e));
@@ -505,6 +523,8 @@ mod tests {
             bin: None,
             app: None,
             buffer_request: None,
+            allow_multiline_header: false,
+            multiple_header: None,
         };
         let req = Request::get("/php/")
             .header(header::HOST, "example.com")
@@ -517,7 +537,7 @@ mod tests {
             &req,
             &WebPath::parsed(""),
             &Utf8PathBuf::from("php"),
-            Some(&Path::new("/opt/php/index.php")),
+            Some(Path::new("/opt/php/index.php")),
             "1.2.3.4:1337".parse().unwrap(),
         );
 
@@ -559,6 +579,8 @@ mod tests {
             bin: None,
             app: None,
             buffer_request: None,
+            allow_multiline_header: false,
+            multiple_header: None,
         };
         let req = Request::get("/flup/status")
             .header(header::HOST, "localhost")
@@ -641,6 +663,8 @@ mod tests {
                 bin: None,
                 app: None,
                 buffer_request: None,
+                allow_multiline_header: false,
+                multiple_header: None,
             },
             static_files: Some(sf),
         });
@@ -676,6 +700,8 @@ mod tests {
                 bin: None,
                 app: None,
                 buffer_request: None,
+                allow_multiline_header: false,
+                multiple_header: None,
             },
             static_files: Some(sf),
         });
@@ -763,6 +789,8 @@ mod tests {
             bin: None,
             app: Some(FCGIAppPool::new(&sock).await.expect("ConPool failed")),
             buffer_request: None,
+            allow_multiline_header: false,
+            multiple_header: None,
         };
         let req = Request::post("http://1/Public/test.php")
             .header("Content-Length", "8")
