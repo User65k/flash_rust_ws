@@ -1,6 +1,6 @@
 [package]
 name = "flash_rust_ws"
-version = "0.4.3"
+version = "0.4.4"
 authors = ["User65k <15049544+User65k@users.noreply.github.com>"]
 edition = "2021"
 license = "AGPL-3.0"
@@ -18,7 +18,7 @@ log = "0.4"
 log4rs = { version = "1", default-features = false, features = ["all_components", "config_parsing"] }
 
 #config:
-toml = "0.7"        # config files in toml
+toml = "0.8"        # config files in toml
 serde = { version = "1.0", features = ["derive"] }
 
 #main:
@@ -29,12 +29,12 @@ percent-encoding = "2"
 mime_guess = "2.0"
 hyper-staticfile = "0.9"    # GET+HEAD for Files
 #fcgi:
-async-fcgi = {version = "^0.4.1", features = ["app_start"], optional = true}
+async-fcgi = {version = "^0.4.3", features = ["app_start"], optional = true}
 #rproxy
 #hyper-reverse-proxy = "0.4"
 #https:
 tokio-rustls = { version = "0.24.0", optional = true }
-async-acme = { version="0.3", optional = true }
+async-acme = { version="0.4", optional = true }
 rustls-pemfile = { version = "1.0", optional = true}
 
 #async_compression  # in no BREACH / TIME cases?

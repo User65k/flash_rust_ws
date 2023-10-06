@@ -129,6 +129,7 @@ impl<'a> WebPath<'a> {
         r.push_str(s);
         r
     }
+    #[cfg(feature = "websocket")]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
