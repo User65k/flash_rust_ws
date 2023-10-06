@@ -8,6 +8,7 @@ pub(crate) mod test;
 mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
+use hyper::body::HttpBody;
 pub use webpath::WebPath;
 
 use crate::config::{self, Utf8PathBuf};
@@ -192,7 +193,7 @@ async fn handle_vhost(
 }
 
 /// return the Host header
-fn get_host(req: &Request<Body>) -> Option<&str> {
+fn get_host<B: HttpBody>(req: &Request<B>) -> Option<&str> {
     match req.version() {
         Version::HTTP_2 => req.uri().host(),
         Version::HTTP_11 | Version::HTTP_10 | Version::HTTP_09 => {

@@ -13,7 +13,7 @@ use tokio::task::yield_now;
 use tokio::time::timeout;
 
 use crate::{
-    body::FCGIBody,
+    body::{BufferedBody, HttpBodyStream},
     config::{StaticFiles, Utf8PathBuf},
 };
 
@@ -50,21 +50,45 @@ pub async fn fcgi_call(
         ));
     };
 
-    match *req.method() {
+    let (req, body) = req.into_parts();
+
+    let body = match req.method {
         hyper::http::Method::GET
         | hyper::http::Method::HEAD
         | hyper::http::Method::OPTIONS
         | hyper::http::Method::DELETE
-        | hyper::http::Method::TRACE => {}
+        | hyper::http::Method::TRACE => BufferedBody::wrap(body),
         _ => {
-            if req.body().size_hint().exact().is_none() {
-                return Ok(Response::builder()
-                    .status(hyper::StatusCode::LENGTH_REQUIRED)
-                    .body(Body::empty())
-                    .expect("unable to build response"));
+            //request type with body...
+            if body.size_hint().exact().is_none() {
+                //...but no len indicator
+                if let Some(max_size) = fcgi_cfg.buffer_request {
+                    //read everything to memory
+                    match BufferedBody::buffer(body, max_size).await {
+                        Ok(b) => b,
+                        Err(e) if e.kind()==ErrorKind::PermissionDenied => {
+                            //body is more than max_size -> abort
+                            return Ok(Response::builder()
+                            .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
+                            .body(Body::empty())
+                            .expect("unable to build response"));
+                        },
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    //reject it
+                    return Ok(Response::builder()
+                        .status(hyper::StatusCode::LENGTH_REQUIRED)
+                        .body(Body::empty())
+                        .expect("unable to build response"));
+                }
+            } else {
+                BufferedBody::wrap(body)
             }
         }
-    }
+    };
+    let req = Request::from_parts(req, body);
+
     let params = create_params(
         fcgi_cfg,
         &req,
@@ -75,7 +99,7 @@ pub async fn fcgi_call(
     );
 
     trace!("to FCGI: {:?}", &params);
-    let resp = match fcgi_cfg.timeout {
+    let mut resp = match fcgi_cfg.timeout {
         0 => app.forward(req, params).await,
         secs => match timeout(Duration::from_secs(secs), app.forward(req, params)).await {
             Err(_) => {
@@ -89,16 +113,33 @@ pub async fn fcgi_call(
     }?;
     debug!("FCGI response: {:?} {:?}", resp.status(), resp.headers());
     //return types:
-    //doc: MUST return a Content-Type header
-    //TODO fetch local resource: Location header, MUST NOT return any other header fields or a message-body
-    //TODO 302Found: Abs Location header, MUST NOT return any other header fields
+    resp.headers_mut().remove("Status");
+    //doc: MUST return a Content-Type header or ...
+    /*if resp.headers().len()==1 {
+        if let Some(location) = resp.headers().get("Location") {
+            if location.as_bytes().first() == Some(&b'/') {
+                if resp.status() == hyper::StatusCode::OK {
+                    // https://datatracker.ietf.org/doc/html/rfc3875#section-6.2.3
+                    //TODO generate 302 'Found' response
+                }else{
+                    // https://datatracker.ietf.org/doc/html/rfc3875#section-6.2.4
+                    // 3xx: Abs Location header, MUST NOT return any other header fields
+                    //TODO adjust path?
+                }
+            }else{
+                // https://datatracker.ietf.org/doc/html/rfc3875#section-6.2.2
+                // Location header, MUST NOT return any other header fields or a message-body
+                //TODO fetch and return local resource
+            }
+        }
+    }*/
 
-    Ok(resp.map(|bod| Body::wrap_stream(FCGIBody::from(bod))))
+    Ok(resp.map(|bod| Body::wrap_stream(HttpBodyStream::from(bod))))
 }
 
-fn create_params(
+fn create_params<B: HttpBody>(
     fcgi_cfg: &FCGIApp,
-    req: &Request<Body>,
+    req: &Request<B>,
     req_path: &super::WebPath,
     web_mount: &Utf8PathBuf,
     fs_full_path: Option<&Path>,
@@ -159,6 +200,7 @@ fn create_params(
         Bytes::from(SERVER_NAME),
         Bytes::from(super::get_host(req).unwrap_or_default().to_string()),
     );
+
     params.insert(
         // must CGI/1.1  4.1.15, flup cares for this
         Bytes::from(SERVER_PORT),
@@ -317,6 +359,7 @@ pub struct FCGIApp {
     pub set_request_uri: bool,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    pub buffer_request: Option<usize>,
     pub params: Option<HashMap<String, String>>,
     pub bin: Option<FCGIAppExec>,
     #[serde(skip)]
@@ -461,6 +504,7 @@ mod tests {
             params: None,
             bin: None,
             app: None,
+            buffer_request: None,
         };
         let req = Request::get("/php/")
             .header(header::HOST, "example.com")
@@ -514,6 +558,7 @@ mod tests {
             params: None,
             bin: None,
             app: None,
+            buffer_request: None,
         };
         let req = Request::get("/flup/status")
             .header(header::HOST, "localhost")
@@ -595,6 +640,7 @@ mod tests {
                 params: None,
                 bin: None,
                 app: None,
+                buffer_request: None,
             },
             static_files: Some(sf),
         });
@@ -629,6 +675,7 @@ mod tests {
                 params: None,
                 bin: None,
                 app: None,
+                buffer_request: None,
             },
             static_files: Some(sf),
         });
@@ -715,6 +762,7 @@ mod tests {
             params: None,
             bin: None,
             app: Some(FCGIAppPool::new(&sock).await.expect("ConPool failed")),
+            buffer_request: None,
         };
         let req = Request::post("http://1/Public/test.php")
             .header("Content-Length", "8")
