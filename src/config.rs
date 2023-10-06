@@ -454,7 +454,7 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                 }
                 listening_ifs.insert(addr, hcfg);
             }
-            Some(mut hcfg) => {
+            Some(hcfg) => {
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if params.tls.is_some() != hcfg.tls.is_some() {
                     errors.add(format!("All vHosts on {} must be either TLS or not", addr));
