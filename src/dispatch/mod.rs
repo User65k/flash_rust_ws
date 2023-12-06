@@ -67,6 +67,9 @@ fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
 /// - building the absolute file path
 /// - forwarding to FCGI
 /// - returning a static file
+///
+/// `web_mount` first part of URI, selecting the wwwr. Used for links in the response
+/// `req_path` second part of URI - a path within the wwwr. Used to select a file
 async fn handle_wwwroot(
     req: Request<Body>,
     wwwr: &config::WwwRoot,
@@ -91,7 +94,8 @@ async fn handle_wwwroot(
         config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, static_files }) => {
             if fcgi.exec.is_none() {
                 //FCGI + dont check for file -> always FCGI
-                return fcgi::fcgi_call(fcgi, req, &req_path, web_mount, None, remote_addr).await;
+                return fcgi::fcgi_call(fcgi, req, &req_path, web_mount, None, None, remote_addr)
+                    .await;
             }
             match static_files {
                 Some(sf) => sf,
@@ -125,7 +129,10 @@ async fn handle_wwwroot(
             ));
         }
     }
-
+    #[cfg(feature = "fcgi")]
+    let (full_path, resolved_file, path_info) =
+        fcgi::resolve_path(full_path, is_dir_request, sf, &req_path).await?;
+    #[cfg(not(feature = "fcgi"))]
     let (full_path, resolved_file) =
         staticf::resolve_path(&full_path, is_dir_request, &sf.index).await?;
 
@@ -145,6 +152,7 @@ async fn handle_wwwroot(
                         &req_path,
                         web_mount,
                         Some(&full_path),
+                        path_info.as_ref(),
                         remote_addr,
                     )
                     .await;
