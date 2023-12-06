@@ -118,7 +118,14 @@ async fn handle_wwwroot(
 
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
     let full_path = req_path.prefix_with(&sf.dir);
-    trace!("full_path {:?}", full_path.canonicalize());
+
+    #[cfg(feature = "fcgi")]
+    let (full_path, resolved_file, path_info) =
+        fcgi::resolve_path(full_path, is_dir_request, sf, &req_path).await?;
+    #[cfg(not(feature = "fcgi"))]
+    let (full_path, resolved_file) =
+        staticf::resolve_path(&full_path, is_dir_request, &sf.index).await?;
+
     if !sf.follow_symlinks {
         //check if the canonicalized version is still inside of the (abs) root path
         let fp = full_path.canonicalize()?;
@@ -129,12 +136,6 @@ async fn handle_wwwroot(
             ));
         }
     }
-    #[cfg(feature = "fcgi")]
-    let (full_path, resolved_file, path_info) =
-        fcgi::resolve_path(full_path, is_dir_request, sf, &req_path).await?;
-    #[cfg(not(feature = "fcgi"))]
-    let (full_path, resolved_file) =
-        staticf::resolve_path(&full_path, is_dir_request, &sf.index).await?;
 
     match resolved_file {
         ResolveResult::IsDirectory => {

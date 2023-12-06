@@ -433,6 +433,8 @@ async fn simple_fcgi_post() {
     assert!(read2.is_none());
     m.await.unwrap();
 }
+/// send a request to a FCGI mount and return its TcpStream
+/// (as well as the Task doing the request)
 async fn test_from_wwwr(
     req: Request<Body>,
     req_path: &str,
@@ -471,6 +473,8 @@ fn test_sock_addr() -> Addr {
         0,
     ))
 }
+/// search a FCGI param value inside of a byte stream.  
+/// __only__ works for small (<=255) names and values
 fn get_param<'a>(haystack: &'a [u8], param: &'_ [u8]) -> Option<&'a [u8]> {
     if let Some(pos) = haystack
         .windows(param.len())
@@ -501,7 +505,7 @@ async fn resolve_file_with_path_info() {
 
     let sf = StaticFiles {
         dir: AbsPathBuf::temp_dir(),
-        follow_symlinks: true,
+        follow_symlinks: false,
         index: None,
         serve: None,
     };
