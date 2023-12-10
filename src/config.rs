@@ -2,6 +2,8 @@
 use crate::dispatch::dav::Config as webdav;
 #[cfg(feature = "fcgi")]
 use crate::dispatch::fcgi::FcgiMnt;
+#[cfg(feature = "proxy")]
+use crate::dispatch::proxy::Proxy;
 #[cfg(test)]
 use crate::dispatch::test::UnitTestUseCase;
 #[cfg(feature = "websocket")]
@@ -148,9 +150,10 @@ pub enum UseCase {
     #[cfg(feature = "fcgi")]
     FCGI(FcgiMnt),
     StaticFiles(StaticFiles),
+    #[cfg(feature = "proxy")]
+    Proxy(Proxy),
     #[cfg(feature = "websocket")]
     Websocket(Websocket),
-    //Proxy{host: String, path: String},
     #[cfg(feature = "webdav")]
     Webdav(webdav),
     #[cfg(test)]
@@ -172,6 +175,13 @@ impl<'de> Deserialize<'de> for UseCase {
             ));
             #[cfg(not(feature = "fcgi"))]
             return Err(DeError::custom("fcgi support is disabled"));
+        } else if tree.contains_key("forward") {
+            #[cfg(feature = "proxy")]
+            return Ok(UseCase::Proxy(
+                Proxy::deserialize(tree).map_err(DeError::custom)?,
+            ));
+            #[cfg(not(feature = "proxy"))]
+            return Err(DeError::custom("reverse proxy support is disabled"));
         } else if tree.contains_key("assock") {
             #[cfg(feature = "websocket")]
             return Ok(UseCase::Websocket(
@@ -407,6 +417,8 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
             if let Err(e) = match &mut wwwroot.mount {
                 #[cfg(feature = "fcgi")]
                 UseCase::FCGI(fcgi) => fcgi.setup().await,
+                #[cfg(feature = "proxy")]
+                UseCase::Proxy(p) => p.setup().await,
                 #[cfg(feature = "webdav")]
                 UseCase::Webdav(dav) => dav.setup().await,
                 #[cfg(feature = "websocket")]

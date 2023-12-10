@@ -2,6 +2,8 @@
 pub mod dav;
 #[cfg(feature = "fcgi")]
 pub mod fcgi;
+#[cfg(feature = "proxy")]
+pub mod proxy;
 mod staticf;
 #[cfg(test)]
 pub(crate) mod test;
@@ -109,6 +111,10 @@ async fn handle_wwwroot(
         #[cfg(test)]
         config::UseCase::UnitTest(ut) => {
             return ut.body(req_path, web_mount, remote_addr);
+        }
+        #[cfg(feature = "proxy")]
+        config::UseCase::Proxy(config) => {
+            return proxy::forward(req, &req_path, remote_addr, config).await
         }
     };
 
