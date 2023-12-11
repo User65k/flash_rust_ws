@@ -1,22 +1,25 @@
 use bytes::{Bytes, BytesMut};
 use hyper::{
+    client::HttpConnector,
+    header::{self, HeaderName, HeaderValue},
     http::uri,
-    header::{self, HeaderValue, HeaderName},
-    Body, Client, Request, Response, Uri, HeaderMap, StatusCode, upgrade::OnUpgrade, client::HttpConnector,
+    upgrade::OnUpgrade,
+    Body, Client, HeaderMap, Request, Response, StatusCode, Uri,
 };
 use log::error;
 use serde::Deserialize;
-use tokio::io::copy_bidirectional;
 use std::net::SocketAddr;
 use std::{
     convert::TryFrom,
     io::{Error as IoError, ErrorKind},
 };
+use tokio::io::copy_bidirectional;
 
 use crate::config::Utf8PathBuf;
 
 /// these have to be removed
-static HOP_BY_HOP_HEADERS: [HeaderName; 8] = [
+static HOP_BY_HOP_HEADERS: [HeaderName; 7] = [
+    // https://datatracker.ietf.org/doc/html/rfc2616#section-13.5.1
     header::CONNECTION,
     header::TE,
     header::TRAILER,
@@ -25,7 +28,6 @@ static HOP_BY_HOP_HEADERS: [HeaderName; 8] = [
     header::PROXY_AUTHENTICATE,
     header::PROXY_AUTHORIZATION,
     HeaderName::from_static("keep-alive"),
-    HeaderName::from_static("proxy-connection")
 ];
 //static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("X-Forwarded-For");
 static TRAILERS: &str = "trailers";
@@ -35,14 +37,22 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
         headers.remove(hh);
     }
 }
-fn remove_connection_headers(headers: &mut HeaderMap) {
+/// remove connection headers before http/1.1
+/// https://datatracker.ietf.org/doc/html/rfc2616#section-14.10
+fn remove_connection_headers(v: hyper::Version, headers: &mut HeaderMap) {
+    match v {
+        hyper::Version::HTTP_09 => {}
+        hyper::Version::HTTP_10 => {}
+        _ => return,
+    }
     let value = match headers.get(header::CONNECTION) {
         None => return,
         Some(v) => v.clone(),
     };
     for name in value.to_str().unwrap().split(',') {
-        if !name.trim().is_empty() {
-            headers.remove(name.trim());
+        let name = name.trim();
+        if !name.is_empty() {
+            headers.remove(name);
         }
     }
 }
@@ -53,10 +63,12 @@ pub async fn forward(
     remote_addr: SocketAddr,
     config: &Proxy,
 ) -> Result<Response<Body>, IoError> {
-
     let query = req.uri().query();
 
-    let mut new_path = req_path.prefixed_as_abs_url_path(&config.forward.path, query.map(|s|s.len()+1).unwrap_or(0));
+    let mut new_path = req_path.prefixed_as_abs_url_path(
+        &config.forward.path,
+        query.map(|s| s.len() + 1).unwrap_or(0),
+    );
 
     if let Some(q) = query {
         new_path.push('?');
@@ -68,11 +80,8 @@ pub async fn forward(
         .authority(config.forward.authority.clone())
         .path_and_query(new_path)
         .build()
-        .unwrap();//can't happen - all parts set
+        .unwrap(); //can't happen - all parts set
     *req.uri_mut() = new_uri;
-
-    //new host header
-    req.headers_mut().insert(header::HOST, HeaderValue::from_bytes(config.forward.authority.as_str().as_bytes()).expect("authority not a header value"));
 
     let contains_te_trailers_value = req
         .headers()
@@ -85,8 +94,8 @@ pub async fn forward(
                 .any(|e| e.trim() == TRAILERS)
         })
         .unwrap_or(false);
+    remove_connection_headers(req.version(), req.headers_mut());
     remove_hop_by_hop_headers(req.headers_mut());
-    remove_connection_headers(req.headers_mut());
     if contains_te_trailers_value {
         req.headers_mut()
             .insert(header::TE, HeaderValue::from_static(TRAILERS));
@@ -117,7 +126,7 @@ pub async fn forward(
         //;proto=http;by=203.0.113.43
         req.headers_mut()
             .insert(header::FORWARDED, into_header_value(buf.freeze())?);
-    }else{
+    } else {
         req.headers_mut().remove(header::FORWARDED);
     }
     /*if config.add_x_forwarded_for_header {
@@ -151,14 +160,22 @@ pub async fn forward(
         }
         req.headers_mut()
             .insert(header::VIA, into_header_value(buf.freeze())?);
-    }else{
+    } else {
         req.headers_mut().remove(header::VIA);
     }
 
     let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
     if request_upgraded.is_some() {
-        req.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+        req.headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
     }
+
+    //new host header
+    req.headers_mut().insert(
+        header::HOST,
+        HeaderValue::from_bytes(config.forward.authority.as_str().as_bytes())
+            .expect("authority not a header value"),
+    );
 
     let mut resp = match config.client.as_ref().unwrap().request(req).await {
         Ok(r) => r,
@@ -177,9 +194,8 @@ pub async fn forward(
         }
     };
 
-
+    remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());
-    remove_connection_headers(resp.headers_mut());
 
     if let Some(host) = &config.add_via_header_to_client {
         //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Via
@@ -205,7 +221,7 @@ pub async fn forward(
                 Ok(u) => u,
                 Err(e) => {
                     error!("response upgrade failed: {}", e);
-                    return Err(ErrorKind::InvalidInput.into())
+                    return Err(ErrorKind::InvalidInput.into());
                 }
             };
 
@@ -245,8 +261,8 @@ pub struct Proxy {
     //max_req_body_size: u32,
     //allowed_methods: Vec<String>,
     //header_policy: u8,
-    //filter_req_header: Vec<String>,
-    //filter_resp_header: Vec<String>,
+    //filter_req_header: Vec<HeaderNameCfg>,
+    //filter_resp_header: Vec<HeaderNameCfg>,
     #[serde(skip)]
     client: Option<Client<HttpConnector>>,
 }
@@ -256,7 +272,7 @@ pub struct Proxy {
 struct ProxyAdress {
     scheme: uri::Scheme,
     authority: uri::Authority,
-    path: Utf8PathBuf
+    path: Utf8PathBuf,
 }
 
 impl TryFrom<String> for ProxyAdress {
@@ -266,10 +282,19 @@ impl TryFrom<String> for ProxyAdress {
         let uri = Uri::try_from(value)?;
         let p = uri.into_parts();
         let scheme = match p.scheme {
-            Some(s) => s,
+            Some(s) if s == uri::Scheme::HTTP => uri::Scheme::HTTP,
+            /*#[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            Some(s) if s == uri::Scheme::HTTPS => uri::Scheme::HTTPS,
+            #[cfg(not(any(feature = "tlsrust", feature = "tlsnative")))]*/
+            Some(s) if s == uri::Scheme::HTTPS => {
+                anyhow::bail!("TLS support is disabled");
+            }
+            Some(s) => {
+                anyhow::bail!("{} is not known", s);
+            }
             None => {
                 anyhow::bail!("No scheme given");
-            },
+            }
         };
         let authority = match p.authority {
             Some(a) => a,
@@ -278,11 +303,18 @@ impl TryFrom<String> for ProxyAdress {
             }
         };
         let path = if let Some(pq) = p.path_and_query {
+            if pq.query().is_some() {
+                anyhow::bail!("query is not supported. Please request support for it. https://github.com/User65k/flash_rust_ws/issues");
+            }
             Utf8PathBuf::from(pq.as_str())
-        }else{
+        } else {
             Utf8PathBuf::empty()
         };
-        Ok(ProxyAdress{ scheme, authority, path })
+        Ok(ProxyAdress {
+            scheme,
+            authority,
+            path,
+        })
     }
 }
 
@@ -292,10 +324,248 @@ fn yes() -> bool {
 
 impl Proxy {
     pub async fn setup(&mut self) -> Result<(), String> {
-        self.client = Some(Client::new());
+        match self.forward.scheme.as_str() {
+            "http" => self.client = Some(Client::new()),
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            "https" => { /*
+                 let connector = Connector::new();
+                 let client = Client::builder().build::<_, Body>(connector);
+                 self.client = Some(client);*/
+            }
+            s => {
+                return Err(format!("{} is not known", s));
+            }
+        }
         Ok(())
     }
 }
 
-// /lol         -> https://remote/app/
-// /lol/static  -> https://remote/lib/
+/*pub struct Connector;
+
+impl Connector {
+    pub fn new() -> Connector {
+        Connector {}
+    }
+}
+#[cfg(feature = "tlsrust")]
+use tokio_rustls::{TlsConnector, rustls::client::ClientConfig};
+
+
+impl Service<Uri> for Connector {
+    type Response = TlsStream;
+    type Error = std::io::Error;
+    // We can't "name" an `async` generated future.
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // This connector is always ready, but others might not be.
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, dst: Uri) -> Self::Future {
+        let fut = async move {
+            let host = match dst.host() {
+                Some(s) => s,
+                None => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing host"));
+                }
+            };
+            let port = match dst.port() {
+                Some(port) => port.as_u16(),
+                None => 443,
+            };
+            let stream = TcpStream::connect((host, port)).await?;
+            let config = ClientConfig::builder().with_safe_defaults().with_root_certificates(root_store).with_no_client_auth();
+            TlsConnector::connect(&self, host, stream).await
+        };
+
+        Box::pin(fut)
+    }
+}*/
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::{Body, Request};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+    };
+
+    use crate::{
+        config::{UseCase, Utf8PathBuf},
+        dispatch::WebPath,
+    };
+    #[test]
+    fn basic_config() {
+        if let Ok(UseCase::Proxy(p)) = toml::from_str(
+            r#"
+            forward = "http://remote/path"
+        "#,
+        ) {
+            assert_eq!(p.forward.authority, "remote");
+            assert_eq!(p.forward.scheme, uri::Scheme::HTTP);
+            assert_eq!(p.forward.path, Utf8PathBuf::from("/path"));
+        } else {
+            panic!("not proxy");
+        }
+    }
+
+    /// send a request to a FCGI mount and return its TcpStream
+    /// (as well as the Task doing the request)
+    async fn test_forward(
+        req: Request<Body>,
+        req_path: &str,
+        mut proxy: Proxy,
+    ) -> (TcpStream, tokio::task::JoinHandle<Response<Body>>) {
+        // pick a free port
+        let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
+        let req_path = req_path.to_owned();
+
+        proxy.forward.authority = a.to_string().parse().unwrap();
+        proxy.setup().await.unwrap();
+
+        let m = tokio::spawn(async move {
+            let res = forward(
+                req,
+                &WebPath::parsed(&req_path),
+                "1.2.3.4:42".parse().unwrap(),
+                &proxy,
+            )
+            .await;
+            res.unwrap()
+        });
+        let (app_socket, _) = app_listener.accept().await.unwrap();
+        (app_socket, m)
+    }
+    #[tokio::test]
+    async fn simple_fwd() {
+        let req = Request::get("/mount/some/path")
+            .body(Body::empty())
+            .unwrap();
+        let (mut s, t) = test_forward(
+            req,
+            "some/path",
+            Proxy {
+                forward: "http://ignored/base_path".to_string().try_into().unwrap(),
+                add_forwarded_header: false,
+                add_via_header_to_client: Some("rproxy1".to_string()),
+                add_via_header_to_server: None,
+                client: None,
+            },
+        )
+        .await;
+
+        let mut buf = [0u8; 25];
+        let i = s.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf[..i], b"GET /base_path/some/path ");
+
+        s.write_all(b"HTTP/1.0 500 Not so OK\r\n\r\n")
+            .await
+            .unwrap();
+        let r = t.await.unwrap();
+        assert_eq!(r.status(), 500);
+        assert_eq!(
+            r.headers().get(header::VIA),
+            Some(&HeaderValue::from_static("HTTP/1.0 rproxy1"))
+        );
+    }
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+    #[tokio::test]
+    async fn add_headers() {
+        let req = Request::get("/mount/")
+            .header(header::HOST, "a_host")
+            .version(hyper::Version::HTTP_10)
+            .body(Body::empty())
+            .unwrap();
+        let (mut s, t) = test_forward(
+            req,
+            "",
+            Proxy {
+                forward: "http://ignored/".to_string().try_into().unwrap(),
+                add_forwarded_header: true,
+                add_via_header_to_client: None,
+                add_via_header_to_server: Some("rproxy1".to_string()),
+                client: None,
+            },
+        )
+        .await;
+
+        let mut buf = [0u8; 16];
+        let i = s.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf[..i], b"GET / HTTP/1.0\r\n");
+        let mut buf = BytesMut::with_capacity(4096);
+        s.read_buf(&mut buf).await.unwrap();
+
+        assert!(find_subsequence(&buf, b"\r\nvia: HTTP/1.0 rproxy1\r\n"));
+        assert!(find_subsequence(
+            &buf,
+            b"\r\nforwarded: for=1.2.3.4; host=a_host\r\n"
+        ));
+
+        //return something else than 200
+        s.write_all(b"HTTP/1.0 500 Not so OK\r\n\r\n")
+            .await
+            .unwrap();
+        let r = t.await.unwrap();
+        assert_eq!(r.status(), 500);
+    }
+    #[tokio::test]
+    async fn remove_hop_headers() {
+        let req = Request::get("/mount/")
+            .header(header::CONNECTION, "close")
+            .header(header::TRANSFER_ENCODING, "value")
+            .header("keep-alive", "value")
+            .header(header::TE, "value")
+            .header(header::TRAILER, "value")
+            .header(header::PROXY_AUTHENTICATE, "value")
+            .header(header::PROXY_AUTHORIZATION, "value")
+            .body(Body::empty())
+            .unwrap();
+        let (mut s, t) = test_forward(
+            req,
+            "",
+            Proxy {
+                forward: "http://ignored/".to_string().try_into().unwrap(),
+                add_forwarded_header: false,
+                add_via_header_to_client: None,
+                add_via_header_to_server: None,
+                client: None,
+            },
+        )
+        .await;
+
+        let mut buf = Vec::with_capacity(4096);
+        s.read_buf(&mut buf).await.unwrap();
+
+        let dont_include = [
+            "keep-alive",
+            "transfer-encoding",
+            "te",
+            "connection",
+            "trailer",
+            "proxy-authorization",
+            "proxy-authenticate",
+        ];
+
+        for line in String::from_utf8(buf).unwrap().lines() {
+            for kw in dont_include {
+                if line.starts_with(kw) {
+                    panic!("contains header {}", kw);
+                }
+            }
+        }
+
+        //return something else than 200
+        s.write_all(b"HTTP/1.0 500 Not so OK\r\n\r\n")
+            .await
+            .unwrap();
+        let r = t.await.unwrap();
+        assert_eq!(r.status(), 500);
+    }
+    //test upgrade
+}
