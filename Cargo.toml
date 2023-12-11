@@ -66,7 +66,7 @@ logrot = ["log4rs/background_rotation"]
 fcgi = ["async-fcgi", "async-stream-connection"]
 websocket = ["websocket-codec", "tokio-util", "futures-util/sink", "async-stream-connection"]
 webdav = ["xml-rs", "chrono"]
-proxy = []
+proxy = ["hyper/client"]
 
 [[bin]]
 name = "flash_rust_ws"
