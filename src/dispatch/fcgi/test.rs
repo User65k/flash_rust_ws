@@ -594,7 +594,14 @@ async fn resolve_index() {
     );
     assert_eq!(
         get_param(&buf, SCRIPT_FILENAME),
-        Some(tf.get_path().to_str().unwrap().as_bytes())
+        Some(
+            tf.get_path()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .as_bytes()
+        )
     );
     assert_eq!(get_param(&buf, b"QUERY_STRING"), Some(&b""[..]));
 
@@ -658,6 +665,30 @@ async fn file_request_dont_add_index() {
     );
     assert_eq!(
         get_param(&buf, SCRIPT_FILENAME),
-        Some(picked_file.get_path().to_str().unwrap().as_bytes())
+        Some(
+            picked_file
+                .get_path()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .as_bytes()
+        )
     );
+}
+
+#[tokio::test]
+///negative test for resolve_file_with_path_info
+async fn test_resolve_path() {
+    let full_path = std::env::temp_dir().join("a/b/c/d");
+    let sf = StaticFiles {
+        dir: AbsPathBuf::temp_dir(),
+        follow_symlinks: false,
+        index: None,
+        serve: None,
+    };
+    let e = resolve_path(full_path, false, &sf, &WebPath::parsed("a/b/c/d"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::NotFound);
 }

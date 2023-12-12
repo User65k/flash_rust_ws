@@ -309,8 +309,7 @@ pub async fn resolve_path<'a>(
     match staticf::resolve_path(&full_path, is_dir_request, &sf.index).await {
         Ok((p, r)) => Ok((p, r, None)),
         Err(err) => {
-            if Some(20) == err.raw_os_error() {
-                //if e.kind() == ErrorKind::NotADirectory {
+            if error_indicates_path_info(&err) {
                 /*
                 pop the last path component until we hit a file
                 everything after the file will become PATH_INFO
@@ -318,7 +317,7 @@ pub async fn resolve_path<'a>(
                 let mut fp = full_path;
                 loop {
                     if !fp.pop() {
-                        // we went all the way up - should not ever happen
+                        // we went all the way up - should not ever happen on linux but on windows
                         return Err(err);
                     }
                     match fp.metadata() {
@@ -332,7 +331,7 @@ pub async fn resolve_path<'a>(
                             }
                         }
                         Err(e) => {
-                            if Some(20) == e.raw_os_error() {
+                            if error_indicates_path_info(&e) {
                                 //keep going up
                             } else {
                                 return Err(e);
@@ -360,4 +359,14 @@ pub async fn resolve_path<'a>(
             }
         }
     }
+}
+
+//on linux its ErrorKind::NotADirectory (or 20)
+//on windows its just NotFound (or 3)
+#[inline]
+fn error_indicates_path_info(err: &IoError) -> bool {
+    #[cfg(unix)]
+    return Some(20) == err.raw_os_error();
+    #[cfg(windows)]
+    return Some(3) == err.raw_os_error();
 }
