@@ -543,7 +543,14 @@ async fn resolve_file_with_path_info() {
     assert_eq!(res.status(), 201);
     assert_eq!(
         get_param(&buf, SCRIPT_FILENAME),
-        Some(tf.get_path().to_str().unwrap().as_bytes())
+        Some(
+            tf.get_path()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .as_bytes()
+        )
     );
     assert_eq!(
         get_param(&buf, SCRIPT_NAME).and_then(|b| std::str::from_utf8(b).ok()),
