@@ -59,14 +59,14 @@ libsystemd = "0.6"
 libc = "0.2"
 
 [features]
-default = ["tlsrust", "tlsrust_acme", "fcgi", "webdav"]
+default = ["tlsrust", "tlsrust_acme", "fcgi", "webdav", "proxy"]
 tlsrust = ["tokio-rustls", "rustls-pemfile"]
 tlsrust_acme = ["async-acme/hyper_rustls"]
 logrot = ["log4rs/background_rotation"]
 fcgi = ["async-fcgi", "async-stream-connection"]
 websocket = ["websocket-codec", "tokio-util", "futures-util/sink", "async-stream-connection"]
 webdav = ["xml-rs", "chrono"]
-
+proxy = ["hyper/client", "hyper/tcp"]
 
 [[bin]]
 name = "flash_rust_ws"
