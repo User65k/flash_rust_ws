@@ -31,7 +31,7 @@ pub fn insert_default_headers(
     if let Some(config_header) = config_header {
         for (key, val) in config_header.iter() {
             if !header.contains_key(&key.0) {
-                header.insert(key.0.clone(), val.0.clone());
+                header.insert(&key.0, val.0.clone());
             }
         }
     }
@@ -91,6 +91,19 @@ async fn handle_wwwroot(
     //hyper_reverse_proxy::call(remote_addr.ip(), "http://127.0.0.1:13901", req)
 
     let sf = match &wwwr.mount {
+        config::UseCase::Redirect(redir) => {
+            return Ok(Response::builder()
+                .status(
+                    redir
+                        .code
+                        .as_ref()
+                        .map(|c| c.0)
+                        .unwrap_or(StatusCode::MOVED_PERMANENTLY),
+                )
+                .header(header::LOCATION, &redir.redirect.0)
+                .body(Body::empty())
+                .unwrap());
+        }
         config::UseCase::StaticFiles(sf) => sf,
         #[cfg(feature = "fcgi")]
         config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, static_files }) => {

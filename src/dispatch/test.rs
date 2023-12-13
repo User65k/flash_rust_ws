@@ -218,6 +218,59 @@ mod mount {
         let res = handle_vhost(req, &cfg, sa).await;
         assert!(res.is_ok());
     }
+    #[tokio::test]
+    async fn redirect_w_status() {
+        let req = Request::get("/").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(
+            Utf8PathBuf::from(""),
+            config::WwwRoot {
+                mount: toml::from_str(
+                    r#"
+                    redirect = "http://some/where/"
+                    code = 302
+                "#,
+                )
+                .unwrap(),
+                header: None,
+                auth: None,
+            },
+        );
+        let res = handle_vhost(req, &cfg, sa).await.unwrap();
+        assert_eq!(res.status(), 302);
+        assert_eq!(
+            res.headers().get(header::LOCATION).unwrap(),
+            "http://some/where/"
+        );
+    }
+    #[tokio::test]
+    async fn redirect() {
+        let req = Request::get("/").body(Body::empty()).unwrap();
+        let sa = "127.0.0.1:8080".parse().unwrap();
+
+        let mut cfg = config::VHost::new(sa);
+        cfg.paths.insert(
+            Utf8PathBuf::from(""),
+            config::WwwRoot {
+                mount: toml::from_str(
+                    r#"
+                    redirect = "https://some:1234/"
+                "#,
+                )
+                .unwrap(),
+                header: None,
+                auth: None,
+            },
+        );
+        let res = handle_vhost(req, &cfg, sa).await.unwrap();
+        assert_eq!(res.status(), 301);
+        assert_eq!(
+            res.headers().get(header::LOCATION).unwrap(),
+            "https://some:1234/"
+        );
+    }
 }
 
 mod vhost {

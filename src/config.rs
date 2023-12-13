@@ -13,6 +13,7 @@ use crate::transport::tls::{ParsedTLSConfig, TLSBuilderTrait, TlsUserConfig};
 use anyhow::{Context, Result};
 use hyper::header::HeaderName;
 use hyper::http::HeaderValue;
+use hyper::StatusCode;
 use log::info;
 use log4rs::config::RawConfig as LogConfig;
 use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
@@ -144,12 +145,50 @@ impl StaticFiles {
     }
 }
 
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct StatusCfg(pub StatusCode);
+impl<'de> Deserialize<'de> for StatusCfg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = StatusCfg;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a valid HTTP Status Code")
+            }
+            // toml only knows integers -> they all are i64
+            fn visit_i64<E>(self, v: i64) -> std::prelude::v1::Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                Ok(StatusCfg(
+                    StatusCode::try_from(
+                        std::convert::TryInto::<u16>::try_into(v).map_err(E::custom)?,
+                    )
+                    .map_err(E::custom)?,
+                ))
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Redirect {
+    pub code: Option<StatusCfg>,
+    pub redirect: HeaderValueCfg,
+}
+
 /// Purpose of a single `WwwRoot`
 #[derive(Debug)]
 pub enum UseCase {
     #[cfg(feature = "fcgi")]
     FCGI(FcgiMnt),
     StaticFiles(StaticFiles),
+    Redirect(Redirect),
     #[cfg(feature = "proxy")]
     Proxy(Proxy),
     #[cfg(feature = "websocket")]
@@ -199,6 +238,10 @@ impl<'de> Deserialize<'de> for UseCase {
         } else if tree.contains_key("dir") {
             Ok(UseCase::StaticFiles(
                 StaticFiles::deserialize(tree).map_err(DeError::custom)?,
+            ))
+        } else if tree.contains_key("redirect") {
+            Ok(UseCase::Redirect(
+                Redirect::deserialize(tree).map_err(DeError::custom)?,
             ))
         } else {
             Err(DeError::custom(
@@ -426,6 +469,7 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                 #[cfg(test)]
                 UseCase::UnitTest(_) => unreachable!(),
                 UseCase::StaticFiles(sf) => sf.setup().await,
+                UseCase::Redirect(_) => Ok(()),
             } {
                 errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
             }
