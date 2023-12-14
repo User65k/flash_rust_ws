@@ -80,6 +80,35 @@ async fn handle_wwwroot(
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     debug!("working root {:?}", wwwr);
+    let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
+    /*
+    A web_mount is always a folder.
+    Unless...
+    - Its a Websocket
+    - Its a redirection
+    - FCGI does the routing
+
+    This is mainly important in the case of acting as a reverse proxy (so relative links work).
+    StaticFiles+Webdav would enforce this later (after some disk IO), so do it now
+    */
+    match &wwwr.mount {
+        config::UseCase::Redirect(_) => {}
+        #[cfg(feature = "fcgi")]
+        config::UseCase::FCGI(fcgi::FcgiMnt {
+            fcgi: fcgi::FCGIApp { exec: None, .. },
+            static_files: None,
+        }) => {
+            //FCGI + dont check for file
+        }
+        #[cfg(feature = "websocket")]
+        config::UseCase::Websocket(_) => {}
+        _ => {
+            if req_path.is_empty() && !is_dir_request {
+                //mount paths must be a dir - always
+                return Ok(staticf::redirect(&req, &req_path, web_mount));
+            }
+        }
+    }
 
     if let Some(auth_conf) = wwwr.auth.as_ref() {
         //Authorisation is needed
@@ -87,8 +116,6 @@ async fn handle_wwwroot(
             return Ok(resp);
         }
     }
-
-    //hyper_reverse_proxy::call(remote_addr.ip(), "http://127.0.0.1:13901", req)
 
     let sf = match &wwwr.mount {
         config::UseCase::Redirect(redir) => {
@@ -135,7 +162,6 @@ async fn handle_wwwroot(
         }
     };
 
-    let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
     let full_path = req_path.prefix_with(&sf.dir);
 
     #[cfg(feature = "fcgi")]

@@ -63,8 +63,11 @@ pub fn redirect(
 ) -> Response<Body> {
     //request for a file that is a directory
     let mut target_url =
-        req_path.prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(0, |q| q.len() + 2));
-    target_url.push('/');
+        req_path.prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(1, |q| q.len() + 2));
+    //if !target_url.ends_with('/') { //happens if req_path was empty
+    if !req_path.is_empty() {
+        target_url.push('/');
+    }
     if let Some(q) = req.uri().query() {
         target_url.push('?');
         target_url.push_str(q);
@@ -146,7 +149,7 @@ mod tests {
         config::{AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf, WwwRoot},
         dispatch::test::{TempDir, TempFile},
     };
-    use hyper::body::to_bytes;
+    use hyper::{body::to_bytes, header};
     use hyper::{Body, Request, Response};
     use std::path::Path;
     //use crate::dispatch::test::
@@ -441,5 +444,26 @@ mod tests {
         assert_eq!(res.status(), 200);
         let body = to_bytes(res.into_body()).await.unwrap();
         assert_eq!(body, file_content);
+    }
+    #[test]
+    fn redir_test() {
+        let req = Request::get("/mount/this").body(Body::empty()).unwrap();
+        let resp = super::redirect(
+            &req,
+            &crate::dispatch::WebPath::parsed("this"),
+            &Utf8PathBuf::from("/mount"),
+        );
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/mount/this/"
+        );
+
+        let req = Request::get("/mount").body(Body::empty()).unwrap();
+        let resp = super::redirect(
+            &req,
+            &crate::dispatch::WebPath::parsed(""),
+            &Utf8PathBuf::from("/mount"),
+        );
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/mount/");
     }
 }

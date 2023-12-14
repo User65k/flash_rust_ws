@@ -129,7 +129,6 @@ impl<'a> WebPath<'a> {
         r.push_str(s);
         r
     }
-    #[cfg(feature = "websocket")]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -267,6 +266,45 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             ErrorKind::InvalidData
+        );
+    }
+    #[test]
+    fn ito_abs_url() {
+        assert_eq!(
+            WebPath::try_from(&"/test".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0),
+            "/test"
+        );
+        assert_eq!(
+            WebPath::try_from(&"/test".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/"), 0),
+            "/test"
+        );
+        assert_eq!(
+            WebPath::try_from(&"/test".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0),
+            "/something/test"
+        );
+        assert_eq!(
+            WebPath::try_from(&"/test".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0),
+            "/something/test"
+        );
+        assert_eq!(
+            WebPath::try_from(&"/".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0),
+            "/something/"
+        );
+        assert_eq!(
+            WebPath::try_from(&"/".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0),
+            "/something/"
         );
     }
 }
