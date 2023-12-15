@@ -567,5 +567,37 @@ mod tests {
         let r = t.await.unwrap();
         assert_eq!(r.status(), 500);
     }
+    #[tokio::test]
+    async fn web_mount_is_a_folder() {
+        let req = Request::get("/mount").body(Body::empty()).unwrap();
+
+        let proxy = Proxy {
+            forward: "http://localhost:0/".to_string().try_into().unwrap(),
+            add_forwarded_header: false,
+            add_via_header_to_client: None,
+            add_via_header_to_server: None,
+            client: None,
+        };
+
+        let t = tokio::spawn(async move {
+            let res = crate::dispatch::handle_wwwroot(
+                req,
+                &crate::config::WwwRoot {
+                    mount: crate::config::UseCase::Proxy(proxy),
+                    header: None,
+                    auth: None,
+                },
+                WebPath::parsed(""),
+                &Utf8PathBuf::from("/mount"),
+                "1.2.3.4:42".parse().unwrap(),
+            )
+            .await;
+            res.unwrap()
+        });
+
+        let r = t.await.unwrap();
+        assert_eq!(r.status(), 301);
+        assert_eq!(r.headers().get(header::LOCATION).unwrap(), "/mount/");
+    }
     //test upgrade
 }
