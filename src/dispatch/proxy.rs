@@ -6,7 +6,7 @@ use hyper::{
     upgrade::OnUpgrade,
     Body, Client, HeaderMap, Request, Response, StatusCode, Uri,
 };
-use log::error;
+use log::{error, trace, debug};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::{
@@ -81,6 +81,7 @@ pub async fn forward(
         .path_and_query(new_path)
         .build()
         .unwrap(); //can't happen - all parts set
+    trace!("Forward to {}", &new_uri);
     *req.uri_mut() = new_uri;
 
     let contains_te_trailers_value = req
@@ -193,6 +194,7 @@ pub async fn forward(
             resp
         }
     };
+    debug!("response: {:?} {:?}", resp.status(), resp.headers());
 
     remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());

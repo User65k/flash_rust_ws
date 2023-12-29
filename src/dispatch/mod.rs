@@ -163,6 +163,7 @@ async fn handle_wwwroot(
     };
 
     let full_path = req_path.prefix_with(&sf.dir);
+    debug!("check for file: {:?}", full_path);
 
     #[cfg(feature = "fcgi")]
     let (full_path, resolved_file, path_info) =
@@ -269,7 +270,7 @@ async fn dispatch_to_vhost(
     remote_addr: SocketAddr,
 ) -> Result<Response<Body>, IoError> {
     if let Some(host) = get_host(&req) {
-        debug!("Host: {:?}", host);
+        trace!("Host: {:?}", host);
         if let Some(hcfg) = cfg.vhosts.get(host) {
             //user wants this host
             return handle_vhost(req, hcfg, remote_addr).await;
