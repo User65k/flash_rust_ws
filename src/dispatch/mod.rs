@@ -102,6 +102,10 @@ async fn handle_wwwroot(
         }
         #[cfg(feature = "websocket")]
         config::UseCase::Websocket(_) => {}
+        #[cfg(feature = "proxy")]
+        config::UseCase::Proxy(proxy::Proxy {
+            force_dir: false, ..
+        }) => {}
         _ => {
             if req_path.is_empty() && !is_dir_request {
                 //mount paths must be a dir - always

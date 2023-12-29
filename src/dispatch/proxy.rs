@@ -6,7 +6,7 @@ use hyper::{
     upgrade::OnUpgrade,
     Body, Client, HeaderMap, Request, Response, StatusCode, Uri,
 };
-use log::{error, trace, debug};
+use log::{debug, error, trace};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::{
@@ -259,6 +259,8 @@ pub struct Proxy {
     //add_x_forwarded_for_header: bool,
     add_via_header_to_client: Option<String>,
     add_via_header_to_server: Option<String>,
+    #[serde(default = "yes")]
+    pub force_dir: bool,
     //timeout: u8,
     //max_req_body_size: u32,
     //allowed_methods: Vec<String>,
@@ -453,6 +455,7 @@ mod tests {
                 add_forwarded_header: false,
                 add_via_header_to_client: Some("rproxy1".to_string()),
                 add_via_header_to_server: None,
+                force_dir: true,
                 client: None,
             },
         )
@@ -492,6 +495,7 @@ mod tests {
                 add_forwarded_header: true,
                 add_via_header_to_client: None,
                 add_via_header_to_server: Some("rproxy1".to_string()),
+                force_dir: true,
                 client: None,
             },
         )
@@ -536,6 +540,7 @@ mod tests {
                 add_forwarded_header: false,
                 add_via_header_to_client: None,
                 add_via_header_to_server: None,
+                force_dir: true,
                 client: None,
             },
         )
@@ -578,6 +583,7 @@ mod tests {
             add_forwarded_header: false,
             add_via_header_to_client: None,
             add_via_header_to_server: None,
+            force_dir: true,
             client: None,
         };
 
@@ -600,6 +606,33 @@ mod tests {
         let r = t.await.unwrap();
         assert_eq!(r.status(), 301);
         assert_eq!(r.headers().get(header::LOCATION).unwrap(), "/mount/");
+    }
+    #[tokio::test]
+    async fn force_dir_false() {
+        let req = Request::get("/mount").body(Body::empty()).unwrap();
+        let (mut s, t) = test_forward(
+            req,
+            "",
+            Proxy {
+                forward: "http://ignored/".to_string().try_into().unwrap(),
+                add_forwarded_header: false,
+                add_via_header_to_client: None,
+                add_via_header_to_server: None,
+                force_dir: false,
+                client: None,
+            },
+        )
+        .await;
+
+        let mut buf = Vec::with_capacity(4096);
+        s.read_buf(&mut buf).await.unwrap();
+
+        //return something else than 200
+        s.write_all(b"HTTP/1.0 201 Not so OK\r\n\r\n")
+            .await
+            .unwrap();
+        let r = t.await.unwrap();
+        assert_eq!(r.status(), 201);
     }
     //test upgrade
 }
