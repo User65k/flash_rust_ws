@@ -310,6 +310,7 @@ pub async fn resolve_path<'a>(
         Ok((p, r)) => Ok((p, r, None)),
         Err(err) => {
             if error_indicates_path_info(&err) {
+                debug!("{:?} might have a PATH_INFO",&full_path);
                 /*
                 pop the last path component until we hit a file
                 everything after the file will become PATH_INFO
