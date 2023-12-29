@@ -37,15 +37,6 @@ pub async fn upgrade(
         }
     }
 
-    let wscfg = match ws {
-        /*
-        Websocket::Proxy { forward } => {
-            *res.status_mut() = StatusCode::NOT_IMPLEMENTED;
-            return Ok(res);
-        },*/
-        Websocket::Unwraped(wscfg) => wscfg,
-    };
-
     let ws_accept = if let Ok(req) = ClientRequest::parse(|name| {
         let h = req.headers().get(name)?;
         h.to_str().ok()
@@ -58,8 +49,8 @@ pub async fn upgrade(
     //TODO Sec-WebSocket-Protocol
     //TODO Sec-WebSocket-Extensions
 
-    let addr = wscfg.assock.clone(); //TODO config lives long enough
-    let forward_header = wscfg.forward_header;
+    let addr = ws.assock.clone(); //TODO config lives long enough
+    let forward_header = ws.forward_header;
 
     tokio::task::spawn(async move {
         let header = if forward_header {
@@ -183,18 +174,9 @@ async fn websocket(addr: &Addr, header: Option<HeaderMap>, mut frontend: AsyncCl
     let _ = frontend.send(Message::close(None)).await;
 }
 
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-#[serde(deny_unknown_fields)]
-pub enum Websocket {
-    //    Proxy{forward: String},
-    Unwraped(UnwrapedWS),
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UnwrapedWS {
+pub struct Websocket {
     assock: Addr,
     #[serde(default)]
     forward_header: bool, // = false
@@ -221,49 +203,60 @@ mod tests {
             assock = "127.0.0.1:1337"
         "#,
         ) {
-            let Websocket::Unwraped(u) = w;
-            assert_eq!(u.forward_header, false);
+            assert_eq!(w.forward_header, false);
         } else {
             panic!("not a webdav");
         }
     }
     #[test]
     fn parse_addr() {
-        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Inet(a), ..}))) = toml::from_str(
+        assert!(if let Ok(UseCase::Websocket(Websocket {
+            assock: Addr::Inet(a),
+            ..
+        })) = toml::from_str(
             r#"
             assock = "127.0.0.1:9000"
         "#,
         ) {
             a.port() == 9000 && a.is_ipv4() && a.ip().is_loopback()
-        }else{
+        } else {
             false
         });
-        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Inet(a), ..}))) = toml::from_str(
+        assert!(if let Ok(UseCase::Websocket(Websocket {
+            assock: Addr::Inet(a),
+            ..
+        })) = toml::from_str(
             r#"
             assock = "localhost:9000"
         "#,
         ) {
             a.port() == 9000
-        }else{
+        } else {
             false
         });
-        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Inet(a), ..}))) = toml::from_str(
+        assert!(if let Ok(UseCase::Websocket(Websocket {
+            assock: Addr::Inet(a),
+            ..
+        })) = toml::from_str(
             r#"
             assock = "[::1]:9000"
         "#,
         ) {
             a.port() == 9000 && a.is_ipv6() && a.ip().is_loopback()
-        }else{
+        } else {
             false
         });
         #[cfg(unix)]
-        assert!(if let Ok(UseCase::Websocket(Websocket::Unwraped(UnwrapedWS { assock: Addr::Unix(a), ..}))) = toml::from_str(
+        assert!(if let Ok(UseCase::Websocket(Websocket {
+            assock: Addr::Unix(a),
+            ..
+        })) = toml::from_str(
             r#"
             assock = "/path"
         "#,
         ) {
             a == std::path::Path::new("/path")
-        }else{
+        } else {
             false
         });
     }
@@ -312,10 +305,10 @@ mod tests {
     async fn as_sock() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let ws_cfg = Websocket::Unwraped(UnwrapedWS {
+        let ws_cfg = Websocket {
             assock: Addr::Inet(a),
             forward_header: false,
-        });
+        };
 
         let t: JoinHandle<Result<(), std::io::Error>> = tokio::spawn(async move {
             let (mut s, _a) = l.accept().await?;
