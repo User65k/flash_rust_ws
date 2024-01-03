@@ -651,7 +651,54 @@ mod tests {
     //test connect?
     #[tokio::test]
     async fn header_chaining() {
-        //TODO test chain of Forwarded and VIA
+        let req = Request::get("/mount/")
+        .header(header::VIA, "HTTP/0.9 someone")
+        .header(&X_FORWARDED_FOR, "10.10.10.10")
+        .header(header::FORWARDED, "for=10.10.10.10")
+        .body(Body::empty())
+        .unwrap();
+        let (mut s, t) = test_forward(
+            req,
+            "",
+            Proxy {
+                forward: "http://ignored/".to_string().try_into().unwrap(),
+                add_forwarded_header: true,
+                add_x_forwarded_for_header: true,
+                add_via_header_to_client: Some("my_front".to_string()),
+                add_via_header_to_server: Some("me".to_string()),
+                force_dir: true,
+                client: None,
+            },
+        )
+        .await;
+
+        let mut buf = Vec::with_capacity(4096);
+        s.read_buf(&mut buf).await.unwrap();
+
+        let mut hits = 0;
+        for line in String::from_utf8(buf).unwrap().lines() {
+            if let Some(v) = line.strip_prefix("via: ") {
+                assert_eq!(v, "HTTP/0.9 someone, HTTP/1.1 me");
+                hits+=1;
+            }
+            if let Some(v) = line.strip_prefix("forwarded: ") {
+                assert_eq!(v, "for=10.10.10.10, for=1.2.3.4");
+                hits+=2;
+            }
+            if let Some(v) = line.strip_prefix("x-forwarded-for: ") {
+                assert_eq!(v, "10.10.10.10, 1.2.3.4");
+                hits+=4;
+            }            
+        }
+        assert_eq!(hits, 7);
+
+        //return something else than 200
+        s.write_all(b"HTTP/1.0 203 Not so OK\r\nvia: HTTP/0.9 another\r\n\r\n")
+            .await
+            .unwrap();
+        let r = t.await.unwrap();
+        assert_eq!(r.headers().get(header::VIA).unwrap().as_bytes(), b"HTTP/0.9 another, HTTP/1.0 my_front");
+        assert_eq!(r.status(), 203);
 
     }
 
