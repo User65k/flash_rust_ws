@@ -29,7 +29,7 @@ static HOP_BY_HOP_HEADERS: [HeaderName; 7] = [
     header::PROXY_AUTHORIZATION,
     HeaderName::from_static("keep-alive"),
 ];
-//static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("X-Forwarded-For");
+static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("X-Forwarded-For");
 static TRAILERS: &str = "trailers";
 
 fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
@@ -105,20 +105,27 @@ pub async fn forward(
     if config.add_forwarded_header {
         //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
         let mut buf = BytesMut::with_capacity(512);
-        buf.extend_from_slice(b"for=");
-        buf.extend_from_slice(remote_addr.ip().to_string().as_bytes());
+
         //add old forwarded-for
         for hv in req.headers().get_all(header::FORWARDED) {
             let hv = hv.as_ref();
             if let Some(pos) = hv.windows(4).position(|window| window == b"for=") {
-                buf.extend_from_slice(b", ");
                 if let Some(pos_end) = hv[pos..].iter().position(|c| *c == b';') {
                     buf.extend_from_slice(&hv[pos..pos + pos_end - 1]);
                 } else {
                     buf.extend_from_slice(&hv[pos..]);
                 }
+                buf.extend_from_slice(b", ");
             }
         }
+        buf.extend_from_slice(b"for=");
+
+        let ip_str = match remote_addr.ip() {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => format!("\"[{}]\"", v6),
+        };
+
+        buf.extend_from_slice(ip_str.as_bytes());
         //add host header
         if let Some(host) = super::get_host(&req) {
             buf.extend_from_slice(b"; host=");
@@ -130,13 +137,13 @@ pub async fn forward(
     } else {
         req.headers_mut().remove(header::FORWARDED);
     }
-    /*if config.add_x_forwarded_for_header {
+    if config.add_x_forwarded_for_header {
         match req.headers_mut().entry(&X_FORWARDED_FOR) {
             hyper::header::Entry::Vacant(entry) => {
-                entry.insert(remote_addr.to_string().parse().expect("client IP had non ascii char"));
+                entry.insert(remote_addr.ip().to_string().parse().expect("client IP had non ascii char"));
             },
             hyper::header::Entry::Occupied(mut entry) => {
-                let client_ip_str = remote_addr.to_string();
+                let client_ip_str = remote_addr.ip().to_string();
                 let mut addr =
                     BytesMut::with_capacity(entry.iter().map(|s|s.len()+2).sum::<usize>() + client_ip_str.len());
 
@@ -150,15 +157,15 @@ pub async fn forward(
         }
     }else{
         req.headers_mut().remove(&X_FORWARDED_FOR);
-    }*/
+    }
     if let Some(host) = &config.add_via_header_to_server {
         //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Via
         let mut buf = BytesMut::with_capacity(512);
-        buf.extend_from_slice(format!("{:?} {}", req.version(), &host).as_bytes());
         for hv in req.headers().get_all(header::VIA) {
-            buf.extend_from_slice(b", ");
             buf.extend_from_slice(hv.as_ref());
+            buf.extend_from_slice(b", ");
         }
+        buf.extend_from_slice(format!("{:?} {}", req.version(), &host).as_bytes());
         req.headers_mut()
             .insert(header::VIA, into_header_value(buf.freeze())?);
     } else {
@@ -202,11 +209,11 @@ pub async fn forward(
     if let Some(host) = &config.add_via_header_to_client {
         //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Via
         let mut buf = BytesMut::with_capacity(512);
-        buf.extend_from_slice(format!("{:?} {}", resp.version(), &host).as_bytes());
         for hv in resp.headers().get_all(header::VIA) {
-            buf.extend_from_slice(b", ");
             buf.extend_from_slice(hv.as_ref());
+            buf.extend_from_slice(b", ");
         }
+        buf.extend_from_slice(format!("{:?} {}", resp.version(), &host).as_bytes());
         resp.headers_mut()
             .insert(header::VIA, into_header_value(buf.freeze())?);
     }
@@ -223,7 +230,8 @@ pub async fn forward(
                 Ok(u) => u,
                 Err(e) => {
                     error!("response upgrade failed: {}", e);
-                    return Err(ErrorKind::InvalidInput.into());
+                    let resp = Response::builder().status(hyper::StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap();
+                    return Ok(resp);
                 }
             };
 
@@ -256,7 +264,7 @@ pub struct Proxy {
     forward: ProxyAdress,
     #[serde(default = "yes")]
     add_forwarded_header: bool,
-    //add_x_forwarded_for_header: bool,
+    add_x_forwarded_for_header: bool,
     add_via_header_to_client: Option<String>,
     add_via_header_to_server: Option<String>,
     #[serde(default = "yes")]
@@ -453,6 +461,7 @@ mod tests {
             Proxy {
                 forward: "http://ignored/base_path".to_string().try_into().unwrap(),
                 add_forwarded_header: false,
+                add_x_forwarded_for_header: false,
                 add_via_header_to_client: Some("rproxy1".to_string()),
                 add_via_header_to_server: None,
                 force_dir: true,
@@ -493,6 +502,7 @@ mod tests {
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
                 add_forwarded_header: true,
+                add_x_forwarded_for_header: true,
                 add_via_header_to_client: None,
                 add_via_header_to_server: Some("rproxy1".to_string()),
                 force_dir: true,
@@ -538,6 +548,7 @@ mod tests {
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
                 add_forwarded_header: false,
+                add_x_forwarded_for_header: false,
                 add_via_header_to_client: None,
                 add_via_header_to_server: None,
                 force_dir: true,
@@ -581,6 +592,7 @@ mod tests {
         let proxy = Proxy {
             forward: "http://localhost:0/".to_string().try_into().unwrap(),
             add_forwarded_header: false,
+            add_x_forwarded_for_header: false,
             add_via_header_to_client: None,
             add_via_header_to_server: None,
             force_dir: true,
@@ -616,6 +628,7 @@ mod tests {
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
                 add_forwarded_header: false,
+                add_x_forwarded_for_header: false,
                 add_via_header_to_client: None,
                 add_via_header_to_server: None,
                 force_dir: false,
@@ -635,4 +648,11 @@ mod tests {
         assert_eq!(r.status(), 201);
     }
     //test upgrade
+    //test connect?
+    #[tokio::test]
+    async fn header_chaining() {
+        //TODO test chain of Forwarded and VIA
+
+    }
+
 }
