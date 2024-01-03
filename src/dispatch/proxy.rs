@@ -29,7 +29,7 @@ static HOP_BY_HOP_HEADERS: [HeaderName; 7] = [
     header::PROXY_AUTHORIZATION,
     HeaderName::from_static("keep-alive"),
 ];
-static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("X-Forwarded-For");
+static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 static TRAILERS: &str = "trailers";
 
 fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
