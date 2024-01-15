@@ -140,12 +140,19 @@ pub async fn forward(
     if config.add_x_forwarded_for_header {
         match req.headers_mut().entry(&X_FORWARDED_FOR) {
             hyper::header::Entry::Vacant(entry) => {
-                entry.insert(remote_addr.ip().to_string().parse().expect("client IP had non ascii char"));
-            },
+                entry.insert(
+                    remote_addr
+                        .ip()
+                        .to_string()
+                        .parse()
+                        .expect("client IP had non ascii char"),
+                );
+            }
             hyper::header::Entry::Occupied(mut entry) => {
                 let client_ip_str = remote_addr.ip().to_string();
-                let mut addr =
-                    BytesMut::with_capacity(entry.iter().map(|s|s.len()+2).sum::<usize>() + client_ip_str.len());
+                let mut addr = BytesMut::with_capacity(
+                    entry.iter().map(|s| s.len() + 2).sum::<usize>() + client_ip_str.len(),
+                );
 
                 for e in entry.iter() {
                     addr.extend_from_slice(e.as_bytes());
@@ -155,7 +162,7 @@ pub async fn forward(
                 entry.insert(into_header_value(addr.freeze())?);
             }
         }
-    }else{
+    } else {
         req.headers_mut().remove(&X_FORWARDED_FOR);
     }
     if let Some(host) = &config.add_via_header_to_server {
@@ -230,7 +237,10 @@ pub async fn forward(
                 Ok(u) => u,
                 Err(e) => {
                     error!("response upgrade failed: {}", e);
-                    let resp = Response::builder().status(hyper::StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap();
+                    let resp = Response::builder()
+                        .status(hyper::StatusCode::BAD_GATEWAY)
+                        .body(Body::empty())
+                        .unwrap();
                     return Ok(resp);
                 }
             };
@@ -484,11 +494,6 @@ mod tests {
             Some(&HeaderValue::from_static("HTTP/1.0 rproxy1"))
         );
     }
-    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-    }
     #[tokio::test]
     async fn add_headers() {
         let req = Request::get("/mount/")
@@ -517,11 +522,11 @@ mod tests {
         let mut buf = BytesMut::with_capacity(4096);
         s.read_buf(&mut buf).await.unwrap();
 
-        assert!(find_subsequence(&buf, b"\r\nvia: HTTP/1.0 rproxy1\r\n"));
-        assert!(find_subsequence(
-            &buf,
-            b"\r\nforwarded: for=1.2.3.4; host=a_host\r\n"
-        ));
+        assert_eq!(get_header(&buf, b"via").unwrap(), b"HTTP/1.0 rproxy1");
+        assert_eq!(
+            get_header(&buf, b"forwarded").unwrap(),
+            b"for=1.2.3.4; host=a_host"
+        );
 
         //return something else than 200
         s.write_all(b"HTTP/1.0 500 Not so OK\r\n\r\n")
@@ -561,21 +566,16 @@ mod tests {
         s.read_buf(&mut buf).await.unwrap();
 
         let dont_include = [
-            "keep-alive",
-            "transfer-encoding",
-            "te",
-            "connection",
-            "trailer",
-            "proxy-authorization",
-            "proxy-authenticate",
+            &b"keep-alive"[..],
+            &b"transfer-encoding"[..],
+            &b"te"[..],
+            &b"connection"[..],
+            &b"trailer"[..],
+            &b"proxy-authorization"[..],
+            &b"proxy-authenticate"[..],
         ];
-
-        for line in String::from_utf8(buf).unwrap().lines() {
-            for kw in dont_include {
-                if line.starts_with(kw) {
-                    panic!("contains header {}", kw);
-                }
-            }
+        for kw in dont_include {
+            assert_eq!(get_header(&buf, kw), None);
         }
 
         //return something else than 200
@@ -647,16 +647,15 @@ mod tests {
         let r = t.await.unwrap();
         assert_eq!(r.status(), 201);
     }
-    //test upgrade
-    //test connect?
+    /// ensure that via and forwarded entries are in the correct order
     #[tokio::test]
     async fn header_chaining() {
         let req = Request::get("/mount/")
-        .header(header::VIA, "HTTP/0.9 someone")
-        .header(&X_FORWARDED_FOR, "10.10.10.10")
-        .header(header::FORWARDED, "for=10.10.10.10")
-        .body(Body::empty())
-        .unwrap();
+            .header(header::VIA, "HTTP/0.9 someone")
+            .header(&X_FORWARDED_FOR, "10.10.10.10")
+            .header(header::FORWARDED, "for=10.10.10.10")
+            .body(Body::empty())
+            .unwrap();
         let (mut s, t) = test_forward(
             req,
             "",
@@ -675,31 +674,126 @@ mod tests {
         let mut buf = Vec::with_capacity(4096);
         s.read_buf(&mut buf).await.unwrap();
 
-        let mut hits = 0;
-        for line in String::from_utf8(buf).unwrap().lines() {
-            if let Some(v) = line.strip_prefix("via: ") {
-                assert_eq!(v, "HTTP/0.9 someone, HTTP/1.1 me");
-                hits+=1;
-            }
-            if let Some(v) = line.strip_prefix("forwarded: ") {
-                assert_eq!(v, "for=10.10.10.10, for=1.2.3.4");
-                hits+=2;
-            }
-            if let Some(v) = line.strip_prefix("x-forwarded-for: ") {
-                assert_eq!(v, "10.10.10.10, 1.2.3.4");
-                hits+=4;
-            }            
-        }
-        assert_eq!(hits, 7);
+        assert_eq!(
+            get_header(&buf, b"via").unwrap(),
+            b"HTTP/0.9 someone, HTTP/1.1 me"
+        );
+        assert_eq!(
+            get_header(&buf, b"forwarded").unwrap(),
+            b"for=10.10.10.10, for=1.2.3.4"
+        );
+        assert_eq!(
+            get_header(&buf, b"x-forwarded-for").unwrap(),
+            b"10.10.10.10, 1.2.3.4"
+        );
 
         //return something else than 200
         s.write_all(b"HTTP/1.0 203 Not so OK\r\nvia: HTTP/0.9 another\r\n\r\n")
             .await
             .unwrap();
         let r = t.await.unwrap();
-        assert_eq!(r.headers().get(header::VIA).unwrap().as_bytes(), b"HTTP/0.9 another, HTTP/1.0 my_front");
+        assert_eq!(
+            r.headers().get(header::VIA).unwrap().as_bytes(),
+            b"HTTP/0.9 another, HTTP/1.0 my_front"
+        );
         assert_eq!(r.status(), 203);
-
     }
 
+    async fn full_server_test(
+    ) -> Result<(tokio::net::TcpStream, tokio::net::TcpListener), Box<dyn std::error::Error>> {
+        //We can not use a Request Object for the test,
+        //as it has no associated connection
+        let (server_listener, a) = crate::tests::local_socket_pair().await?;
+        let (target_listener, target_add) = crate::tests::local_socket_pair().await.unwrap();
+
+        let mut proxy = Proxy {
+            forward: "http://ignored/".to_string().try_into().unwrap(),
+            add_forwarded_header: false,
+            add_x_forwarded_for_header: false,
+            add_via_header_to_client: None,
+            add_via_header_to_server: None,
+            force_dir: false,
+            client: None,
+        };
+        proxy.forward.authority = target_add.to_string().parse().unwrap();
+        proxy.setup().await.unwrap();
+
+        let mut listening_ifs = std::collections::HashMap::new();
+        let mut cfg = crate::config::HostCfg::new(server_listener.into_std()?);
+        let mut vh = crate::config::VHost::new(a);
+        vh.paths.insert(
+            Utf8PathBuf::from("a"),
+            crate::config::WwwRoot {
+                mount: UseCase::Proxy(proxy),
+                header: None,
+                auth: None,
+            },
+        );
+        cfg.default_host = Some(vh);
+        listening_ifs.insert(a, cfg);
+
+        let _s = crate::prepare_hyper_servers(listening_ifs).await?;
+
+        let client = tokio::net::TcpStream::connect(a).await?;
+
+        Ok((client, target_listener))
+    }
+    ///test upgrade
+    #[tokio::test]
+    async fn upgrade() {
+        let (mut client, target_listener) = full_server_test().await.unwrap();
+
+        let t = tokio::spawn(async move {
+            let (mut server, _) = target_listener.accept().await.unwrap();
+            let mut buf = Vec::with_capacity(4096);
+            server.read_buf(&mut buf).await.unwrap();
+            assert_eq!(get_header(&buf, b"connection").unwrap(), b"UPGRADE");
+            assert_eq!(get_header(&buf, b"upgrade").unwrap(), b"something");
+
+            server
+                .write_all(b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\n\r\n")
+                .await
+                .unwrap();
+
+            buf.clear();
+            server.read_buf(&mut buf).await.unwrap();
+            assert_eq!(buf, b"\x01\x02\x03\xff");
+
+            server.write_all(b"\xff\xfe\x00").await.unwrap();
+        });
+
+        client
+            .write_all(b"GET /a HTTP/1.1\r\nUpgrade: something\r\nConnection: Upgrade\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::with_capacity(4096);
+        client.read_buf(&mut buf).await.unwrap();
+        assert_eq!(&buf[..34], b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\n");
+
+        client.write_all(b"\x01\x02\x03\xff").await.unwrap();
+        buf.clear();
+        client.read_buf(&mut buf).await.unwrap();
+        assert_eq!(buf, b"\xff\xfe\x00");
+
+        t.await.unwrap();
+    }
+
+    /// search a HTTP header value inside of a byte stream.
+    fn get_header<'a>(haystack: &'a [u8], param: &'_ [u8]) -> Option<&'a [u8]> {
+        if let Some(pos) = haystack.windows(param.len() + 4).position(|window| {
+            &window[2..param.len() + 2] == param
+                && &window[..2] == b"\r\n"
+                && &window[param.len() + 2..] == b": "
+        }) {
+            let start = pos + param.len() + 4;
+            if let Some(len) = haystack[start..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+            {
+                return Some(&haystack[start..start + len]);
+            }
+        }
+        None
+    }
 }
