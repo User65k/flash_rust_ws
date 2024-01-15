@@ -275,6 +275,7 @@ pub struct Proxy {
     forward: ProxyAdress,
     #[serde(default = "yes")]
     add_forwarded_header: bool,
+    #[serde(default)]
     add_x_forwarded_for_header: bool,
     add_via_header_to_client: Option<String>,
     add_via_header_to_server: Option<String>,
