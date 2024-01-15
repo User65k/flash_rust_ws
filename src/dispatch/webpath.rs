@@ -11,6 +11,8 @@ impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
     fn try_from(uri: &'a Uri) -> Result<Self, Self::Error> {
         let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
 
+        //let needs_reencoding = matches!(path, Cow::Owned(_));
+
         #[cfg(windows)]
         if path.contains('\\') {
             return Err(IoError::new(ErrorKind::InvalidData, "win dir sep"));
@@ -113,7 +115,12 @@ impl<'a> WebPath<'a> {
         Ok(WebPath(Cow::from(&self.0[offset..])))
     }
     /// Create "/{pre}/{WebPath}" and leave extra_cap of free space at the end
-    pub fn prefixed_as_abs_url_path(&self, pre: &Utf8PathBuf, extra_cap: usize) -> String {
+    pub fn prefixed_as_abs_url_path(
+        &self,
+        pre: &Utf8PathBuf,
+        extra_cap: usize,
+        encode: bool,
+    ) -> String {
         //https://docs.rs/hyper-staticfile/latest/src/hyper_staticfile/response_builder.rs.html#75-123
         let pre = pre.as_str();
         let s = self.0.as_ref();
@@ -122,11 +129,23 @@ impl<'a> WebPath<'a> {
         if !pre.is_empty() && !pre.starts_with('/') {
             r.push('/');
         }
-        r.push_str(pre);
+        if encode {
+            for str in percent_encoding::utf8_percent_encode(pre, URI_DIR) {
+                r.push_str(str);
+            }
+        } else {
+            r.push_str(pre);
+        }
         if !pre.ends_with('/') {
             r.push('/');
         }
-        r.push_str(s);
+        if encode {
+            for str in percent_encoding::utf8_percent_encode(s, URI_DIR) {
+                r.push_str(str);
+            }
+        } else {
+            r.push_str(s);
+        }
         r
     }
     pub fn is_empty(&self) -> bool {
@@ -145,6 +164,17 @@ impl<'a> WebPath<'a> {
         WebPath(Cow::from(v))
     }
 }
+
+const URI_DIR: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
 
 #[cfg(test)]
 impl PartialEq<&str> for WebPath<'_> {
@@ -273,38 +303,53 @@ mod tests {
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0),
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false),
             "/test"
         );
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/"), 0),
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/"), 0, false),
             "/test"
         );
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0),
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0, false),
             "/something/test"
         );
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0),
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0, false),
             "/something/test"
         );
         assert_eq!(
             WebPath::try_from(&"/".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0),
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0, false),
             "/something/"
         );
         assert_eq!(
             WebPath::try_from(&"/".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0),
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0, false),
             "/something/"
+        );
+    }
+    #[test]
+    fn encode() {
+        assert_eq!(
+            WebPath::try_from(&"/test%20bla/ja".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, true),
+            "/test%20bla/ja"
+        );
+        assert_eq!(
+            WebPath::try_from(&"/test%20bla/ja".parse().unwrap())
+                .unwrap()
+                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false),
+            "/test bla/ja"
         );
     }
 }

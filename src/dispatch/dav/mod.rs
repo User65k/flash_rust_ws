@@ -213,7 +213,11 @@ async fn handle_get(
         ResolveResult::IsDirectory => {
             let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
             if is_dir_request {
-                list_dir(full_path, req_path.prefixed_as_abs_url_path(web_mount, 0)).await
+                list_dir(
+                    full_path,
+                    req_path.prefixed_as_abs_url_path(web_mount, 0, true),
+                )
+                .await
             } else {
                 Ok(staticf::redirect(&req, req_path, web_mount))
             }

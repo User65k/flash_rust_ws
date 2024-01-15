@@ -62,8 +62,11 @@ pub fn redirect(
     web_mount: &Utf8PathBuf,
 ) -> Response<Body> {
     //request for a file that is a directory
-    let mut target_url =
-        req_path.prefixed_as_abs_url_path(web_mount, req.uri().query().map_or(1, |q| q.len() + 2));
+    let mut target_url = req_path.prefixed_as_abs_url_path(
+        web_mount,
+        req.uri().query().map_or(1, |q| q.len() + 2),
+        true,
+    );
     //if !target_url.ends_with('/') { //happens if req_path was empty
     if !req_path.is_empty() {
         target_url.push('/');
