@@ -168,9 +168,9 @@ fn create_params<B: HttpBody>(
 
         if let Some(pi) = path_info {
             // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
-            let pi = pi.prefixed_as_abs_url_path(&Utf8PathBuf::empty(), 0);
+            let pi = pi.prefixed_as_abs_url_path(&Utf8PathBuf::empty(), 0, false);
 
-            abs_name = req_path.prefixed_as_abs_url_path(web_mount, 0);
+            abs_name = req_path.prefixed_as_abs_url_path(web_mount, 0, false);
             abs_name.truncate(abs_name.len() - pi.len()); //strip path_info
 
             params.insert(
@@ -182,7 +182,7 @@ fn create_params<B: HttpBody>(
             let index_file_name = full_path.file_name().and_then(|o| o.to_str());
             let post = index_file_name.map_or(0, |v| v.len());
 
-            abs_name = req_path.prefixed_as_abs_url_path(web_mount, post);
+            abs_name = req_path.prefixed_as_abs_url_path(web_mount, post, false);
 
             //add index file
             if let Some(f) = index_file_name {
@@ -214,7 +214,7 @@ fn create_params<B: HttpBody>(
             Bytes::from(abs_web_mount),
         );
         //... so everything inside it is PATH_INFO
-        let abs_path = req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0);
+        let abs_path = req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false);
         params.insert(
             // opt CGI/1.1   4.1.5
             Bytes::from(PATH_INFO),
@@ -274,7 +274,7 @@ fn create_params<B: HttpBody>(
                 path_to_bytes(full_path)
             } else {
                 // I am guessing here
-                Bytes::from(req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0))
+                Bytes::from(req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false))
             },
         );
     }
@@ -310,7 +310,7 @@ pub async fn resolve_path<'a>(
         Ok((p, r)) => Ok((p, r, None)),
         Err(err) => {
             if error_indicates_path_info(&err) {
-                debug!("{:?} might have a PATH_INFO",&full_path);
+                debug!("{:?} might have a PATH_INFO", &full_path);
                 /*
                 pop the last path component until we hit a file
                 everything after the file will become PATH_INFO
