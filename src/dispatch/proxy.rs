@@ -103,40 +103,45 @@ pub async fn forward(
             .insert(header::TE, HeaderValue::from_static(TRAILERS));
     }
 
-    if config.add_forwarded_header {
-        //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
-        let mut buf = BytesMut::with_capacity(512);
+    match config.add_forwarded_header {
+        ForwardedHeader::Replace  | ForwardedHeader::Extend => {
+            //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
+            let mut buf = BytesMut::with_capacity(512);
 
-        //add old forwarded-for
-        for hv in req.headers().get_all(header::FORWARDED) {
-            let hv = hv.as_ref();
-            if let Some(pos) = hv.windows(4).position(|window| window == b"for=") {
-                if let Some(pos_end) = hv[pos..].iter().position(|c| *c == b';') {
-                    buf.extend_from_slice(&hv[pos..pos + pos_end - 1]);
-                } else {
-                    buf.extend_from_slice(&hv[pos..]);
+            if let ForwardedHeader::Extend = config.add_forwarded_header {
+                //add old forwarded-for
+                for hv in req.headers().get_all(header::FORWARDED) {
+                    let hv = hv.as_ref();
+                    if let Some(pos) = hv.windows(4).position(|window| window == b"for=") {
+                        if let Some(pos_end) = hv[pos..].iter().position(|c| *c == b';') {
+                            buf.extend_from_slice(&hv[pos..pos + pos_end - 1]);
+                        } else {
+                            buf.extend_from_slice(&hv[pos..]);
+                        }
+                        buf.extend_from_slice(b", ");
+                    }
                 }
-                buf.extend_from_slice(b", ");
             }
-        }
-        buf.extend_from_slice(b"for=");
+            buf.extend_from_slice(b"for=");
 
-        let ip_str = match remote_addr.ip() {
-            std::net::IpAddr::V4(v4) => v4.to_string(),
-            std::net::IpAddr::V6(v6) => format!("\"[{}]\"", v6),
-        };
+            let ip_str = match remote_addr.ip() {
+                std::net::IpAddr::V4(v4) => v4.to_string(),
+                std::net::IpAddr::V6(v6) => format!("\"[{}]\"", v6),
+            };
 
-        buf.extend_from_slice(ip_str.as_bytes());
-        //add host header
-        if let Some(host) = super::get_host(&req) {
-            buf.extend_from_slice(b"; host=");
-            buf.extend_from_slice(host.as_bytes());
+            buf.extend_from_slice(ip_str.as_bytes());
+            //add host header
+            if let Some(host) = super::get_host(&req) {
+                buf.extend_from_slice(b"; host=");
+                buf.extend_from_slice(host.as_bytes());
+            }
+            //;proto=http;by=203.0.113.43
+            req.headers_mut()
+                .insert(header::FORWARDED, into_header_value(buf.freeze())?);
         }
-        //;proto=http;by=203.0.113.43
-        req.headers_mut()
-            .insert(header::FORWARDED, into_header_value(buf.freeze())?);
-    } else {
-        req.headers_mut().remove(header::FORWARDED);
+        ForwardedHeader::Remove => {
+            req.headers_mut().remove(header::FORWARDED);
+        }
     }
     if config.add_x_forwarded_for_header {
         match req.headers_mut().entry(&X_FORWARDED_FOR) {
@@ -246,6 +251,10 @@ pub async fn forward(
                 }
             };
 
+            //was removed by remove_hop_by_hop_headers
+            resp.headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+
             tokio::spawn(async move {
                 let mut request_upgraded =
                     request_upgraded.await.expect("failed to upgrade request");
@@ -268,13 +277,30 @@ fn into_header_value(src: Bytes) -> Result<HeaderValue, IoError> {
         )
     })
 }
+#[derive(Deserialize, Debug, Default)]
+#[serde(from = "bool")]
+enum ForwardedHeader {
+    Remove,     //false
+    Extend,     //true
+    #[default]
+    Replace     //?
+}
+impl From<bool> for ForwardedHeader {
+    fn from(value: bool) -> Self {
+        if value {
+            ForwardedHeader::Extend
+        }else{
+            ForwardedHeader::Remove
+        }
+    }
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Proxy {
     forward: ProxyAdress,
-    #[serde(default = "yes")]
-    add_forwarded_header: bool,
+    #[serde(default)]
+    add_forwarded_header: ForwardedHeader,
     #[serde(default)]
     add_x_forwarded_for_header: bool,
     add_via_header_to_client: Option<String>,
@@ -430,6 +456,9 @@ mod tests {
             assert_eq!(p.forward.authority, "remote");
             assert_eq!(p.forward.scheme, uri::Scheme::HTTP);
             assert_eq!(p.forward.path, Utf8PathBuf::from("/path"));
+            assert!(p.force_dir);
+            assert!(matches!(p.add_forwarded_header, ForwardedHeader::Replace));
+            assert!(!p.add_x_forwarded_for_header);
         } else {
             panic!("not proxy");
         }
@@ -472,7 +501,7 @@ mod tests {
             "some/path",
             Proxy {
                 forward: "http://ignored/base_path".to_string().try_into().unwrap(),
-                add_forwarded_header: false,
+                add_forwarded_header: ForwardedHeader::Remove,
                 add_x_forwarded_for_header: false,
                 add_via_header_to_client: Some("rproxy1".to_string()),
                 add_via_header_to_server: None,
@@ -500,6 +529,7 @@ mod tests {
     async fn add_headers() {
         let req = Request::get("/mount/")
             .header(header::HOST, "a_host")
+            .header(header::FORWARDED, "for=10.10.10.10")
             .version(hyper::Version::HTTP_10)
             .body(Body::empty())
             .unwrap();
@@ -508,7 +538,7 @@ mod tests {
             "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: true,
+                add_forwarded_header: ForwardedHeader::Replace,
                 add_x_forwarded_for_header: true,
                 add_via_header_to_client: None,
                 add_via_header_to_server: Some("rproxy1".to_string()),
@@ -524,9 +554,9 @@ mod tests {
         let mut buf = BytesMut::with_capacity(4096);
         s.read_buf(&mut buf).await.unwrap();
 
-        assert_eq!(get_header(&buf, b"via").unwrap(), b"HTTP/1.0 rproxy1");
+        assert_eq!(get_header(&buf, "via").unwrap(), b"HTTP/1.0 rproxy1");
         assert_eq!(
-            get_header(&buf, b"forwarded").unwrap(),
+            get_header(&buf, "forwarded").unwrap(),
             b"for=1.2.3.4; host=a_host"
         );
 
@@ -554,7 +584,7 @@ mod tests {
             "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: false,
+                add_forwarded_header: ForwardedHeader::Remove,
                 add_x_forwarded_for_header: false,
                 add_via_header_to_client: None,
                 add_via_header_to_server: None,
@@ -568,13 +598,13 @@ mod tests {
         s.read_buf(&mut buf).await.unwrap();
 
         let dont_include = [
-            &b"keep-alive"[..],
-            &b"transfer-encoding"[..],
-            &b"te"[..],
-            &b"connection"[..],
-            &b"trailer"[..],
-            &b"proxy-authorization"[..],
-            &b"proxy-authenticate"[..],
+            "keep-alive",
+            "transfer-encoding",
+            "te",
+            "connection",
+            "trailer",
+            "proxy-authorization",
+            "proxy-authenticate",
         ];
         for kw in dont_include {
             assert_eq!(get_header(&buf, kw), None);
@@ -593,7 +623,7 @@ mod tests {
 
         let proxy = Proxy {
             forward: "http://localhost:0/".to_string().try_into().unwrap(),
-            add_forwarded_header: false,
+            add_forwarded_header: ForwardedHeader::Remove,
             add_x_forwarded_for_header: false,
             add_via_header_to_client: None,
             add_via_header_to_server: None,
@@ -629,7 +659,7 @@ mod tests {
             "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: false,
+                add_forwarded_header: ForwardedHeader::Remove,
                 add_x_forwarded_for_header: false,
                 add_via_header_to_client: None,
                 add_via_header_to_server: None,
@@ -663,7 +693,7 @@ mod tests {
             "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: true,
+                add_forwarded_header: ForwardedHeader::Extend,
                 add_x_forwarded_for_header: true,
                 add_via_header_to_client: Some("my_front".to_string()),
                 add_via_header_to_server: Some("me".to_string()),
@@ -677,15 +707,15 @@ mod tests {
         s.read_buf(&mut buf).await.unwrap();
 
         assert_eq!(
-            get_header(&buf, b"via").unwrap(),
+            get_header(&buf, "via").unwrap(),
             b"HTTP/0.9 someone, HTTP/1.1 me"
         );
         assert_eq!(
-            get_header(&buf, b"forwarded").unwrap(),
+            get_header(&buf, "forwarded").unwrap(),
             b"for=10.10.10.10, for=1.2.3.4"
         );
         assert_eq!(
-            get_header(&buf, b"x-forwarded-for").unwrap(),
+            get_header(&buf, "x-forwarded-for").unwrap(),
             b"10.10.10.10, 1.2.3.4"
         );
 
@@ -710,7 +740,7 @@ mod tests {
 
         let mut proxy = Proxy {
             forward: "http://ignored/".to_string().try_into().unwrap(),
-            add_forwarded_header: false,
+            add_forwarded_header: ForwardedHeader::Remove,
             add_x_forwarded_for_header: false,
             add_via_header_to_client: None,
             add_via_header_to_server: None,
@@ -749,11 +779,11 @@ mod tests {
             let (mut server, _) = target_listener.accept().await.unwrap();
             let mut buf = Vec::with_capacity(4096);
             server.read_buf(&mut buf).await.unwrap();
-            assert_eq!(get_header(&buf, b"connection").unwrap(), b"UPGRADE");
-            assert_eq!(get_header(&buf, b"upgrade").unwrap(), b"something");
+            assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
+            assert_eq!(get_header(&buf, "upgrade").unwrap(), b"something");
 
             server
-                .write_all(b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\n\r\n")
+                .write_all(b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\nUpgrade: something\r\nConnection: Upgrade\r\n\r\n")
                 .await
                 .unwrap();
 
@@ -772,6 +802,8 @@ mod tests {
         let mut buf = Vec::with_capacity(4096);
         client.read_buf(&mut buf).await.unwrap();
         assert_eq!(&buf[..34], b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\n");
+        assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
+        assert_eq!(get_header(&buf, "upgrade").unwrap(), b"something");
 
         client.write_all(b"\x01\x02\x03\xff").await.unwrap();
         buf.clear();
@@ -782,9 +814,9 @@ mod tests {
     }
 
     /// search a HTTP header value inside of a byte stream.
-    fn get_header<'a>(haystack: &'a [u8], param: &'_ [u8]) -> Option<&'a [u8]> {
+    fn get_header<'a>(haystack: &'a [u8], param: &'_ str) -> Option<&'a [u8]> {
         if let Some(pos) = haystack.windows(param.len() + 4).position(|window| {
-            &window[2..param.len() + 2] == param
+            &window[2..param.len() + 2] == param.as_bytes()
                 && &window[..2] == b"\r\n"
                 && &window[param.len() + 2..] == b": "
         }) {
