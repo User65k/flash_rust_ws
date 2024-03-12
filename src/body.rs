@@ -33,7 +33,7 @@ impl IncomingBody for hyper::body::Incoming {}
 #[cfg(test)]
 pub mod test {
     use super::*;
-    pub struct TestBody(Bytes);
+    pub struct TestBody(Option<Bytes>);
     impl HttpBody for TestBody {
         type Data = Bytes;
 
@@ -43,21 +43,21 @@ pub mod test {
             mut self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
         ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-            Poll::Ready(Some(Ok(Frame::data(std::mem::take(&mut self.0)))))
+            Poll::Ready(self.0.take().map(|data|Ok(Frame::data(data))))
         }
     }
     impl IncomingBody for TestBody {}
     impl TestBody {
         pub fn from(b: &'static str) -> TestBody {
-            TestBody(Bytes::from_static(b.as_bytes()))
+            TestBody(Some(Bytes::from_static(b.as_bytes())))
         }
         pub fn empty() -> TestBody {
-            TestBody(Bytes::new())
+            TestBody(None)
         }
     }
 
     pin_project! {
-        /// Future for `aggregate`
+        /// Future for `to_bytes`
         pub struct Aggregator<T: HttpBody>{
             #[pin]
             body: T,
@@ -66,8 +66,8 @@ pub mod test {
     }
     ///read whole body
     /// 
-    ///only for tests. like the old `hyper::body::aggregate`
-    pub fn aggregate<T: HttpBody<Data = Bytes, Error = E>, E: std::error::Error>(
+    ///only for tests. like the old `hyper::body::to_bytes`
+    pub fn to_bytes<T: HttpBody<Data = Bytes, Error = E>, E: std::error::Error>(
         body: T,
     ) -> Aggregator<T> {
         Aggregator{

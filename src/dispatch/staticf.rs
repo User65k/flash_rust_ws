@@ -160,7 +160,7 @@ pub async fn resolve_path(
 #[cfg(test)]
 mod tests {
     use crate::{
-        body::test::{aggregate, TestBody},
+        body::test::{to_bytes, TestBody},
         config::{AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf, WwwRoot},
         dispatch::test::{TempDir, TempFile},
     };
@@ -220,7 +220,7 @@ mod tests {
         let res = handle_wwwroot(req, sf, "test_resolve_file").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = aggregate(res.into_body()).await;
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
     #[tokio::test]
@@ -238,7 +238,7 @@ mod tests {
         let res = handle_wwwroot(req, sf, "").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = aggregate(res.into_body()).await;
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
     #[tokio::test]
@@ -292,7 +292,7 @@ mod tests {
         let res = handle_wwwroot(req, sf, "test_allowlist.allow").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = aggregate(res.into_body()).await;
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
 
@@ -364,7 +364,7 @@ mod tests {
         let res = handle_wwwroot(req, sf, "nested/resolve_file").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = aggregate(res.into_body()).await;
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
 
@@ -412,7 +412,7 @@ mod tests {
             .unwrap();
         let res = handle_wwwroot(req, sf, "lnk/lnk_target").await.unwrap();
         assert_eq!(res.status(), 200);
-        let body = aggregate(res.into_body()).await;
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
 
@@ -456,7 +456,7 @@ mod tests {
         let req = Request::get("/mount/lnk").body(TestBody::empty()).unwrap();
         let res = handle_wwwroot(req, sf, "lnk").await.unwrap();
         assert_eq!(res.status(), 200);
-        let body = aggregate(res.into_body()).await;
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
     #[test]
