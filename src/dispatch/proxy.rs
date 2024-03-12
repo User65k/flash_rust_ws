@@ -1,21 +1,27 @@
+use crate::{
+    body::{BoxBody, FRWSResult, IncomingBody},
+    config::Utf8PathBuf,
+    dispatch::upgrades::MyUpgraded,
+};
 use bytes::{Bytes, BytesMut};
 use hyper::{
-    client::HttpConnector,
     header::{self, HeaderName, HeaderValue},
     http::uri,
     upgrade::OnUpgrade,
-    Body, Client, HeaderMap, Request, Response, StatusCode, Uri,
+    HeaderMap, Request, Response, StatusCode, Uri,
+};
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client},
+    rt::TokioExecutor,
 };
 use log::{debug, error, trace};
 use serde::Deserialize;
-use std::net::SocketAddr;
 use std::{
     convert::TryFrom,
     io::{Error as IoError, ErrorKind},
 };
+use std::{error::Error, net::SocketAddr};
 use tokio::io::copy_bidirectional;
-
-use crate::config::Utf8PathBuf;
 
 /// these have to be removed
 static HOP_BY_HOP_HEADERS: [HeaderName; 7] = [
@@ -58,11 +64,11 @@ fn remove_connection_headers(v: hyper::Version, headers: &mut HeaderMap) {
 }
 
 pub async fn forward(
-    mut req: Request<Body>,
+    mut req: Request<IncomingBody>,
     req_path: &super::WebPath<'_>,
     remote_addr: SocketAddr,
     config: &Proxy,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     let query = req.uri().query();
 
     let mut new_path = req_path.prefixed_as_abs_url_path(
@@ -196,17 +202,18 @@ pub async fn forward(
     let mut resp = match config.client.as_ref().unwrap().request(req).await {
         Ok(r) => r,
         Err(err) => {
-            let mut resp = Response::new(Body::empty());
+            let mut resp = Response::new(BoxBody::empty());
             *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
 
-            if let Some(cause) = err.into_cause() {
-                if let Some(io_e) = cause.downcast_ref::<IoError>() {
-                    if io_e.kind() == ErrorKind::TimedOut {
-                        *resp.status_mut() = hyper::StatusCode::GATEWAY_TIMEOUT;
-                    }
+            if let Some(io_e) = err
+                .source()
+                .and_then(|cause| cause.downcast_ref::<IoError>())
+            {
+                if io_e.kind() == ErrorKind::TimedOut {
+                    *resp.status_mut() = hyper::StatusCode::GATEWAY_TIMEOUT;
                 }
             }
-            resp
+            return Ok(resp);
         }
     };
     debug!("response: {:?} {:?}", resp.status(), resp.headers());
@@ -235,12 +242,12 @@ pub async fn forward(
                 .await;
 
             let mut response_upgraded = match response_upgraded {
-                Ok(u) => u,
+                Ok(u) => MyUpgraded::new(u),
                 Err(e) => {
                     error!("response upgrade failed: {}", e);
                     let resp = Response::builder()
                         .status(hyper::StatusCode::BAD_GATEWAY)
-                        .body(Body::empty())
+                        .body(BoxBody::empty())
                         .unwrap();
                     return Ok(resp);
                 }
@@ -248,7 +255,7 @@ pub async fn forward(
 
             tokio::spawn(async move {
                 let mut request_upgraded =
-                    request_upgraded.await.expect("failed to upgrade request");
+                    MyUpgraded::new(request_upgraded.await.expect("failed to upgrade request"));
 
                 copy_bidirectional(&mut response_upgraded, &mut request_upgraded)
                     .await
@@ -257,7 +264,7 @@ pub async fn forward(
         }
     }
 
-    Ok(resp)
+    Ok(resp.map(BoxBody::Proxy))
 }
 #[inline]
 fn into_header_value(src: Bytes) -> Result<HeaderValue, IoError> {
@@ -288,7 +295,7 @@ pub struct Proxy {
     //filter_req_header: Vec<HeaderNameCfg>,
     //filter_resp_header: Vec<HeaderNameCfg>,
     #[serde(skip)]
-    client: Option<Client<HttpConnector>>,
+    client: Option<Client<HttpConnector, IncomingBody>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -349,7 +356,7 @@ fn yes() -> bool {
 impl Proxy {
     pub async fn setup(&mut self) -> Result<(), String> {
         match self.forward.scheme.as_str() {
-            "http" => self.client = Some(Client::new()),
+            "http" => self.client = Some(Client::builder(TokioExecutor::new()).build_http()),
             #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
             "https" => { /*
                  let connector = Connector::new();
@@ -410,13 +417,14 @@ impl Service<Uri> for Connector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::{Body, Request};
+    use hyper::Request;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
     };
 
     use crate::{
+        body::{test::TestBody, FRWSResp},
         config::{UseCase, Utf8PathBuf},
         dispatch::WebPath,
     };
@@ -438,10 +446,10 @@ mod tests {
     /// send a request to a FCGI mount and return its TcpStream
     /// (as well as the Task doing the request)
     async fn test_forward(
-        req: Request<Body>,
+        req: Request<TestBody>,
         req_path: &str,
         mut proxy: Proxy,
-    ) -> (TcpStream, tokio::task::JoinHandle<Response<Body>>) {
+    ) -> (TcpStream, tokio::task::JoinHandle<FRWSResp>) {
         // pick a free port
         let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
         let req_path = req_path.to_owned();
@@ -465,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn simple_fwd() {
         let req = Request::get("/mount/some/path")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let (mut s, t) = test_forward(
             req,
@@ -501,7 +509,7 @@ mod tests {
         let req = Request::get("/mount/")
             .header(header::HOST, "a_host")
             .version(hyper::Version::HTTP_10)
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let (mut s, t) = test_forward(
             req,
@@ -547,7 +555,7 @@ mod tests {
             .header(header::TRAILER, "value")
             .header(header::PROXY_AUTHENTICATE, "value")
             .header(header::PROXY_AUTHORIZATION, "value")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let (mut s, t) = test_forward(
             req,
@@ -589,7 +597,7 @@ mod tests {
     }
     #[tokio::test]
     async fn web_mount_is_a_folder() {
-        let req = Request::get("/mount").body(Body::empty()).unwrap();
+        let req = Request::get("/mount").body(TestBody::empty()).unwrap();
 
         let proxy = Proxy {
             forward: "http://localhost:0/".to_string().try_into().unwrap(),
@@ -623,7 +631,7 @@ mod tests {
     }
     #[tokio::test]
     async fn force_dir_false() {
-        let req = Request::get("/mount").body(Body::empty()).unwrap();
+        let req = Request::get("/mount").body(TestBody::empty()).unwrap();
         let (mut s, t) = test_forward(
             req,
             "",
@@ -656,7 +664,7 @@ mod tests {
             .header(header::VIA, "HTTP/0.9 someone")
             .header(&X_FORWARDED_FOR, "10.10.10.10")
             .header(header::FORWARDED, "for=10.10.10.10")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let (mut s, t) = test_forward(
             req,

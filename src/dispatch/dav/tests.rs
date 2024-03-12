@@ -3,7 +3,7 @@ use std::{env::temp_dir, net::SocketAddr};
 use hyper::Request;
 
 use super::{do_dav, Config};
-use crate::body::BoxBody;
+use crate::body::FRWSResult;
 use crate::body::{test::to_bytes, test::TestBody as Body};
 use crate::{
     config::{AbsPathBuf, UseCase, Utf8PathBuf},
@@ -38,7 +38,7 @@ async fn handle_req(
     body: Body,
     req_path: WebPath<'_>,
     config: &Config,
-) -> std::io::Result<hyper::Response<BoxBody<std::io::Error>>> {
+) -> FRWSResult {
     let req = req.body(body).unwrap();
 
     let addr: SocketAddr = "1.2.3.4:1234".parse().unwrap();

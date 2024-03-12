@@ -1,16 +1,15 @@
 use bytes::{Buf, Bytes};
 use futures_util::Future;
-use hyper::body::{Body as HttpBody, Frame, SizeHint};
+use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
 use log::trace;
 use pin_project_lite::pin_project;
 use std::collections::VecDeque;
 use std::io::Error as IoError;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-pub type FRWSResp = hyper::Response<BoxBody<IoError>>;
-pub type FRWSResult = Result<hyper::Response<BoxBody<IoError>>, IoError>;
+pub type FRWSResp = hyper::Response<BoxBody>;
+pub type FRWSResult = Result<hyper::Response<BoxBody>, IoError>;
 
 /// Request Body
 ///
@@ -35,7 +34,7 @@ impl IncomingBodyTrait for IncomingBody {}
 #[cfg(test)]
 pub type IncomingBody = test::TestBody;
 #[cfg(not(test))]
-pub type IncomingBody = hyper::body::Incoming;
+pub type IncomingBody = Incoming;
 
 #[cfg(test)]
 pub mod test {
@@ -63,7 +62,7 @@ pub mod test {
         pub fn empty() -> TestBody {
             TestBody(None)
         }
-        pub async fn from_incoming(body: hyper::body::Incoming) -> TestBody {
+        pub async fn from_incoming(body: Incoming) -> TestBody {
             TestBody(Some(crate::body::test::to_bytes(body).await))
         }
     }
@@ -203,65 +202,111 @@ impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> Future for BufferB
 }
 
 /// Return Body that can handle all types
-pub struct BoxBody<E> {
-    inner: Pin<Box<dyn HttpBody<Data = Bytes, Error = E> + Send + Sync + 'static>>,
+///
+/// - Empty (Infailable)
+/// - Incoming for Proxy (hyper::Error)
+/// - FCGI (IoError)
+/// - hyper_staticfile::Body (IoError)
+/// - BodyWriter/Bytes for DAV (Infailable)
+pub enum BoxBody {
+    Empty,
+    File(hyper_staticfile::Body),
+    #[cfg(feature = "fcgi")]
+    FCGI(Pin<Box<dyn HttpBody<Data = Bytes, Error = IoError> + Send + Sync + 'static>>),
+    #[cfg(feature = "proxy")]
+    Proxy(Incoming),
+    #[cfg(feature = "webdav")]
+    DAV(Option<Bytes>),
 }
-
-impl<E: Send + Sync + 'static> BoxBody<E> {
+#[cfg(feature = "webdav")]
+impl From<bytes::buf::Writer<bytes::BytesMut>> for BoxBody {
+    fn from(value: bytes::buf::Writer<bytes::BytesMut>) -> Self {
+        Self::DAV(Some(value.into_inner().freeze()))
+    }
+}
+impl BoxBody {
+    #[cfg(feature = "fcgi")]
     /// Create a new `BoxBody`.
-    pub fn new<B>(body: B) -> Self
+    pub fn fcgi<B>(body: B) -> Self
     where
-        B: HttpBody<Data = Bytes, Error = E> + Send + Sync + 'static,
+        B: HttpBody<Data = Bytes, Error = IoError> + Send + Sync + 'static,
     {
-        Self {
-            inner: Box::pin(body),
-        }
+        Self::FCGI(Box::pin(body))
     }
     pub fn empty() -> Self {
-        Self {
-            inner: Box::pin(Empty(PhantomData)),
-        }
+        Self::Empty
     }
 }
-
-pub struct Empty<E>(PhantomData<E>);
-impl<E> HttpBody for Empty<E> {
-    type Data = Bytes;
-    type Error = E;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Poll::Ready(None)
-    }
-    fn size_hint(&self) -> SizeHint {
-        SizeHint::with_exact(0)
-    }
-}
-
-impl<E> std::fmt::Debug for BoxBody<E> {
+impl std::fmt::Debug for BoxBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoxBody").finish()
     }
 }
-
-impl<E> HttpBody for BoxBody<E> {
+impl HttpBody for BoxBody {
     type Data = Bytes;
-    type Error = E;
+    type Error = IoError;
 
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        self.inner.as_mut().poll_frame(cx)
+        match self.get_mut() {
+            BoxBody::Empty => Poll::Ready(None),
+            BoxBody::File(f) => {
+                let pin = std::pin::pin!(f);
+                pin.poll_frame(cx)
+            }
+            #[cfg(feature = "fcgi")]
+            BoxBody::FCGI(f) => {
+                let pin = std::pin::pin!(f);
+                pin.poll_frame(cx)
+            }
+            #[cfg(feature = "proxy")]
+            BoxBody::Proxy(i) => {
+                let pin = std::pin::pin!(i);
+                match pin.poll_frame(cx) {
+                    Poll::Ready(Some(Ok(f))) => Poll::Ready(Some(Ok(f))),
+                    Poll::Ready(Some(Err(e))) => {
+                        Poll::Ready(Some(Err(IoError::new(std::io::ErrorKind::Other, e))))
+                    }
+                    Poll::Ready(None) => Poll::Ready(None),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            #[cfg(feature = "webdav")]
+            BoxBody::DAV(b) => Poll::Ready(b.take().map(|buf| Ok(Frame::data(buf)))),
+        }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        match self {
+            BoxBody::Empty => true,
+            BoxBody::File(f) => f.is_end_stream(),
+            #[cfg(feature = "fcgi")]
+            BoxBody::FCGI(b) => b.is_end_stream(),
+            #[cfg(feature = "proxy")]
+            BoxBody::Proxy(i) => i.is_end_stream(),
+            #[cfg(feature = "webdav")]
+            BoxBody::DAV(b) => b.is_none(),
+        }
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
+        match self {
+            BoxBody::Empty => SizeHint::with_exact(0),
+            BoxBody::File(f) => f.size_hint(),
+            #[cfg(feature = "fcgi")]
+            BoxBody::FCGI(b) => b.size_hint(),
+            #[cfg(feature = "proxy")]
+            BoxBody::Proxy(i) => i.size_hint(),
+            #[cfg(feature = "webdav")]
+            BoxBody::DAV(b) => {
+                if let Some(b) = b {
+                    SizeHint::with_exact(b.len() as u64)
+                } else {
+                    SizeHint::default()
+                }
+            }
+        }
     }
 }

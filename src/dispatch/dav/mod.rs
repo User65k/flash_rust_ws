@@ -3,6 +3,7 @@ use crate::config::{AbsPathBuf, Utf8PathBuf};
 
 use super::staticf::{self, resolve_path, return_file, ResolveResult};
 use bytes::{BufMut, Bytes, BytesMut};
+use hyper::body::Body as _;
 use hyper::{header, http::HeaderValue, HeaderMap, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use std::{
@@ -199,24 +200,6 @@ async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
     Ok(res)
 }
 
-struct BodyWriter(Option<Bytes>);
-impl From<bytes::buf::Writer<BytesMut>> for BoxBody<IoError> {
-    fn from(value: bytes::buf::Writer<BytesMut>) -> Self {
-        Self::new(BodyWriter(Some(value.into_inner().freeze())))
-    }
-}
-use hyper::body::{Body, Frame};
-impl Body for BodyWriter {
-    type Data = Bytes;
-    type Error = IoError;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Poll::Ready(self.0.take().map(|buf| Ok(Frame::data(buf))))
-    }
-}
 
 async fn handle_get(
     req: Request<IncomingBody>,

@@ -16,12 +16,8 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
-    body::{BoxBody, IncomingBody},
-    config::StaticFiles,
-};
-use crate::{
-    body::{BufferedBody, IncomingBodyTrait as _},
-    config::Utf8PathBuf,
+    body::{BoxBody, BufferedBody, FRWSResult, IncomingBody, IncomingBodyTrait as _},
+    config::{StaticFiles, Utf8PathBuf},
 };
 
 use super::{staticf, WebPath};
@@ -46,7 +42,7 @@ pub async fn fcgi_call(
     fs_full_path: Option<&Path>,
     path_info: Option<&super::WebPath<'_>>,
     remote_addr: SocketAddr,
-) -> Result<Response<BoxBody<IoError>>, IoError> {
+) -> FRWSResult {
     let app = if let Some(app) = &fcgi_cfg.app {
         app
     } else {
@@ -142,7 +138,7 @@ pub async fn fcgi_call(
         }
     }*/
 
-    Ok(resp.map(BoxBody::new))
+    Ok(resp.map(BoxBody::fcgi))
 }
 
 fn create_params(

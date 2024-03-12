@@ -63,7 +63,7 @@ pub async fn return_file(
             encoding: None,
         })
         .expect("unable to build response")
-        .map(BoxBody::new))
+        .map(BoxBody::File))
 }
 
 pub fn redirect(
@@ -159,11 +159,14 @@ pub async fn resolve_path(
 #[cfg(test)]
 mod tests {
     use crate::{
-        body::test::{to_bytes, TestBody},
+        body::{
+            test::{to_bytes, TestBody},
+            FRWSResult,
+        },
         config::{AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf, WwwRoot},
         dispatch::test::{TempDir, TempFile},
     };
-    use hyper::{header, Request, Response};
+    use hyper::{header, Request};
     use std::path::Path;
     //use crate::dispatch::test::
 
@@ -180,11 +183,7 @@ mod tests {
         }
     }
 
-    async fn handle_wwwroot(
-        req: Request<TestBody>,
-        sf: StaticFiles,
-        req_path: &str,
-    ) -> Result<Response<crate::body::BoxBody<std::io::Error>>, std::io::Error> {
+    async fn handle_wwwroot(req: Request<TestBody>, sf: StaticFiles, req_path: &str) -> FRWSResult {
         let wwwr = WwwRoot {
             mount: UseCase::StaticFiles(sf),
             header: None,
