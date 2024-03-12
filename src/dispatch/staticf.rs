@@ -1,7 +1,6 @@
-
 use hyper::{Method, Request, Response};
-use hyper_staticfile::ResolvedFile;
 use hyper_staticfile::util::FileResponseBuilder;
+use hyper_staticfile::ResolvedFile;
 use log::debug;
 use mime_guess::{Mime, MimeGuess};
 use std::fs::{Metadata, OpenOptions as StdOpenOptions};
@@ -13,7 +12,7 @@ use tokio::fs::{File, OpenOptions};
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
-use crate::body::{BoxBody, IncomingBody, FRWSResult, FRWSResp};
+use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
 use crate::config::Utf8PathBuf;
 #[cfg(windows)]
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
@@ -27,8 +26,8 @@ pub enum ResolveResult {
     Found(File, Metadata, Mime),
 }
 
-pub async fn return_file<IB: IncomingBody>(
-    req: &Request<IB>,
+pub async fn return_file(
+    req: &Request<IncomingBody>,
     file: File,
     metadata: Metadata,
     mime: Mime,
@@ -67,8 +66,8 @@ pub async fn return_file<IB: IncomingBody>(
         .map(BoxBody::new))
 }
 
-pub fn redirect<IB: IncomingBody>(
-    req: &Request<IB>,
+pub fn redirect(
+    req: &Request<IncomingBody>,
     req_path: &super::WebPath<'_>,
     web_mount: &Utf8PathBuf,
 ) -> FRWSResp {

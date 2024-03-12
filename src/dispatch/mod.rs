@@ -13,11 +13,10 @@ pub mod websocket;
 use hyper::body::Body as HttpBody;
 pub use webpath::WebPath;
 
-use crate::body::{BoxBody, IncomingBody, FRWSResult, FRWSResp};
+use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
 use crate::config::{self, Utf8PathBuf};
 use hyper::{
-    body::Incoming, header, http::Error as HTTPError, Request, Response, StatusCode,
-    Version,
+    body::Incoming, header, http::Error as HTTPError, Request, Response, StatusCode, Version,
 }; //, Method};
 use log::{debug, error, info, trace};
 use staticf::ResolveResult;
@@ -76,8 +75,8 @@ fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
 ///
 /// `web_mount` first part of URI, selecting the wwwr. Used for links in the response
 /// `req_path` second part of URI - a path within the wwwr. Used to select a file
-async fn handle_wwwroot<IB: IncomingBody>(
-    req: Request<IB>,
+async fn handle_wwwroot(
+    req: Request<IncomingBody>,
     wwwr: &config::WwwRoot,
     req_path: WebPath<'_>,
     web_mount: &Utf8PathBuf,
@@ -229,8 +228,8 @@ async fn handle_wwwroot<IB: IncomingBody>(
 /// new request on a particular vHost.
 /// picks the matching WwwRoot and calls `handle_wwwroot`
 /// Note: /a is not part of /aa (but of /a/a and /a)
-async fn handle_vhost<IB: IncomingBody>(
-    req: Request<IB>,
+async fn handle_vhost(
+    req: Request<IncomingBody>,
     cfg: &config::VHost,
     remote_addr: SocketAddr,
 ) -> FRWSResult {
@@ -272,8 +271,8 @@ fn get_host<B: HttpBody>(req: &Request<B>) -> Option<&str> {
 }
 
 /// picks the matching vHost and calls `handle_vhost`
-async fn dispatch_to_vhost<IB: IncomingBody>(
-    req: Request<IB>,
+async fn dispatch_to_vhost(
+    req: Request<IncomingBody>,
     cfg: Arc<config::HostCfg>,
     remote_addr: SocketAddr,
 ) -> FRWSResult {
@@ -299,6 +298,16 @@ pub(crate) async fn handle_request(
     remote_addr: SocketAddr,
 ) -> Result<FRWSResp, HTTPError> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
+
+    #[cfg(test)]
+    let req = {
+        let (parts, body) = req.into_parts();
+        Request::from_parts(
+            parts,
+            crate::body::test::TestBody::from_incoming(body).await,
+        )
+    };
+
     dispatch_to_vhost(req, cfg, remote_addr)
         .await
         .or_else(|err| {

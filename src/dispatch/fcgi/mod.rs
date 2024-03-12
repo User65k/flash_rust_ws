@@ -4,7 +4,7 @@ pub(crate) mod test;
 pub use cfg::*;
 
 use bytes::{Bytes, BytesMut};
-use hyper::{body::HttpBody, Body, Request, Response};
+use hyper::{body::Body as _, Request, Response};
 use log::{debug, error, trace};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,14 +15,14 @@ use std::{
 };
 use tokio::time::timeout;
 
-use crate::config::StaticFiles;
 use crate::{
-    body::{BufferedBody, HttpBodyStream},
+    body::{BoxBody, IncomingBody},
+    config::StaticFiles,
+};
+use crate::{
+    body::{BufferedBody, IncomingBodyTrait as _},
     config::Utf8PathBuf,
 };
-
-pub use async_fcgi::client::con_pool::ConPool as FCGIAppPool;
-pub use async_stream_connection::Addr;
 
 use super::{staticf, WebPath};
 
@@ -40,13 +40,13 @@ const SCRIPT_FILENAME: &[u8] = b"SCRIPT_FILENAME";
 
 pub async fn fcgi_call(
     fcgi_cfg: &FCGIApp,
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     req_path: &super::WebPath<'_>,
     web_mount: &Utf8PathBuf,
     fs_full_path: Option<&Path>,
     path_info: Option<&super::WebPath<'_>>,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>, IoError> {
+) -> Result<Response<BoxBody<IoError>>, IoError> {
     let app = if let Some(app) = &fcgi_cfg.app {
         app
     } else {
@@ -56,6 +56,17 @@ pub async fn fcgi_call(
             "FCGI app not available",
         ));
     };
+
+    let params = create_params(
+        fcgi_cfg,
+        &req,
+        req_path,
+        web_mount,
+        fs_full_path,
+        path_info,
+        remote_addr,
+    );
+    trace!("to FCGI: {:?}", &params);
 
     let (req, body) = req.into_parts();
 
@@ -71,13 +82,13 @@ pub async fn fcgi_call(
                 //...but no len indicator
                 if let Some(max_size) = fcgi_cfg.buffer_request {
                     //read everything to memory
-                    match BufferedBody::buffer(body, max_size).await {
+                    match body.buffer(max_size).await {
                         Ok(b) => b,
                         Err(e) if e.kind() == ErrorKind::PermissionDenied => {
                             //body is more than max_size -> abort
                             return Ok(Response::builder()
                                 .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
-                                .body(Body::empty())
+                                .body(BoxBody::empty())
                                 .expect("unable to build response"));
                         }
                         Err(e) => return Err(e),
@@ -86,7 +97,7 @@ pub async fn fcgi_call(
                     //reject it
                     return Ok(Response::builder()
                         .status(hyper::StatusCode::LENGTH_REQUIRED)
-                        .body(Body::empty())
+                        .body(BoxBody::empty())
                         .expect("unable to build response"));
                 }
             } else {
@@ -96,17 +107,6 @@ pub async fn fcgi_call(
     };
     let req = Request::from_parts(req, body);
 
-    let params = create_params(
-        fcgi_cfg,
-        &req,
-        req_path,
-        web_mount,
-        fs_full_path,
-        path_info,
-        remote_addr,
-    );
-
-    trace!("to FCGI: {:?}", &params);
     let mut resp = match fcgi_cfg.timeout {
         0 => app.forward(req, params).await,
         secs => match timeout(Duration::from_secs(secs), app.forward(req, params)).await {
@@ -142,12 +142,12 @@ pub async fn fcgi_call(
         }
     }*/
 
-    Ok(resp.map(|bod| Body::wrap_stream(HttpBodyStream::from(bod))))
+    Ok(resp.map(BoxBody::new))
 }
 
-fn create_params<B: HttpBody>(
+fn create_params(
     fcgi_cfg: &FCGIApp,
-    req: &Request<B>,
+    req: &Request<IncomingBody>,
     req_path: &super::WebPath,
     web_mount: &Utf8PathBuf,
     fs_full_path: Option<&Path>,

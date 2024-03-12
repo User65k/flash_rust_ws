@@ -1,24 +1,73 @@
 use bytes::BytesMut;
-use hyper::{header, upgrade::Upgraded, Body, HeaderMap, Request, Response, StatusCode};
+use hyper::rt::{Read, ReadBuf, Write};
+use hyper::{header, upgrade::Upgraded, HeaderMap, Request, Response, StatusCode};
 use log::error;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
-pub type AsyncClient = Framed<Upgraded, MessageCodec>;
+type AsyncClient = Framed<MyUpgraded, MessageCodec>;
 use async_stream_connection::{Addr, Stream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::body::{BoxBody, FRWSResult, IncomingBody};
+use pin_project_lite::pin_project;
+
+pin_project! {
+    struct MyUpgraded{
+        #[pin]
+        u: Upgraded
+    }
+}
+impl tokio::io::AsyncRead for MyUpgraded {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        //let b = unsafe { buf.inner_mut() };
+        //let mut buf = ReadBuf::uninit(b);
+
+        //Its totally the same type
+        let buf: &mut ReadBuf = unsafe { std::mem::transmute(buf) };
+
+        self.project().u.poll_read(cx, buf.unfilled())
+    }
+}
+impl tokio::io::AsyncWrite for MyUpgraded {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        self.project().u.poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        self.project().u.poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        self.project().u.poll_shutdown(cx)
+    }
+}
+
 pub async fn upgrade(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     ws: &Websocket,
     req_path: &super::WebPath<'_>,
     _remote_addr: SocketAddr,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     //update the request
-    let mut res = Response::new(Body::empty());
+    let mut res = Response::new(BoxBody::empty());
     //TODO? check if path is deeper than it should -> 404
     if !req_path.is_empty() {
         *res.status_mut() = StatusCode::NOT_FOUND;
@@ -52,16 +101,16 @@ pub async fn upgrade(
     let addr = ws.assock.clone(); //TODO config lives long enough
     let forward_header = ws.forward_header;
 
+    let header = if forward_header {
+        error!("forwarding header...");
+        Some(req.headers().clone())
+    } else {
+        None
+    };
     tokio::task::spawn(async move {
-        let header = if forward_header {
-            error!("forwarding header...");
-            Some(req.headers().clone())
-        } else {
-            None
-        };
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                let client = MessageCodec::server().framed(upgraded);
+                let client = MessageCodec::server().framed(MyUpgraded { u: upgraded });
                 websocket(&addr, header, client).await;
             }
             Err(e) => error!("upgrade error: {}", e),

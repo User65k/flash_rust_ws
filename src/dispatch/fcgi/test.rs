@@ -1,16 +1,49 @@
 use super::*;
 use bytes::Bytes;
-use hyper::{header, Body, Request, Version};
+use hyper::{body::Body, header, Request, Version};
+use std::future::Future;
 use std::path::Path;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
+use crate::body::{
+    test::{to_bytes, TestBody},
+    FRWSResp, FRWSResult,
+};
 use crate::{
     config::{group_config, AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf},
     dispatch::WebPath,
 };
+
+trait OldBodyApi: Body {
+    fn data(&mut self) -> OldApiFut;
+}
+struct OldApiFut<'a>(&'a mut FRWSResp);
+impl Future for OldApiFut<'_> {
+    type Output = Option<Result<Bytes, std::io::Error>>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match Body::poll_frame(std::pin::pin!(self.0.body_mut()), cx) {
+            std::task::Poll::Ready(Some(Ok(d))) => {
+                std::task::Poll::Ready(Some(Ok(d.into_data().unwrap())))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(e))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+impl OldBodyApi for FRWSResp {
+    fn data(&mut self) -> OldApiFut {
+        OldApiFut(self)
+    }
+}
+
 #[test]
 fn parse_addr() {
     assert!(if let Ok(UseCase::FCGI(FcgiMnt {
@@ -136,7 +169,7 @@ fn params_php_example() {
     let req = Request::get("/php/")
         .header(header::HOST, "example.com")
         .version(Version::HTTP_11)
-        .body(Body::empty())
+        .body(TestBody::empty())
         .unwrap();
 
     let params = create_params(
@@ -193,7 +226,7 @@ fn params_flup_example() {
     let req = Request::get("/flup/status")
         .header(header::HOST, "localhost")
         .version(Version::HTTP_10)
-        .body(Body::empty())
+        .body(TestBody::empty())
         .unwrap();
 
     let params = create_params(
@@ -229,11 +262,7 @@ fn params_flup_example() {
     );
 }
 
-async fn handle_wwwroot(
-    req: Request<Body>,
-    mount: UseCase,
-    req_path: &str,
-) -> Result<Response<Body>, std::io::Error> {
+async fn handle_wwwroot(req: Request<TestBody>, mount: UseCase, req_path: &str) -> FRWSResult {
     let wwwr = crate::config::WwwRoot {
         mount,
         header: None,
@@ -279,12 +308,12 @@ async fn resolve_file() {
     });
 
     let req = Request::get("/mount/test_fcgi_fallthroug")
-        .body(Body::empty())
+        .body(TestBody::empty())
         .unwrap();
     let res = handle_wwwroot(req, mount, "test_fcgi_fallthroug").await;
     let res = res.unwrap();
     assert_eq!(res.status(), 200);
-    let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
+    let body = to_bytes(res.into_body()).await;
     assert_eq!(body, file_content);
 }
 #[tokio::test]
@@ -316,7 +345,7 @@ async fn dont_resolve_file() {
     });
 
     let req = Request::get("/mount/dont_fallthroug.php%00.txt")
-        .body(Body::empty())
+        .body(TestBody::empty())
         .unwrap();
     let res = handle_wwwroot(req, mount, "dont_fallthroug.php\0.txt").await;
     let res = res.unwrap_err();
@@ -326,7 +355,7 @@ async fn dont_resolve_file() {
 async fn body_no_len() {
     let mount = UseCase::FCGI(FcgiMnt {
         fcgi: FCGIApp {
-            sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
+            sock: test_sock_addr(),
             exec: None,
             set_script_filename: false,
             set_request_uri: false,
@@ -334,12 +363,15 @@ async fn body_no_len() {
             params: None,
             bin: None,
             app: None,
+            buffer_request: None,
+            allow_multiline_header: false,
+            multiple_header: None,
         },
         static_files: None,
     });
 
     let req = Request::post("/mount/whatever")
-        .body(Body::empty())
+        .body(TestBody::empty())
         .unwrap();
     let res = handle_wwwroot(req, mount, "whatever").await;
     let res = res.unwrap();
@@ -347,57 +379,15 @@ async fn body_no_len() {
 }*/
 #[tokio::test]
 async fn simple_fcgi_post() {
-    async fn mock_app(app_listener: tokio::net::TcpListener) {
-        let (mut app_socket, _) = app_listener.accept().await.unwrap();
-        let mut buf = BytesMut::with_capacity(4096);
-        //FCGI startup
-        app_socket.read_buf(&mut buf).await.unwrap();
-        let from_php =
-            b"\x01\x0a\0\0\0!\x07\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\0MAX_CONNS\0\0\0\0\0\0\0";
-        app_socket
-            .write_buf(&mut Bytes::from(&from_php[..]))
-            .await
-            .unwrap();
-
-        buf.clear();
-        let (mut app_socket, _) = app_listener.accept().await.unwrap();
-        //actual request
-        app_socket.read_buf(&mut buf).await.unwrap();
-
-        assert_eq!(
-            get_param(&buf, b"SCRIPT_FILENAME"),
-            Some(&b"/home/daniel/Public/test.php"[..])
-        );
-        assert_eq!(get_param(&buf, b"QUERY_STRING"), Some(&b""[..]));
-        assert_eq!(get_param(&buf, b"CONTENT_LENGTH"), Some(&b"8"[..]));
-
-        fn find_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
-            haystack
-                .windows(needle.len())
-                .any(|window| window == needle)
-        }
-        assert!(find_subsequence(&buf, b"\x01\x05\0\x01\0\x08\0\0test=123"));
-
-        let from_php = b"\x01\x06\0\x01\x00\x23\x05\0Status: 201 Created\r\n\r\n<html><body>#+#+#\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
-        app_socket
-            .write_buf(&mut Bytes::from(&from_php[..]))
-            .await
-            .unwrap();
-    }
-
-    let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
-    let m = tokio::spawn(mock_app(app_listener));
-    let sock = Addr::Inet(a);
-
     let fcgi_cfg = FCGIApp {
-        sock: sock.clone(),
+        sock: test_sock_addr(),
         exec: None,
         set_script_filename: true,
         set_request_uri: false,
         timeout: 100,
         params: None,
         bin: None,
-        app: Some(FCGIAppPool::new(&sock).await.expect("ConPool failed")),
+        app: None,
         buffer_request: None,
         allow_multiline_header: false,
         multiple_header: None,
@@ -405,20 +395,36 @@ async fn simple_fcgi_post() {
     let req = Request::post("http://1/Public/test.php")
         .header("Content-Length", "8")
         .header("Content-Type", "multipart/form-data")
-        .body(Body::from("test=123"))
+        .body(TestBody::from("test=123"))
         .unwrap();
 
-    let mut res = fcgi_call(
-        &fcgi_cfg,
-        req,
-        &super::super::WebPath::parsed("Public/test.php"),
-        &Utf8PathBuf::from(""),
-        Some(Path::new("/home/daniel/Public/test.php")),
-        None,
-        "127.0.0.1:1337".parse().unwrap(),
-    )
-    .await
-    .expect("forward failed");
+    let (mut app_socket, req_task) = test_from_wwwr(req, "Public/test.php", fcgi_cfg, None).await;
+
+    let mut buf = BytesMut::with_capacity(4096);
+    //actual request
+    app_socket.read_buf(&mut buf).await.unwrap();
+
+    assert_eq!(
+        get_param(&buf, b"SCRIPT_FILENAME"),
+        Some(&b"/Public/test.php"[..])
+    );
+    assert_eq!(get_param(&buf, b"QUERY_STRING"), Some(&b""[..]));
+    assert_eq!(get_param(&buf, b"CONTENT_LENGTH"), Some(&b"8"[..]));
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+    assert!(find_subsequence(&buf, b"\x01\x05\0\x01\0\x08\0\0test=123"));
+
+    let from_php = b"\x01\x06\0\x01\x00\x23\x05\0Status: 201 Created\r\n\r\n<html><body>#+#+#\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
+    app_socket
+        .write_buf(&mut Bytes::from(&from_php[..]))
+        .await
+        .unwrap();
+
+    let mut res = req_task.await.unwrap();
 
     assert_eq!(res.status(), hyper::StatusCode::CREATED);
     let read1 = res.data().await;
@@ -431,16 +437,15 @@ async fn simple_fcgi_post() {
     }
     let read2 = res.data().await;
     assert!(read2.is_none());
-    m.await.unwrap();
 }
 /// send a request to a FCGI mount and return its TcpStream
 /// (as well as the Task doing the request)
 async fn test_from_wwwr(
-    req: Request<Body>,
+    req: Request<TestBody>,
     req_path: &str,
     mut fcgi: FCGIApp,
     static_files: Option<StaticFiles>,
-) -> (TcpStream, tokio::task::JoinHandle<Response<Body>>) {
+) -> (TcpStream, tokio::task::JoinHandle<FRWSResp>) {
     // pick a free port
     let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
     let req_path = req_path.to_owned();
@@ -500,7 +505,7 @@ fn get_param<'a>(haystack: &'a [u8], param: &'_ [u8]) -> Option<&'a [u8]> {
 #[tokio::test]
 async fn resolve_file_with_path_info() {
     let req = Request::get("/mount/test.php/path_info")
-        .body(Body::empty())
+        .body(TestBody::empty())
         .unwrap();
 
     let sf = StaticFiles {
@@ -563,7 +568,7 @@ async fn resolve_file_with_path_info() {
 }
 #[tokio::test]
 async fn resolve_index() {
-    let req = Request::get("/mount/").body(Body::empty()).unwrap();
+    let req = Request::get("/mount/").body(TestBody::empty()).unwrap();
 
     let sf = StaticFiles {
         dir: AbsPathBuf::temp_dir(),
@@ -624,7 +629,7 @@ async fn resolve_index() {
 #[tokio::test]
 async fn file_request_dont_add_index() {
     let req = Request::get("/mount/something.php")
-        .body(Body::empty())
+        .body(TestBody::empty())
         .unwrap();
 
     let sf = StaticFiles {

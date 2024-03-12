@@ -1,4 +1,4 @@
-use crate::body::{BoxBody, IncomingBody, FRWSResult};
+use crate::body::{BoxBody, FRWSResult, IncomingBody};
 use crate::config::{AbsPathBuf, Utf8PathBuf};
 
 use super::staticf::{self, resolve_path, return_file, ResolveResult};
@@ -35,16 +35,13 @@ enum DavMethod {
 
 /// req_path is relative from config.root
 /// web_mount is config.root from the client perspective
-pub async fn do_dav<IB>(
-    req: Request<IB>,
+pub async fn do_dav(
+    req: Request<IncomingBody>,
     req_path: &super::WebPath<'_>,
     config: &Config,
     web_mount: &Utf8PathBuf,
     _remote_addr: SocketAddr,
-) -> FRWSResult
-where
-    IB: IncomingBody,
-{
+) -> FRWSResult {
     let m = match req.method() {
         &Method::OPTIONS => {
             let rb = Response::builder()
@@ -158,10 +155,7 @@ where
         )),
     }
 }
-async fn list_dir(
-    full_path: &Path,
-    url_path: String,
-) -> FRWSResult {
+async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
     let mut dir = tokio::fs::read_dir(full_path).await?;
     let mut buf = BytesMut::new().writer();
     buf.write_all(b"<html><body>")?;
@@ -211,7 +205,7 @@ impl From<bytes::buf::Writer<BytesMut>> for BoxBody<IoError> {
         Self::new(BodyWriter(Some(value.into_inner().freeze())))
     }
 }
-use hyper::body::{Frame, Body};
+use hyper::body::{Body, Frame};
 impl Body for BodyWriter {
     type Data = Bytes;
     type Error = IoError;
@@ -220,19 +214,16 @@ impl Body for BodyWriter {
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Poll::Ready(self.0.take().map(|buf|Ok(Frame::data(buf))))
+        Poll::Ready(self.0.take().map(|buf| Ok(Frame::data(buf))))
     }
 }
 
-async fn handle_get<IB>(
-    req: Request<IB>,
+async fn handle_get(
+    req: Request<IncomingBody>,
     full_path: &Path,
     req_path: &super::WebPath<'_>,
     web_mount: &Utf8PathBuf,
-) -> FRWSResult
-where
-    IB: IncomingBody,
-{
+) -> FRWSResult {
     //we could serve dir listings as well. with a litte webdav client :-D
     let (_, file_lookup) = resolve_path(full_path, false, &None).await?;
 
@@ -299,14 +290,11 @@ async fn handle_mkdir(full_path: &Path) -> FRWSResult {
      */
     Ok(res)
 }
-struct BodyW<IB: IncomingBody> {
-    s: IB,
+struct BodyW {
+    s: IncomingBody,
     b: Option<Bytes>,
 }
-impl<IB> AsyncRead for BodyW<IB>
-where
-    IB: IncomingBody,
-{
+impl AsyncRead for BodyW {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -338,14 +326,11 @@ where
         }
     }
 }
-async fn handle_put<IB>(
-    req: Request<IB>,
+async fn handle_put(
+    req: Request<IncomingBody>,
     full_path: &Path,
     dont_overwrite: bool,
-) -> FRWSResult
-where
-    IB: IncomingBody<Data = Bytes> + Unpin,
-{
+) -> FRWSResult {
     // Check if file exists before proceeding
     if dont_overwrite && metadata(full_path).await.is_ok() {
         return Err(IoError::new(
