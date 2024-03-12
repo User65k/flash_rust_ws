@@ -1,9 +1,6 @@
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use chrono::{DateTime, Utc};
-use hyper::{
-    body::{aggregate, HttpBody},
-    Body, Request, Response, StatusCode,
-};
+use hyper::{Request, Response, StatusCode};
 use std::{
     fs::Metadata,
     io::{Error as IoError, ErrorKind, Read, Write},
@@ -19,14 +16,18 @@ use xml::{
     EmitterConfig, ParserConfig,
 };
 
+use crate::body::{IncomingBody, FRWSResult};
 use crate::config::{AbsPathBuf, Utf8PathBuf};
 
-pub async fn handle_propfind(
-    req: Request<Body>,
+pub async fn handle_propfind<IB>(
+    req: Request<IB>,
     path: PathBuf,
     root: &AbsPathBuf,
     web_mount: &Utf8PathBuf,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult
+where
+    IB: IncomingBody,
+{
     // Get the depth
     let depth = req
         .headers()
@@ -72,13 +73,16 @@ pub async fn handle_propfind(
         .write(XmlWEvent::end_element())
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
 
-    let mut res = Response::new(Body::from(buf.into_inner().freeze()));
+    let mut res = Response::new(buf.into());
 
     *res.status_mut() = StatusCode::MULTI_STATUS;
     Ok(res)
 }
 
-async fn get_props_wanted(mut req: Request<Body>) -> Result<Vec<OwnedName>, IoError> {
+async fn get_props_wanted<IB>(req: Request<IB>) -> Result<Vec<OwnedName>, IoError>
+where
+    IB: IncomingBody,
+{
     if let Some(0) = req.body().size_hint().exact() {
         //Windows explorer does not send a body
         Ok(vec![
@@ -86,7 +90,7 @@ async fn get_props_wanted(mut req: Request<Body>) -> Result<Vec<OwnedName>, IoEr
             OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
         ])
     } else {
-        let read = aggregate(req.body_mut())
+        let read = req.into_body().buffer(9*1024)
             .await
             .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
             .reader();
@@ -104,6 +108,43 @@ async fn get_props_wanted(mut req: Request<Body>) -> Result<Vec<OwnedName>, IoEr
         })
         .map_err(|_| IoError::new(ErrorKind::InvalidData, "xml parse error"))?;
         Ok(props)
+    }
+}
+
+impl<IB: IncomingBody> Buf for crate::body::BufferedBody<IB, Bytes> {
+    fn remaining(&self) -> usize {
+        match self {
+            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
+            crate::body::BufferedBody::Buffer { buf, len: _ } => buf.iter().map(|buf| buf.remaining()).sum(),
+        }
+    }
+    fn chunk(&self) -> &[u8] {
+        match self {
+            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
+            crate::body::BufferedBody::Buffer { buf, len: _ } => buf.front().map(Buf::chunk).unwrap_or_default(),
+        }
+    }
+    fn advance(&mut self, mut cnt: usize) {
+        let bufs = match self {
+            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
+            crate::body::BufferedBody::Buffer { buf, len: _ } => buf,
+        };
+        while cnt > 0 {
+            if let Some(front) = bufs.front_mut() {
+                let rem = front.remaining();
+                if rem > cnt {
+                    front.advance(cnt);
+                    return;
+                } else {
+                    front.advance(rem);
+                    cnt -= rem;
+                }
+            } else {
+                //no data -> panic?
+                return;
+            }
+            bufs.pop_front();
+        }
     }
 }
 
