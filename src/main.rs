@@ -6,8 +6,12 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 */
 
 use futures_util::future::join_all;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request};
+use hyper::service::service_fn;
+use hyper::{body::Incoming, Request};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
 use std::error::Error;
@@ -27,8 +31,9 @@ mod transport;
 mod user;
 
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
-use crate::transport::tls::{TLSBuilderTrait, TlsStream};
-use transport::{PlainIncoming, PlainStream};
+use crate::transport::tls::TLSBuilderTrait;
+use crate::transport::Connection;
+use transport::PlainIncoming;
 
 /// Set up each `SocketAddr` and return the `JoinHandle`s
 ///
@@ -36,7 +41,7 @@ use transport::{PlainIncoming, PlainStream};
 /// If its config has TLS wrap the `PlainIncoming` into an `TlsAcceptor`
 async fn prepare_hyper_servers(
     mut listening_ifs: HashMap<SocketAddr, config::HostCfg>,
-) -> Result<Vec<JoinHandle<Result<(), hyper::Error>>>, Box<dyn Error>> {
+) -> Result<Vec<JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>>, Box<dyn Error>> {
     let mut handles = vec![];
     for (addr, mut cfg) in listening_ifs.drain() {
         let l = match cfg.listener.take() {
@@ -52,46 +57,74 @@ async fn prepare_hyper_servers(
                 let use_tls = cfg.tls.take();
 
                 let hcfg = Arc::new(cfg);
-                let serv_func = move |remote_addr: SocketAddr| {
-                    trace!("Connected on {} by {}", &addr, &remote_addr);
-                    let hcfg = hcfg.clone();
-                    async move {
-                        Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
-                            dispatch::handle_request(req, hcfg.clone(), remote_addr)
-                        }))
-                    }
-                };
 
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if let Some(tls_cfg) = use_tls {
                     let a = tls_cfg.get_acceptor(incoming);
-                    let new_service = make_service_fn(move |socket: &TlsStream| {
-                        let remote_addr = socket.remote_addr();
-                        serv_func(remote_addr)
-                    });
-                    tokio::spawn(hyper::Server::builder(a).executor(Exec).serve(new_service))
+                    tokio::spawn(async move {
+                        while let Ok(stream) = a.accept().await {
+                            let remote_addr = stream.remote_addr();
+                            trace!("Connected on {} by {}", &addr, &remote_addr);
+                            let hcfg = hcfg.clone();
+                            if let Err(e) = auto::Builder::new(TokioExecutor::new())
+                                .serve_connection_with_upgrades(
+                                    TokioIo::new(stream),
+                                    service_fn(move |req: Request<Incoming>| {
+                                        //TODO req.extensions_mut().insert(remote_addr);
+                                        dispatch::handle_request(req, hcfg.clone(), remote_addr)
+                                    }),
+                                )
+                                .await
+                            {
+                                return Err(e);
+                            }
+                        }
+                        Ok(())
+                    })
                 } else {
-                    let new_service = make_service_fn(move |socket: &PlainStream| {
-                        let remote_addr = socket.remote_addr();
-                        serv_func(remote_addr)
-                    });
-                    tokio::spawn(
-                        hyper::Server::builder(incoming)
-                            .executor(Exec)
-                            .serve(new_service),
-                    )
+                    tokio::spawn(async move {
+                        while let Ok(stream) = incoming.accept().await {
+                            let remote_addr = stream.remote_addr();
+                            trace!("Connected on {} by {}", &addr, &remote_addr);
+                            let hcfg = hcfg.clone();
+                            if let Err(e) = auto::Builder::new(TokioExecutor::new())
+                                .serve_connection_with_upgrades(
+                                    TokioIo::new(stream),
+                                    service_fn(move |req: Request<Incoming>| {
+                                        //TODO req.extensions_mut().insert(remote_addr);
+                                        dispatch::handle_request(req, hcfg.clone(), remote_addr)
+                                    }),
+                                )
+                                .await
+                            {
+                                return Err(e);
+                            }
+                        }
+                        Ok(())
+                    })
                 }
                 #[cfg(not(any(feature = "tlsrust", feature = "tlsnative")))]
                 {
-                    let new_service = make_service_fn(move |socket: &PlainStream| {
-                        let remote_addr = socket.remote_addr();
-                        serv_func(remote_addr)
-                    });
-                    tokio::spawn(
-                        hyper::Server::builder(incoming)
-                            .executor(Exec)
-                            .serve(new_service),
-                    )
+                    tokio::spawn(async move {
+                        while let Ok(stream) = incoming.accept().await {
+                            let remote_addr = stream.remote_addr();
+                            trace!("Connected on {} by {}", &addr, &remote_addr);
+                            let hcfg = hcfg.clone();
+                            if let Err(e) = auto::Builder::new(TokioExecutor::new())
+                                .serve_connection_with_upgrades(
+                                    TokioIo::new(stream),
+                                    service_fn(move |req: Request<Incoming>| {
+                                        //TODO req.extensions_mut().insert(remote_addr);
+                                        dispatch::handle_request(req, hcfg.clone(), remote_addr)
+                                    }),
+                                )
+                                .await
+                            {
+                                return Err(e);
+                            }
+                        }
+                        Ok(())
+                    })
                 }
             }
             Err(err) => {
@@ -104,18 +137,6 @@ async fn prepare_hyper_servers(
     Ok(handles)
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Exec;
-
-impl<F> hyper::rt::Executor<F> for Exec
-where
-    F: std::future::Future + Send + 'static,
-    F::Output: Send,
-{
-    fn execute(&self, task: F) {
-        tokio::spawn(task);
-    }
-}
 
 #[tokio::main]
 async fn main() {

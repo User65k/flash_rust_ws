@@ -1,34 +1,105 @@
 use bytes::{Buf, Bytes};
-use futures_util::stream::Stream;
-use hyper::body::{HttpBody, SizeHint};
+use futures_util::Future;
+use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use log::trace;
 use std::collections::VecDeque;
 use std::io::Error as IoError;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use pin_project_lite::pin_project;
 
-/// Streamed response
-pub struct HttpBodyStream<B: HttpBody<Data = Bytes, Error = IoError> + Send + Sync + Unpin>(B);
-
-impl<B: HttpBody<Data = Bytes, Error = IoError> + Send + Sync + Unpin> Stream
-    for HttpBodyStream<B>
-{
-    type Item = Result<Bytes, IoError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.0).poll_data(cx)
-    }
-}
-impl<B: HttpBody<Data = Bytes, Error = IoError> + Send + Sync + Unpin> From<B>
-    for HttpBodyStream<B>
-{
-    #[inline]
-    fn from(bod: B) -> HttpBodyStream<B> {
-        HttpBodyStream(bod)
-    }
-}
+pub type FRWSResp = hyper::Response<BoxBody<IoError>>;
+pub type FRWSResult = Result<hyper::Response<BoxBody<IoError>>, IoError>;
 
 /// Request Body
+///
+/// matches Incoming from hyper, but also allows tests to do shortcuts
+pub trait IncomingBody: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin + Sized {
+    ///read whole body to memory
+    /// 
+    /// like the old `hyper::body::aggregate` but checks the len as it gathers the data
+    fn buffer(self, max_size: usize) -> BufferBody<Self> {
+        BufferBody{
+            body: self,
+            max_size,
+            buf: Some(VecDeque::new()),
+            len: 0
+        }
+    }    
+}
+impl IncomingBody for hyper::body::Incoming {}
+
+#[cfg(test)]
+pub mod test {
+    use super::*;
+    pub struct TestBody(Bytes);
+    impl HttpBody for TestBody {
+        type Data = Bytes;
+
+        type Error = hyper::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            Poll::Ready(Some(Ok(Frame::data(std::mem::take(&mut self.0)))))
+        }
+    }
+    impl IncomingBody for TestBody {}
+    impl TestBody {
+        pub fn from(b: &'static str) -> TestBody {
+            TestBody(Bytes::from_static(b.as_bytes()))
+        }
+        pub fn empty() -> TestBody {
+            TestBody(Bytes::new())
+        }
+    }
+
+    pin_project! {
+        /// Future for `aggregate`
+        pub struct Aggregator<T: HttpBody>{
+            #[pin]
+            body: T,
+            buf: Option<bytes::BytesMut>,
+        }
+    }
+    ///read whole body
+    /// 
+    ///only for tests. like the old `hyper::body::aggregate`
+    pub fn aggregate<T: HttpBody<Data = Bytes, Error = E>, E: std::error::Error>(
+        body: T,
+    ) -> Aggregator<T> {
+        Aggregator{
+            body,
+            buf: Some(bytes::BytesMut::with_capacity(1024))
+        }
+    }
+    impl<T: HttpBody<Data = Bytes, Error = E> + Unpin, E: std::error::Error> std::future::Future
+        for Aggregator<T>
+    {
+        type Output = Bytes;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let mut this = self.project();
+            
+            loop {
+                return match this.body.as_mut().poll_frame(cx) {
+                    Poll::Ready(Some(Ok(frame))) => {
+                        if let Ok(data) = frame.into_data() {
+                            this.buf.as_mut().unwrap().extend_from_slice(&data);
+                        }
+                        continue;
+                    }
+                    Poll::Ready(None) => Poll::Ready(this.buf.take().unwrap().freeze()),
+                    Poll::Ready(Some(Err(e))) => panic!("{:?}", e),
+                    Poll::Pending => Poll::Pending,
+                };
+            }
+        }
+    }
+}
+
 pub enum BufferedBody<Body, Buf> {
     Passthrough(Body),
     Buffer { buf: VecDeque<Buf>, len: usize },
@@ -41,13 +112,15 @@ where
     type Data = Body::Data;
     type Error = Body::Error;
 
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         match unsafe { self.get_unchecked_mut() } {
-            BufferedBody::Passthrough(bod) => unsafe { Pin::new_unchecked(bod) }.poll_data(cx),
-            BufferedBody::Buffer { buf, .. } => Poll::Ready(buf.pop_front().map(Ok)),
+            BufferedBody::Passthrough(bod) => unsafe { Pin::new_unchecked(bod) }.poll_frame(cx),
+            BufferedBody::Buffer { buf, .. } => {
+                Poll::Ready(buf.pop_front().map(|d| Ok(Frame::data(d))))
+            }
         }
     }
 
@@ -56,13 +129,6 @@ where
             BufferedBody::Passthrough(body) => body.size_hint(),
             BufferedBody::Buffer { len, .. } => SizeHint::with_exact(*len as u64),
         }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<hyper::HeaderMap>, Self::Error>> {
-        Poll::Ready(Ok(None))
     }
 }
 impl<Body> BufferedBody<Body, Body::Data>
@@ -75,31 +141,107 @@ where
         BufferedBody::Passthrough(body)
     }
 }
-impl BufferedBody<hyper::Body, Bytes> {
-    ///read whole body to memory
-    /// 
-    /// like `hyper::body::aggregate` but checks the len as it gathers the data
-    pub async fn buffer(
-        mut body: hyper::Body,
+pin_project! {
+    /// Future for `body.buffer()`
+    pub struct BufferBody<B>{
+        #[pin]
+        body: B,
         max_size: usize,
-    ) -> Result<BufferedBody<hyper::Body, Bytes>, IoError> {
-        let mut buf = VecDeque::new();
-        let mut len = 0usize;
-        while let Some(chunk) = body.data().await {
-            let chunk = chunk.map_err(|e| IoError::new(std::io::ErrorKind::Other, e))?;
-            if chunk.has_remaining() {
-                len += chunk.remaining();
-                buf.push_back(chunk);
+        buf: Option<VecDeque<Bytes>>,
+        len: usize
+    }
+}
+impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> Future for BufferBody<B> {
+    type Output = Result<BufferedBody<B, Bytes>, IoError>;
 
-                if len > max_size {
-                    return Err(IoError::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "body too big",
-                    ));
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        loop {
+            return match this.body.as_mut().poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Ok(chunk) = frame.into_data() {
+                        if chunk.has_remaining() {
+                            *this.len += chunk.remaining();
+                            this.buf.as_mut().unwrap().push_back(chunk);
+            
+                            if this.len > this.max_size {
+                                return Poll::Ready(Err(IoError::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    "body too big",
+                                )));
+                            }
+                        }
+                    }
+                    continue;
                 }
-            }
+                Poll::Ready(None) => {
+                    trace!("buffered input body of {} Bytes", this.len);
+                    Poll::Ready(Ok(BufferedBody::Buffer { buf: this.buf.take().unwrap(), len: *this.len }))
+                },
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Err(IoError::new(std::io::ErrorKind::Other, e.to_string()))),
+                Poll::Pending => Poll::Pending,
+            };
         }
-        trace!("buffered input body of {} Bytes", len);
-        Ok(BufferedBody::Buffer { buf, len })
+    }
+}
+
+/// Return Body that can handle all types
+pub struct BoxBody<E> {
+    inner: Pin<Box<dyn HttpBody<Data = Bytes, Error = E> + Send + Sync + 'static>>,
+}
+
+impl<E: Send + Sync + 'static> BoxBody<E> {
+    /// Create a new `BoxBody`.
+    pub fn new<B>(body: B) -> Self
+    where
+        B: HttpBody<Data = Bytes, Error = E> + Send + Sync + 'static,
+    {
+        Self {
+            inner: Box::pin(body),
+        }
+    }
+    pub fn empty() -> Self {
+        Self {
+            inner: Box::pin(Empty(PhantomData)),
+        }
+    }
+}
+
+pub struct Empty<E>(PhantomData<E>);
+impl<E> HttpBody for Empty<E> {
+    type Data = Bytes;
+    type Error = E;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(None)
+    }
+}
+
+impl<E> std::fmt::Debug for BoxBody<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxBody").finish()
+    }
+}
+
+impl<E> HttpBody for BoxBody<E> {
+    type Data = Bytes;
+    type Error = E;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        self.inner.as_mut().poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
     }
 }
