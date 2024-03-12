@@ -8,6 +8,8 @@ mod staticf;
 #[cfg(test)]
 pub(crate) mod test;
 mod webpath;
+#[cfg(any(feature = "proxy", feature = "websocket"))]
+mod upgrades;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 use hyper::body::Body as HttpBody;

@@ -1,6 +1,5 @@
 use bytes::BytesMut;
-use hyper::rt::{Read, ReadBuf, Write};
-use hyper::{header, upgrade::Upgraded, HeaderMap, Request, Response, StatusCode};
+use hyper::{header, HeaderMap, Request, Response, StatusCode};
 use log::error;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
@@ -12,53 +11,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::body::{BoxBody, FRWSResult, IncomingBody};
-use pin_project_lite::pin_project;
+use crate::{body::{BoxBody, FRWSResult, IncomingBody}, dispatch::upgrades::MyUpgraded};
 
-pin_project! {
-    struct MyUpgraded{
-        #[pin]
-        u: Upgraded
-    }
-}
-impl tokio::io::AsyncRead for MyUpgraded {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        //let b = unsafe { buf.inner_mut() };
-        //let mut buf = ReadBuf::uninit(b);
-
-        //Its totally the same type
-        let buf: &mut ReadBuf = unsafe { std::mem::transmute(buf) };
-
-        self.project().u.poll_read(cx, buf.unfilled())
-    }
-}
-impl tokio::io::AsyncWrite for MyUpgraded {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<Result<usize, std::io::Error>> {
-        self.project().u.poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        self.project().u.poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
-        self.project().u.poll_shutdown(cx)
-    }
-}
 
 pub async fn upgrade(
     req: Request<IncomingBody>,
@@ -110,7 +64,7 @@ pub async fn upgrade(
     tokio::task::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                let client = MessageCodec::server().framed(MyUpgraded { u: upgraded });
+                let client = MessageCodec::server().framed(MyUpgraded::new(upgraded));
                 websocket(&addr, header, client).await;
             }
             Err(e) => error!("upgrade error: {}", e),
