@@ -11,8 +11,10 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{body::{BoxBody, FRWSResult, IncomingBody}, dispatch::upgrades::MyUpgraded};
-
+use crate::{
+    body::{BoxBody, FRWSResult, IncomingBody},
+    dispatch::upgrades::MyUpgraded,
+};
 
 pub async fn upgrade(
     req: Request<IncomingBody>,

@@ -1,4 +1,7 @@
-use hyper::{rt::{Read as _, ReadBuf, Write as _}, upgrade::Upgraded};
+use hyper::{
+    rt::{Read as _, ReadBuf, Write as _},
+    upgrade::Upgraded,
+};
 use pin_project_lite::pin_project;
 
 pin_project! {
@@ -9,9 +12,7 @@ pin_project! {
 }
 impl MyUpgraded {
     pub fn new(u: Upgraded) -> Self {
-        Self {
-            u
-        }
+        Self { u }
     }
 }
 

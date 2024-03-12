@@ -66,7 +66,7 @@ async fn prepare_hyper_servers(
                             let remote_addr = stream.remote_addr();
                             trace!("Connected on {} by {}", &addr, &remote_addr);
                             let hcfg = hcfg.clone();
-                            if let Err(e) = auto::Builder::new(TokioExecutor::new())
+                            auto::Builder::new(TokioExecutor::new())
                                 .serve_connection_with_upgrades(
                                     TokioIo::new(stream),
                                     service_fn(move |req: Request<Incoming>| {
@@ -74,10 +74,7 @@ async fn prepare_hyper_servers(
                                         dispatch::handle_request(req, hcfg.clone(), remote_addr)
                                     }),
                                 )
-                                .await
-                            {
-                                return Err(e);
-                            }
+                                .await?
                         }
                         Ok(())
                     })
@@ -87,7 +84,7 @@ async fn prepare_hyper_servers(
                             let remote_addr = stream.remote_addr();
                             trace!("Connected on {} by {}", &addr, &remote_addr);
                             let hcfg = hcfg.clone();
-                            if let Err(e) = auto::Builder::new(TokioExecutor::new())
+                            auto::Builder::new(TokioExecutor::new())
                                 .serve_connection_with_upgrades(
                                     TokioIo::new(stream),
                                     service_fn(move |req: Request<Incoming>| {
@@ -95,10 +92,7 @@ async fn prepare_hyper_servers(
                                         dispatch::handle_request(req, hcfg.clone(), remote_addr)
                                     }),
                                 )
-                                .await
-                            {
-                                return Err(e);
-                            }
+                                .await?
                         }
                         Ok(())
                     })
@@ -110,7 +104,7 @@ async fn prepare_hyper_servers(
                             let remote_addr = stream.remote_addr();
                             trace!("Connected on {} by {}", &addr, &remote_addr);
                             let hcfg = hcfg.clone();
-                            if let Err(e) = auto::Builder::new(TokioExecutor::new())
+                            auto::Builder::new(TokioExecutor::new())
                                 .serve_connection_with_upgrades(
                                     TokioIo::new(stream),
                                     service_fn(move |req: Request<Incoming>| {
@@ -118,10 +112,7 @@ async fn prepare_hyper_servers(
                                         dispatch::handle_request(req, hcfg.clone(), remote_addr)
                                     }),
                                 )
-                                .await
-                            {
-                                return Err(e);
-                            }
+                                .await?
                         }
                         Ok(())
                     })
