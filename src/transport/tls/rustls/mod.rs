@@ -1,7 +1,7 @@
 use super::PlainIncoming;
 use tokio_rustls::rustls::{
-    version, Certificate, Error, PrivateKey, SupportedCipherSuite, SupportedProtocolVersion,
-    ALL_CIPHER_SUITES,
+    version, Error, SupportedCipherSuite, SupportedProtocolVersion,
+    crypto::ring::{ALL_CIPHER_SUITES, default_provider}, pki_types::{CertificateDer as Certificate, PrivateKeyDer as PrivateKey},
 };
 use tokio_rustls::TlsAcceptor as RustlsAcceptor;
 pub use tokio_rustls::{
@@ -141,13 +141,11 @@ impl TLSBuilderTrait for ParsedTLSConfig {
             acme.start(&certres);
         }
 
-        let config = TLSConfig::builder();
-        let config = if let Some(cipher_suites) = self.ciphersuites {
-            config.with_cipher_suites(cipher_suites.as_slice())
-        } else {
-            config.with_safe_default_cipher_suites()
-        };
-        let config = config.with_safe_default_kx_groups();
+        let mut provider = default_provider();
+        if let Some(cipher_suites) = self.ciphersuites {
+            provider.cipher_suites = cipher_suites;
+        }
+        let config = TLSConfig::builder_with_provider(provider.into());
         let mut config = if let Some(versions) = self.versions {
             config.with_protocol_versions(versions.as_slice())
         } else {
@@ -174,11 +172,9 @@ fn load_certs(filename: &Path) -> Result<Vec<Certificate>, io::Error> {
     let mut reader = io::BufReader::new(certfile);
 
     // Load and return certificate.
-    let chain = rustls_pemfile::certs(&mut reader)?
-        .drain(..)
-        .map(Certificate)
-        .collect();
-    Ok(chain)
+    Ok(rustls_pemfile::certs(&mut reader)
+    .filter_map(|e|e.ok())
+    .collect())
 }
 
 // Load private key from file.
@@ -193,8 +189,8 @@ fn load_private_key(filename: &Path) -> Result<PrivateKey, io::Error> {
                 "cannot parse private key .pem file",
             )
         })? {
-            Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(PrivateKey(key)),
-            Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(PrivateKey(key)),
+            Some(rustls_pemfile::Item::Pkcs1Key(key)) => return Ok(PrivateKey::Pkcs1(key)),
+            Some(rustls_pemfile::Item::Pkcs8Key(key)) => return Ok(PrivateKey::Pkcs8(key)),
             None => break,
             _ => {}
         }

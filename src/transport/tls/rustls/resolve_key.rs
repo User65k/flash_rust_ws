@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tokio_rustls::rustls::{
     server::{ClientHello, ResolvesServerCert},
-    sign::{any_ecdsa_type, any_eddsa_type, CertifiedKey, RsaSigningKey},
-    Error, SignatureScheme,
+    crypto::ring::sign::any_supported_type, sign::CertifiedKey,
+    Error, SignatureScheme, SignatureAlgorithm
 };
 
 pub struct CertKeys {
@@ -25,6 +25,11 @@ pub struct ResolveServerCert {
     /// temp for acme challange
     #[cfg(feature = "tlsrust_acme")]
     acme_keys: RwLock<HashMap<String, Arc<CertifiedKey>>>,
+}
+impl std::fmt::Debug for ResolveServerCert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolveServerCert").finish()
+    }
 }
 #[cfg(feature = "tlsrust_acme")]
 impl CertKeys {
@@ -86,30 +91,35 @@ impl ResolveServerCert {
             let chain =
                 load_certs(&set.cert).map_err(|_| Error::General("Bad Cert file".into()))?;
 
-            if let Ok(rsa) = RsaSigningKey::new(&k) {
-                if ident.rsa.is_some() {
-                    return Err(Error::General("More than one RSA key".into()));
-                }
-                let key = Arc::new(rsa);
-                let ck = Arc::new(CertifiedKey::new(chain, key));
-                debug!("added RSA Cert");
-                ident.rsa = Some(ck);
-            } else if let Ok(key) = any_ecdsa_type(&k) {
-                if ident.ec.is_some() {
-                    return Err(Error::General("More than one EC key".into()));
-                }
-                let ck = Arc::new(CertifiedKey::new(chain, key));
-                debug!("added EC Cert");
-                ident.ec = Some(ck);
-            } else if let Ok(key) = any_eddsa_type(&k) {
-                if ident.ed.is_some() {
-                    return Err(Error::General("More than one ED key".into()));
-                }
-                let ck = Arc::new(CertifiedKey::new(chain, key));
-                debug!("added ED Cert");
-                ident.ed = Some(ck);
-            } else {
-                return Err(Error::General("Bad key type".into()));
+            let key = any_supported_type(&k)?;
+            let algo = key.algorithm();
+            let ck = Arc::new(CertifiedKey::new(chain, key));
+
+            match algo {
+                SignatureAlgorithm::RSA => {
+                    if ident.rsa.is_some() {
+                        return Err(Error::General("More than one RSA key".into()));
+                    }
+                    debug!("added RSA Cert");
+                    ident.rsa = Some(ck);
+                },
+                SignatureAlgorithm::ECDSA => {
+                    if ident.ec.is_some() {
+                        return Err(Error::General("More than one EC key".into()));
+                    }
+                    debug!("added EC Cert");
+                    ident.ec = Some(ck);
+                },
+                SignatureAlgorithm::ED25519 => {
+                    if ident.ed.is_some() {
+                        return Err(Error::General("More than one ED key".into()));
+                    }
+                    debug!("added ED Cert");
+                    ident.ed = Some(ck);
+                },
+                _ => {
+                    return Err(Error::General("Bad key type".into()));
+                }                
             }
         }
         if let Some(name) = sni {

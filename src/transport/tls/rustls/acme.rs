@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::vec::Vec;
 use tokio::time::sleep;
-use tokio_rustls::rustls::sign::{any_ecdsa_type, CertifiedKey};
+use tokio_rustls::rustls::{crypto::ring::sign::any_ecdsa_type, sign::CertifiedKey};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
