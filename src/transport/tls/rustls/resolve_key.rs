@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio_rustls::rustls::{
+    crypto::ring::sign::any_supported_type,
     server::{ClientHello, ResolvesServerCert},
-    crypto::ring::sign::any_supported_type, sign::CertifiedKey,
-    Error, SignatureScheme, SignatureAlgorithm
+    sign::CertifiedKey,
+    Error, SignatureAlgorithm, SignatureScheme,
 };
 
 pub struct CertKeys {
@@ -102,24 +103,24 @@ impl ResolveServerCert {
                     }
                     debug!("added RSA Cert");
                     ident.rsa = Some(ck);
-                },
+                }
                 SignatureAlgorithm::ECDSA => {
                     if ident.ec.is_some() {
                         return Err(Error::General("More than one EC key".into()));
                     }
                     debug!("added EC Cert");
                     ident.ec = Some(ck);
-                },
+                }
                 SignatureAlgorithm::ED25519 => {
                     if ident.ed.is_some() {
                         return Err(Error::General("More than one ED key".into()));
                     }
                     debug!("added ED Cert");
                     ident.ed = Some(ck);
-                },
+                }
                 _ => {
                     return Err(Error::General("Bad key type".into()));
-                }                
+                }
             }
         }
         if let Some(name) = sni {

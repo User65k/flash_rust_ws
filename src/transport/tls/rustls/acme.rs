@@ -163,6 +163,6 @@ impl AcmeTaskRunner {
     #[inline]
     fn get_cert_cache_file(&self) -> PathBuf {
         //unwrap ok, as there must be at least on dns_name (see prep_acme)
-        self.cache_dir.join(self.dns_names.get(0).unwrap())
+        self.cache_dir.join(self.dns_names.first().unwrap())
     }
 }

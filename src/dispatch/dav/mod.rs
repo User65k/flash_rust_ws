@@ -200,7 +200,6 @@ async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
     Ok(res)
 }
 
-
 async fn handle_get(
     req: Request<IncomingBody>,
     full_path: &Path,

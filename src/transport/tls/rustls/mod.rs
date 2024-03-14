@@ -1,7 +1,8 @@
 use super::PlainIncoming;
 use tokio_rustls::rustls::{
+    crypto::ring::{default_provider, ALL_CIPHER_SUITES},
+    pki_types::{CertificateDer as Certificate, PrivateKeyDer as PrivateKey},
     version, Error, SupportedCipherSuite, SupportedProtocolVersion,
-    crypto::ring::{ALL_CIPHER_SUITES, default_provider}, pki_types::{CertificateDer as Certificate, PrivateKeyDer as PrivateKey},
 };
 use tokio_rustls::TlsAcceptor as RustlsAcceptor;
 pub use tokio_rustls::{
@@ -166,15 +167,15 @@ impl TLSBuilderTrait for ParsedTLSConfig {
 }
 
 // Load public certificate from file.
-fn load_certs(filename: &Path) -> Result<Vec<Certificate>, io::Error> {
+fn load_certs(filename: &Path) -> Result<Vec<Certificate<'static>>, io::Error> {
     // Open certificate file.
     let certfile = fs::File::open(filename)?;
     let mut reader = io::BufReader::new(certfile);
 
     // Load and return certificate.
     Ok(rustls_pemfile::certs(&mut reader)
-    .filter_map(|e|e.ok())
-    .collect())
+        .filter_map(|e| e.ok())
+        .collect())
 }
 
 // Load private key from file.
