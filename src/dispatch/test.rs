@@ -1,3 +1,4 @@
+use crate::body::{test::TestBody, FRWSResult};
 use std::path::PathBuf;
 
 use super::*;
@@ -31,7 +32,7 @@ impl UnitTestUseCase {
         req_path: WebPath<'_>,
         web_mount: &Utf8PathBuf,
         remote_addr: SocketAddr,
-    ) -> Result<Response<Body>, IoError> {
+    ) -> FRWSResult {
         if let Some(r) = self.req_path {
             assert_eq!(req_path, r);
         }
@@ -41,17 +42,17 @@ impl UnitTestUseCase {
         if let Some(a) = self.remote_addr {
             assert_eq!(remote_addr, a);
         }
-        Ok(Response::builder().body(Body::default()).unwrap())
+        Ok(Response::builder().body(BoxBody::empty()).unwrap())
     }
 }
 
 mod mount {
-    use crate::config::Utf8PathBuf;
-
     use super::*;
     #[tokio::test]
     async fn test_mount_params() {
-        let req = Request::get("/abc/def/ghi").body(Body::empty()).unwrap();
+        let req = Request::get("/abc/def/ghi")
+            .body(TestBody::empty())
+            .unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
         let m = UnitTestUseCase::create_wwwroot(Some("def/ghi"), Some("abc"), None);
 
@@ -62,7 +63,7 @@ mod mount {
     }
     #[tokio::test]
     async fn test_barely_mounted() {
-        let req = Request::get("/abc").body(Body::empty()).unwrap();
+        let req = Request::get("/abc").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
         let m = UnitTestUseCase::create_wwwroot(Some(""), Some("abc"), None);
 
@@ -73,7 +74,7 @@ mod mount {
     }
     #[tokio::test]
     async fn top_mount() {
-        let req = Request::get("/abc").body(Body::empty()).unwrap();
+        let req = Request::get("/abc").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
         let m = UnitTestUseCase::create_wwwroot(Some("abc"), Some(""), None);
 
@@ -84,7 +85,7 @@ mod mount {
     }
     #[tokio::test]
     async fn no_mounts() {
-        let req = Request::new(Body::empty());
+        let req = Request::new(TestBody::empty());
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let cfg = config::VHost::new(sa);
@@ -94,7 +95,7 @@ mod mount {
     }
     #[tokio::test]
     async fn full_folder_names_as_mounts() {
-        let req = Request::get("/aa").body(Body::empty()).unwrap();
+        let req = Request::get("/aa").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -115,7 +116,7 @@ mod mount {
     }
     #[tokio::test]
     async fn longest_mount() {
-        let req = Request::get("/aa/a").body(Body::empty()).unwrap();
+        let req = Request::get("/aa/a").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -132,7 +133,7 @@ mod mount {
     }
     #[tokio::test]
     async fn uri_encode() {
-        let req = Request::get("/aa%2Fa").body(Body::empty()).unwrap();
+        let req = Request::get("/aa%2Fa").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -149,7 +150,7 @@ mod mount {
     }
     #[tokio::test]
     async fn path_trav_outside_mounts() {
-        let req = Request::get("/a/../b").body(Body::empty()).unwrap();
+        let req = Request::get("/a/../b").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -164,7 +165,7 @@ mod mount {
     }
     #[tokio::test]
     async fn path_trav_outside_webroot() {
-        let req = Request::get("/../b").body(Body::empty()).unwrap();
+        let req = Request::get("/../b").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -179,7 +180,7 @@ mod mount {
     }
     #[tokio::test]
     async fn rustsec_2022_0072_part1() {
-        let req = Request::get("/c:/b").body(Body::empty()).unwrap();
+        let req = Request::get("/c:/b").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -194,7 +195,7 @@ mod mount {
     }
     #[tokio::test]
     async fn rustsec_2022_0072_part2() {
-        let req = Request::get("/a/c:/b/d").body(Body::empty()).unwrap();
+        let req = Request::get("/a/c:/b/d").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -207,7 +208,7 @@ mod mount {
     }
     #[tokio::test]
     async fn webroot() {
-        let req = Request::get("/").body(Body::empty()).unwrap();
+        let req = Request::get("/").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -220,7 +221,7 @@ mod mount {
     }
     #[tokio::test]
     async fn redirect_w_status() {
-        let req = Request::get("/").body(Body::empty()).unwrap();
+        let req = Request::get("/").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -247,7 +248,7 @@ mod mount {
     }
     #[tokio::test]
     async fn redirect() {
-        let req = Request::get("/").body(Body::empty()).unwrap();
+        let req = Request::get("/").body(TestBody::empty()).unwrap();
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let mut cfg = config::VHost::new(sa);
@@ -293,7 +294,7 @@ mod vhost {
     }
     #[tokio::test]
     async fn unknown_vhost() {
-        let req = Request::new(Body::empty());
+        let req = Request::new(TestBody::empty());
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let cfg = make_host_cfg(None, Some(("1".to_string(), config::VHost::new(sa))));
@@ -303,7 +304,7 @@ mod vhost {
     }
     #[tokio::test]
     async fn specific_vhost() {
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(TestBody::empty());
         req.headers_mut()
             .insert("Host", header::HeaderValue::from_static("1:8080"));
 
@@ -317,7 +318,7 @@ mod vhost {
     }
     #[tokio::test]
     async fn default_vhost() {
-        let req = Request::new(Body::empty());
+        let req = Request::new(TestBody::empty());
         let sa = "127.0.0.1:8080".parse().unwrap();
 
         let cfg = make_host_cfg(Some(config::VHost::new(sa)), None);

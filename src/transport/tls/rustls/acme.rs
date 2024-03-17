@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::vec::Vec;
 use tokio::time::sleep;
-use tokio_rustls::rustls::sign::{any_ecdsa_type, CertifiedKey};
+use tokio_rustls::rustls::{crypto::ring::sign::any_ecdsa_type, sign::CertifiedKey};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,6 +163,6 @@ impl AcmeTaskRunner {
     #[inline]
     fn get_cert_cache_file(&self) -> PathBuf {
         //unwrap ok, as there must be at least on dns_name (see prep_acme)
-        self.cache_dir.join(self.dns_names.get(0).unwrap())
+        self.cache_dir.join(self.dns_names.first().unwrap())
     }
 }

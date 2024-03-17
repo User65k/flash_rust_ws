@@ -7,14 +7,19 @@ pub mod proxy;
 mod staticf;
 #[cfg(test)]
 pub(crate) mod test;
+#[cfg(any(feature = "proxy", feature = "websocket"))]
+mod upgrades;
 mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
-use hyper::body::HttpBody;
+use hyper::body::Body as HttpBody;
 pub use webpath::WebPath;
 
+use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
 use crate::config::{self, Utf8PathBuf};
-use hyper::{header, http::Error as HTTPError, Body, Request, Response, StatusCode, Version}; //, Method};
+use hyper::{
+    body::Incoming, header, http::Error as HTTPError, Request, Response, StatusCode, Version,
+}; //, Method};
 use log::{debug, error, info, trace};
 use staticf::ResolveResult;
 use std::collections::HashMap;
@@ -73,12 +78,12 @@ fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
 /// `web_mount` first part of URI, selecting the wwwr. Used for links in the response
 /// `req_path` second part of URI - a path within the wwwr. Used to select a file
 async fn handle_wwwroot(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     wwwr: &config::WwwRoot,
     req_path: WebPath<'_>,
     web_mount: &Utf8PathBuf,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     debug!("working root {:?}", wwwr);
     let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
     /*
@@ -132,7 +137,7 @@ async fn handle_wwwroot(
                         .unwrap_or(StatusCode::MOVED_PERMANENTLY),
                 )
                 .header(header::LOCATION, &redir.redirect.0)
-                .body(Body::empty())
+                .body(BoxBody::empty())
                 .unwrap());
         }
         config::UseCase::StaticFiles(sf) => sf,
@@ -226,10 +231,10 @@ async fn handle_wwwroot(
 /// picks the matching WwwRoot and calls `handle_wwwroot`
 /// Note: /a is not part of /aa (but of /a/a and /a)
 async fn handle_vhost(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     cfg: &config::VHost,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     let req_path: WebPath = req.uri().try_into()?;
     debug!("req_path {:?}", req_path);
 
@@ -269,10 +274,10 @@ fn get_host<B: HttpBody>(req: &Request<B>) -> Option<&str> {
 
 /// picks the matching vHost and calls `handle_vhost`
 async fn dispatch_to_vhost(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     cfg: Arc<config::HostCfg>,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     if let Some(host) = get_host(&req) {
         trace!("Host: {:?}", host);
         if let Some(hcfg) = cfg.vhosts.get(host) {
@@ -290,11 +295,21 @@ async fn dispatch_to_vhost(
 /// new request on a `SocketAddr`.
 /// turn errors into responses
 pub(crate) async fn handle_request(
-    req: Request<Body>,
+    req: Request<Incoming>,
     cfg: Arc<config::HostCfg>,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>, HTTPError> {
+) -> Result<FRWSResp, HTTPError> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
+
+    #[cfg(test)]
+    let req = {
+        let (parts, body) = req.into_parts();
+        Request::from_parts(
+            parts,
+            crate::body::test::TestBody::from_incoming(body).await,
+        )
+    };
+
     dispatch_to_vhost(req, cfg, remote_addr)
         .await
         .or_else(|err| {
@@ -315,26 +330,26 @@ pub(crate) async fn handle_request(
             match err.kind() {
                 ErrorKind::NotFound => Response::builder()
                     .status(StatusCode::NOT_FOUND)
-                    .body(Body::empty()),
+                    .body(BoxBody::empty()),
                 ErrorKind::PermissionDenied => Response::builder()
                     .status(StatusCode::FORBIDDEN)
-                    .body(Body::empty()),
+                    .body(BoxBody::empty()),
                 ErrorKind::InvalidInput | ErrorKind::InvalidData => Response::builder()
                     .status(StatusCode::BAD_REQUEST)
-                    .body(Body::empty()),
+                    .body(BoxBody::empty()),
                 ErrorKind::BrokenPipe
                 | ErrorKind::UnexpectedEof
                 | ErrorKind::ConnectionAborted
                 | ErrorKind::ConnectionRefused
                 | ErrorKind::ConnectionReset => Response::builder()
                     .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::empty()),
+                    .body(BoxBody::empty()),
                 ErrorKind::TimedOut => Response::builder()
                     .status(StatusCode::GATEWAY_TIMEOUT)
-                    .body(Body::empty()),
+                    .body(BoxBody::empty()),
                 _ => Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::empty()),
+                    .body(BoxBody::empty()),
             }
         })
 }

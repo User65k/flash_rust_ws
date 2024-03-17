@@ -6,10 +6,9 @@ pub use self::rustls::{ParsedTLSConfig, TlsUserConfig};
 #[cfg(feature = "tlsrust")]
 use self::rustls::{TLSConfig, UnderlyingAccept, UnderlyingTLSStream};
 
-use super::{PlainIncoming, PlainStream};
+use super::{Connection, PlainIncoming, PlainStream};
 use core::task::{Context, Poll};
 use futures_util::ready;
-use hyper::server::accept::Accept;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -67,8 +66,10 @@ impl TlsStream {
             remote_addr,
         }
     }
+}
+impl Connection for TlsStream {
     #[inline]
-    pub fn remote_addr(&self) -> SocketAddr {
+    fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
     }
 }
@@ -148,21 +149,8 @@ impl TlsAcceptor {
             incoming,
         }
     }
-}
-
-impl Accept for TlsAcceptor {
-    type Conn = TlsStream;
-    type Error = io::Error;
-
-    fn poll_accept(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
-        let pin = self.get_mut();
-        match ready!(Pin::new(&mut pin.incoming).poll_accept(cx)) {
-            Some(Ok(sock)) => Poll::Ready(Some(Ok(TlsStream::new(sock, pin)))),
-            Some(Err(e)) => Poll::Ready(Some(Err(e))),
-            None => Poll::Ready(None),
-        }
+    pub(crate) async fn accept(&self) -> io::Result<TlsStream> {
+        let stream = self.incoming.accept().await?;
+        Ok(TlsStream::new(stream, &self))
     }
 }

@@ -1,5 +1,6 @@
-use hyper::{Body, Method, Request, Response};
+use hyper::{Method, Request, Response};
 use hyper_staticfile::util::FileResponseBuilder;
+use hyper_staticfile::ResolvedFile;
 use log::debug;
 use mime_guess::{Mime, MimeGuess};
 use std::fs::{Metadata, OpenOptions as StdOpenOptions};
@@ -11,6 +12,7 @@ use tokio::fs::{File, OpenOptions};
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
+use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
 use crate::config::Utf8PathBuf;
 #[cfg(windows)]
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
@@ -25,11 +27,11 @@ pub enum ResolveResult {
 }
 
 pub async fn return_file(
-    req: &Request<Body>,
+    req: &Request<IncomingBody>,
     file: File,
     metadata: Metadata,
     mime: Mime,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     // Handle only `GET`/`HEAD` and absolute paths.
     match *req.method() {
         Method::HEAD | Method::GET => {}
@@ -37,13 +39,13 @@ pub async fn return_file(
             return Ok(Response::builder()
                 .status(hyper::StatusCode::OK)
                 .header(hyper::header::ALLOW, "GET,HEAD,OPTIONS")
-                .body(Body::empty())
+                .body(BoxBody::empty())
                 .expect("unable to build response"))
         }
         _ => {
             return Ok(Response::builder()
                 .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-                .body(Body::empty())
+                .body(BoxBody::empty())
                 .expect("unable to build response"));
         }
     }
@@ -52,15 +54,23 @@ pub async fn return_file(
     Ok(FileResponseBuilder::new()
         .request(req)
         .cache_headers(Some(500))
-        .build(file, metadata, mime.to_string())
-        .expect("unable to build response"))
+        .build(ResolvedFile {
+            handle: file,
+            path: PathBuf::new(),
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            content_type: Some(mime.to_string()),
+            encoding: None,
+        })
+        .expect("unable to build response")
+        .map(BoxBody::File))
 }
 
 pub fn redirect(
-    req: &Request<Body>,
+    req: &Request<IncomingBody>,
     req_path: &super::WebPath<'_>,
     web_mount: &Utf8PathBuf,
-) -> Response<Body> {
+) -> FRWSResp {
     //request for a file that is a directory
     let mut target_url = req_path.prefixed_as_abs_url_path(
         web_mount,
@@ -79,7 +89,7 @@ pub fn redirect(
     Response::builder()
         .status(hyper::StatusCode::MOVED_PERMANENTLY)
         .header(hyper::header::LOCATION, target_url)
-        .body(Body::empty())
+        .body(BoxBody::empty())
         .expect("unable to build redirect")
 }
 
@@ -149,11 +159,14 @@ pub async fn resolve_path(
 #[cfg(test)]
 mod tests {
     use crate::{
+        body::{
+            test::{to_bytes, TestBody},
+            FRWSResult,
+        },
         config::{AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf, WwwRoot},
         dispatch::test::{TempDir, TempFile},
     };
-    use hyper::{body::to_bytes, header};
-    use hyper::{Body, Request, Response};
+    use hyper::{header, Request};
     use std::path::Path;
     //use crate::dispatch::test::
 
@@ -170,11 +183,7 @@ mod tests {
         }
     }
 
-    async fn handle_wwwroot(
-        req: Request<Body>,
-        sf: StaticFiles,
-        req_path: &str,
-    ) -> Result<Response<Body>, std::io::Error> {
+    async fn handle_wwwroot(req: Request<TestBody>, sf: StaticFiles, req_path: &str) -> FRWSResult {
         let wwwr = WwwRoot {
             mount: UseCase::StaticFiles(sf),
             header: None,
@@ -204,12 +213,12 @@ mod tests {
             serve: None,
         };
         let req = Request::get("/mount/test_resolve_file")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf, "test_resolve_file").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = to_bytes(res.into_body()).await.unwrap();
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
     #[tokio::test]
@@ -223,11 +232,11 @@ mod tests {
             index: Some(vec![Utf8PathBuf::from("test_index_file")]),
             serve: None,
         };
-        let req = Request::get("/mount/").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/").body(TestBody::empty()).unwrap();
         let res = handle_wwwroot(req, sf, "").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = to_bytes(res.into_body()).await.unwrap();
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
     #[tokio::test]
@@ -238,7 +247,7 @@ mod tests {
             index: None,
             serve: None,
         };
-        let req = Request::get("/mount/").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/").body(TestBody::empty()).unwrap();
         let res = handle_wwwroot(req, sf, "").await;
         let res = res.unwrap_err();
         assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
@@ -256,7 +265,7 @@ mod tests {
             serve: Some(vec![Utf8PathBuf::from("allow")]),
         };
         let req = Request::get("/mount/test_allowlist")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf, "test_allowlist").await;
         let res = res.unwrap_err();
@@ -276,12 +285,12 @@ mod tests {
         };
 
         let req = Request::get("/mount/test_allowlist.allow")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf, "test_allowlist.allow").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = to_bytes(res.into_body()).await.unwrap();
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
 
@@ -296,7 +305,7 @@ mod tests {
             serve: None,
         };
         let req = Request::get("/mount/test_dir_redir")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf, "test_dir_redir").await;
         let res = res.unwrap();
@@ -319,7 +328,7 @@ mod tests {
             serve: None,
         };
         let req = Request::get("/mount//foo.org/redirects_to_sanitized_path")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let req_path = crate::dispatch::WebPath::try_from(req.uri()).unwrap();
         let rel_path = req_path.strip_prefix(Path::new("mount")).unwrap();
@@ -348,12 +357,12 @@ mod tests {
             serve: None,
         };
         let req = Request::get("/mount/nested/resolve_file")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf, "nested/resolve_file").await;
         let res = res.unwrap();
         assert_eq!(res.status(), 200);
-        let body = to_bytes(res.into_body()).await.unwrap();
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
 
@@ -385,7 +394,7 @@ mod tests {
             serve: None,
         };
         let req = Request::get("/mount/lnk/lnk_target")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf, "lnk/lnk_target").await.unwrap_err();
         assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
@@ -397,11 +406,11 @@ mod tests {
             serve: None,
         };
         let req = Request::get("/mount/lnk/lnk_target")
-            .body(Body::empty())
+            .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf, "lnk/lnk_target").await.unwrap();
         assert_eq!(res.status(), 200);
-        let body = to_bytes(res.into_body()).await.unwrap();
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
 
@@ -432,7 +441,7 @@ mod tests {
             index: None,
             serve: None,
         };
-        let req = Request::get("/mount/lnk").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/lnk").body(TestBody::empty()).unwrap();
         let res = handle_wwwroot(req, sf, "lnk").await.unwrap_err();
         assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
 
@@ -442,15 +451,15 @@ mod tests {
             index: None,
             serve: None,
         };
-        let req = Request::get("/mount/lnk").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/lnk").body(TestBody::empty()).unwrap();
         let res = handle_wwwroot(req, sf, "lnk").await.unwrap();
         assert_eq!(res.status(), 200);
-        let body = to_bytes(res.into_body()).await.unwrap();
+        let body = to_bytes(res.into_body()).await;
         assert_eq!(body, file_content);
     }
     #[test]
     fn redir_test() {
-        let req = Request::get("/mount/this").body(Body::empty()).unwrap();
+        let req = Request::get("/mount/this").body(TestBody::empty()).unwrap();
         let resp = super::redirect(
             &req,
             &crate::dispatch::WebPath::parsed("this"),
@@ -461,7 +470,7 @@ mod tests {
             "/mount/this/"
         );
 
-        let req = Request::get("/mount").body(Body::empty()).unwrap();
+        let req = Request::get("/mount").body(TestBody::empty()).unwrap();
         let resp = super::redirect(
             &req,
             &crate::dispatch::WebPath::parsed(""),

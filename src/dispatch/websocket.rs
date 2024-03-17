@@ -1,24 +1,29 @@
 use bytes::BytesMut;
-use hyper::{header, upgrade::Upgraded, Body, HeaderMap, Request, Response, StatusCode};
+use hyper::{header, HeaderMap, Request, Response, StatusCode};
 use log::error;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
-pub type AsyncClient = Framed<Upgraded, MessageCodec>;
+type AsyncClient = Framed<MyUpgraded, MessageCodec>;
 use async_stream_connection::{Addr, Stream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::{
+    body::{BoxBody, FRWSResult, IncomingBody},
+    dispatch::upgrades::MyUpgraded,
+};
+
 pub async fn upgrade(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     ws: &Websocket,
     req_path: &super::WebPath<'_>,
     _remote_addr: SocketAddr,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     //update the request
-    let mut res = Response::new(Body::empty());
+    let mut res = Response::new(BoxBody::empty());
     //TODO? check if path is deeper than it should -> 404
     if !req_path.is_empty() {
         *res.status_mut() = StatusCode::NOT_FOUND;
@@ -52,16 +57,16 @@ pub async fn upgrade(
     let addr = ws.assock.clone(); //TODO config lives long enough
     let forward_header = ws.forward_header;
 
+    let header = if forward_header {
+        error!("forwarding header...");
+        Some(req.headers().clone())
+    } else {
+        None
+    };
     tokio::task::spawn(async move {
-        let header = if forward_header {
-            error!("forwarding header...");
-            Some(req.headers().clone())
-        } else {
-            None
-        };
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                let client = MessageCodec::server().framed(upgraded);
+                let client = MessageCodec::server().framed(MyUpgraded::new(upgraded));
                 websocket(&addr, header, client).await;
             }
             Err(e) => error!("upgrade error: {}", e),

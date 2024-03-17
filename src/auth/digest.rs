@@ -1,5 +1,6 @@
 use crate::auth::{get_map_from_header, strip_prefix};
-use hyper::{header, Body, Request, Response, StatusCode};
+use crate::body::{BoxBody, FRWSResp};
+use hyper::{body::Body, header, Request, Response, StatusCode};
 use lazy_static::lazy_static;
 use log::{info, trace};
 use md5::Context;
@@ -25,7 +26,7 @@ lazy_static! {
     };
 }
 
-fn create_resp_needs_auth(realm: &str, stale: bool) -> Response<Body> {
+fn create_resp_needs_auth(realm: &str, stale: bool) -> FRWSResp {
     let str_stale = if stale { "stale=true," } else { "" };
     let p = format!(
         "Digest realm=\"{}\",nonce=\"{}\",{}qop=\"auth\"",
@@ -44,7 +45,7 @@ fn create_resp_needs_auth(realm: &str, stale: bool) -> Response<Body> {
         header::HeaderValue::from_str(&format!("{},algorithm=\"MD5\"", &p)).unwrap(),
     );
 
-    b.body(Body::empty()).expect("unable to build response")
+    b.body(BoxBody::empty()).expect("unable to build response")
 }
 
 /// 34 char nonce
@@ -92,11 +93,11 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool, ()> {
     Err(())
 }
 
-pub async fn check_digest(
+pub async fn check_digest<B: Body>(
     auth_file: &Path,
-    req: &Request<Body>,
+    req: &Request<B>,
     realm: &str,
-) -> Result<Option<Response<Body>>, IoError> {
+) -> Result<Option<FRWSResp>, IoError> {
     match req
         .headers()
         .get(header::AUTHORIZATION)
@@ -243,13 +244,13 @@ mod tests {
     use crate::logging::init_stderr_logging;
     use std::path::PathBuf;
 
-    fn create_req(header: Option<&str>) -> Request<Body> {
+    fn create_req(header: Option<&str>) -> Request<String> {
         match header {
             Some(h) => Request::builder()
                 .header(header::AUTHORIZATION, h)
-                .body(Body::empty())
+                .body(String::new())
                 .unwrap(),
-            None => Request::new(Body::empty()),
+            None => Request::new(String::new()),
         }
     }
 

@@ -1,11 +1,10 @@
+use crate::body::{BoxBody, FRWSResult, IncomingBody};
 use crate::config::{AbsPathBuf, Utf8PathBuf};
 
 use super::staticf::{self, resolve_path, return_file, ResolveResult};
 use bytes::{BufMut, Bytes, BytesMut};
-use hyper::{
-    body::HttpBody, header, http::HeaderValue, Body, HeaderMap, Method, Request, Response,
-    StatusCode,
-};
+use hyper::body::Body as _;
+use hyper::{header, http::HeaderValue, HeaderMap, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use std::{
     convert::TryFrom,
@@ -38,12 +37,12 @@ enum DavMethod {
 /// req_path is relative from config.root
 /// web_mount is config.root from the client perspective
 pub async fn do_dav(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     req_path: &super::WebPath<'_>,
     config: &Config,
     web_mount: &Utf8PathBuf,
     _remote_addr: SocketAddr,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     let m = match req.method() {
         &Method::OPTIONS => {
             let rb = Response::builder()
@@ -53,7 +52,7 @@ pub async fn do_dav(
                     "GET,PUT,OPTIONS,DELETE,PROPFIND,COPY,MOVE,MKCOL",
                 )
                 .header("DAV", "1");
-            return Ok(rb.body(Body::empty()).unwrap());
+            return Ok(rb.body(BoxBody::empty()).unwrap());
         }
         &Method::DELETE => DavMethod::DELETE,
         &Method::GET => DavMethod::GET,
@@ -72,7 +71,7 @@ pub async fn do_dav(
             _ => {
                 return Ok(Response::builder()
                     .status(StatusCode::METHOD_NOT_ALLOWED)
-                    .body(Body::empty())
+                    .body(BoxBody::empty())
                     .expect("unable to build response"))
             }
         },
@@ -104,7 +103,7 @@ pub async fn do_dav(
                 Some(p) => match p.canonicalize() {
                     Ok(c) => c,
                     Err(ref e) if e.kind() == ErrorKind::NotFound => {
-                        let mut res = Response::new(Body::empty());
+                        let mut res = Response::new(BoxBody::empty());
                         *res.status_mut() = StatusCode::CONFLICT;
                         return Ok(res);
                     }
@@ -157,7 +156,7 @@ pub async fn do_dav(
         )),
     }
 }
-async fn list_dir(full_path: &Path, url_path: String) -> Result<Response<Body>, IoError> {
+async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
     let mut dir = tokio::fs::read_dir(full_path).await?;
     let mut buf = BytesMut::new().writer();
     buf.write_all(b"<html><body>")?;
@@ -196,16 +195,17 @@ async fn list_dir(full_path: &Path, url_path: String) -> Result<Response<Body>, 
     buf.write_all(b"</body></html>")?;
     let res = Response::builder()
         .header(header::CONTENT_TYPE, &b"text/html; charset=UTF-8"[..])
-        .body(Body::from(buf.into_inner().freeze()))
+        .body(buf.into())
         .expect("unable to build response");
     Ok(res)
 }
+
 async fn handle_get(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     full_path: &Path,
     req_path: &super::WebPath<'_>,
     web_mount: &Utf8PathBuf,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     //we could serve dir listings as well. with a litte webdav client :-D
     let (_, file_lookup) = resolve_path(full_path, false, &None).await?;
 
@@ -225,8 +225,8 @@ async fn handle_get(
         ResolveResult::Found(file, metadata, mime) => return_file(&req, file, metadata, mime).await,
     }
 }
-async fn handle_delete(full_path: &Path) -> Result<Response<Body>, IoError> {
-    let res = Response::new(Body::empty());
+async fn handle_delete(full_path: &Path) -> FRWSResult {
+    let res = Response::new(BoxBody::empty());
 
     let meta = metadata(full_path).await?;
     if meta.is_dir() {
@@ -252,8 +252,8 @@ async fn parent_exists(path: &Path) -> Result<bool, IoError> {
     }
 }
 
-async fn handle_mkdir(full_path: &Path) -> Result<Response<Body>, IoError> {
-    let mut res = Response::new(Body::empty());
+async fn handle_mkdir(full_path: &Path) -> FRWSResult {
+    let mut res = Response::new(BoxBody::empty());
     if !parent_exists(full_path).await? {
         /*
         A collection cannot be made at the Request-URI until
@@ -273,7 +273,7 @@ async fn handle_mkdir(full_path: &Path) -> Result<Response<Body>, IoError> {
     Ok(res)
 }
 struct BodyW {
-    s: Body,
+    s: IncomingBody,
     b: Option<Bytes>,
 }
 impl AsyncRead for BodyW {
@@ -290,15 +290,17 @@ impl AsyncRead for BodyW {
             buf.put_slice(&data);
             return Poll::Ready(Ok(()));
         }
-        let r = Pin::new(&mut self.s).poll_data(cx);
+        let r = Pin::new(&mut self.s).poll_frame(cx);
         match r {
             Poll::Ready(None) => Poll::Ready(Ok(())),
-            Poll::Ready(Some(Ok(mut data))) => {
-                if buf.remaining() < data.len() {
-                    let left = data.split_off(buf.remaining());
-                    self.b = Some(left);
+            Poll::Ready(Some(Ok(data))) => {
+                if let Ok(mut data) = data.into_data() {
+                    if buf.remaining() < data.len() {
+                        let left = data.split_off(buf.remaining());
+                        self.b = Some(left);
+                    }
+                    buf.put_slice(&data);
                 }
-                buf.put_slice(&data);
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Err(IoError::new(ErrorKind::BrokenPipe, e))),
@@ -307,10 +309,10 @@ impl AsyncRead for BodyW {
     }
 }
 async fn handle_put(
-    req: Request<Body>,
+    req: Request<IncomingBody>,
     full_path: &Path,
     dont_overwrite: bool,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     // Check if file exists before proceeding
     if dont_overwrite && metadata(full_path).await.is_ok() {
         return Err(IoError::new(
@@ -320,7 +322,7 @@ async fn handle_put(
     }
     if !parent_exists(full_path).await? {
         //MUST 409 if folder does not exist
-        let mut res = Response::new(Body::empty());
+        let mut res = Response::new(BoxBody::empty());
         *res.status_mut() = StatusCode::CONFLICT;
         return Ok(res);
     }
@@ -331,7 +333,7 @@ async fn handle_put(
         b: None,
     };
     redirect(&mut b, &mut f).await?;
-    let res = Response::new(Body::empty());
+    let res = Response::new(BoxBody::empty());
     //MAY 405 if file is a folder
     Ok(res)
 }
@@ -364,10 +366,10 @@ async fn handle_copy(
     root: &AbsPathBuf,
     web_mount: &Path,
     mut dont_overwrite: bool,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     let dst_path = get_dst(header, root, web_mount)?;
     log::info!("Copy {:?} -> {:?}", src_path, dst_path);
-    let mut res = Response::new(Body::empty());
+    let mut res = Response::new(BoxBody::empty());
     if !parent_exists(&dst_path).await? {
         //409 (Conflict) - No parent folder
         *res.status_mut() = StatusCode::CONFLICT;
@@ -411,10 +413,10 @@ async fn handle_move(
     root: &AbsPathBuf,
     web_mount: &Path,
     mut dont_overwrite: bool,
-) -> Result<Response<Body>, IoError> {
+) -> FRWSResult {
     let dst_path = get_dst(header, root, web_mount)?;
     log::info!("Move {:?} -> {:?}", src_path, dst_path);
-    let mut res = Response::new(Body::empty());
+    let mut res = Response::new(BoxBody::empty());
     if !parent_exists(&dst_path).await? {
         //409 (Conflict) - No parent folder
         *res.status_mut() = StatusCode::CONFLICT;

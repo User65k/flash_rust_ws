@@ -1,8 +1,10 @@
 use std::{env::temp_dir, net::SocketAddr};
 
-use hyper::{body::to_bytes, Body, Request};
+use hyper::Request;
 
 use super::{do_dav, Config};
+use crate::body::FRWSResult;
+use crate::body::{test::to_bytes, test::TestBody as Body};
 use crate::{
     config::{AbsPathBuf, UseCase, Utf8PathBuf},
     dispatch::{test::TempFile, WebPath},
@@ -36,7 +38,7 @@ async fn handle_req(
     body: Body,
     req_path: WebPath<'_>,
     config: &Config,
-) -> std::io::Result<hyper::Response<Body>> {
+) -> FRWSResult {
     let req = req.body(body).unwrap();
 
     let addr: SocketAddr = "1.2.3.4:1234".parse().unwrap();
@@ -64,7 +66,7 @@ async fn get_file() {
     .await
     .unwrap();
     assert_eq!(res.status(), 200);
-    let body = to_bytes(res.into_body()).await.unwrap();
+    let body = to_bytes(res.into_body()).await;
     assert_eq!(body, file_content);
 }
 
@@ -210,7 +212,7 @@ async fn mkcol_propfind() {
     .await
     .unwrap();
     assert_eq!(res.status(), 207);
-    let body = to_bytes(res.into_body()).await.unwrap();
+    let body = to_bytes(res.into_body()).await;
     assert_eq!(
         body,
         &br##"<?xml version="1.0" encoding="utf-8"?>
@@ -245,7 +247,7 @@ async fn mkcol_propfind() {
     .await
     .unwrap();
     assert_eq!(res.status(), 207);
-    let body = to_bytes(res.into_body()).await.unwrap();
+    let body = to_bytes(res.into_body()).await;
     assert_eq!(
         body,
         &br##"<?xml version="1.0" encoding="utf-8"?>

@@ -30,20 +30,16 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 
 use core::task::{Context, Poll};
-use std::future::Future;
 use std::pin::Pin;
 
 //use hyper::server::conn::AddrStream;
 //pub use tokio::net::TcpStream as PlainStream;
-use futures_util::ready;
-use hyper::server::accept::Accept;
 use log::{debug, error, trace};
 
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::time::Sleep;
 
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 pub mod tls;
@@ -55,7 +51,6 @@ pub struct PlainIncoming {
     listener: TcpListener,
     sleep_on_errors: bool,
     tcp_nodelay: bool,
-    timeout: Option<Pin<Box<Sleep>>>,
 }
 
 impl PlainIncoming {
@@ -68,7 +63,6 @@ impl PlainIncoming {
             addr,
             sleep_on_errors: true,
             tcp_nodelay: false,
-            timeout: None,
         })
     }
 
@@ -105,26 +99,16 @@ impl PlainIncoming {
         self.sleep_on_errors = val;
     }
 
-    fn poll_next_(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<PlainStream>> {
-        // Check if a previous timeout is active that was set by IO errors.
-        if let Some(ref mut to) = self.timeout.take() {
-            match Pin::new(to).poll(cx) {
-                Poll::Ready(()) => {}
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
+    pub(crate) async fn accept(&self) -> io::Result<PlainStream> {
         loop {
-            match self.listener.poll_accept(cx) {
-                Poll::Ready(Ok((socket, addr))) => {
+            match self.listener.accept().await {
+                Ok((socket, addr)) => {
                     if let Err(e) = socket.set_nodelay(self.tcp_nodelay) {
                         trace!("error trying to set TCP nodelay: {}", e);
                     }
-                    return Poll::Ready(Ok(PlainStream::new(socket, addr)));
-                    //return Poll::Ready(Ok(socket));
+                    return Ok(PlainStream::new(socket, addr));
                 }
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => {
+                Err(e) => {
                     // Connection errors can be ignored directly, continue by
                     // accepting the next request.
                     if is_connection_error(&e) {
@@ -136,38 +120,13 @@ impl PlainIncoming {
                         error!("accept error: {}", e);
 
                         // Sleep 1s.
-                        let timeout = tokio::time::sleep(Duration::from_secs(1));
-                        let mut timeout = Box::pin(timeout);
-
-                        match timeout.as_mut().poll(cx) {
-                            Poll::Ready(()) => {
-                                // Wow, it's been a second already? Ok then...
-                                continue;
-                            }
-                            Poll::Pending => {
-                                self.timeout = Some(timeout);
-                                return Poll::Pending;
-                            }
-                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     } else {
-                        return Poll::Ready(Err(e));
+                        return Err(e);
                     }
                 }
             }
         }
-    }
-}
-
-impl Accept for PlainIncoming {
-    type Conn = PlainStream;
-    type Error = io::Error;
-
-    fn poll_accept(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
-        let result = ready!(self.poll_next_(cx));
-        Poll::Ready(Some(result))
     }
 }
 
@@ -205,18 +164,23 @@ pub struct PlainStream {
     pub(super) remote_addr: SocketAddr,
 }
 
+pub trait Connection: AsyncRead + AsyncWrite {
+    /// Returns the remote (peer) address of this connection.
+    fn remote_addr(&self) -> SocketAddr;
+}
+impl Connection for PlainStream {
+    #[inline]
+    fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+}
+
 impl PlainStream {
     pub(super) fn new(tcp: TcpStream, addr: SocketAddr) -> PlainStream {
         PlainStream {
             inner: tcp,
             remote_addr: addr,
         }
-    }
-
-    /// Returns the remote (peer) address of this connection.
-    #[inline]
-    pub fn remote_addr(&self) -> SocketAddr {
-        self.remote_addr
     }
 
     /// Consumes the PlainStream and returns the underlying IO object
