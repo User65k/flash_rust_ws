@@ -5,6 +5,7 @@ use log::{debug, trace};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio_rustls::rustls::OtherError;
 use tokio_rustls::rustls::{
     crypto::ring::sign::any_supported_type,
     server::{ClientHello, ResolvesServerCert},
@@ -87,10 +88,8 @@ impl ResolveServerCert {
             ed: None,
         };
         for set in keyset {
-            let k =
-                load_private_key(&set.key).map_err(|_| Error::General("Bad Key file".into()))?;
-            let chain =
-                load_certs(&set.cert).map_err(|_| Error::General("Bad Cert file".into()))?;
+            let k = load_private_key(&set.key).map_err(|e| OtherError(Arc::new(e)))?;
+            let chain = load_certs(&set.cert).map_err(|e| OtherError(Arc::new(e)))?;
 
             let key = any_supported_type(&k)?;
             let algo = key.algorithm();

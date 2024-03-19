@@ -192,6 +192,7 @@ fn load_private_key(filename: &Path) -> Result<PrivateKey, io::Error> {
         })? {
             Some(rustls_pemfile::Item::Pkcs1Key(key)) => return Ok(PrivateKey::Pkcs1(key)),
             Some(rustls_pemfile::Item::Pkcs8Key(key)) => return Ok(PrivateKey::Pkcs8(key)),
+            Some(rustls_pemfile::Item::Sec1Key(key)) => return Ok(PrivateKey::Sec1(key)),
             None => break,
             _ => {}
         }

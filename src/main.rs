@@ -5,13 +5,12 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 
 */
 
+use config::HostCfg;
 use futures_util::future::join_all;
 use hyper::service::service_fn;
+use hyper::Version;
 use hyper::{body::Incoming, Request};
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto,
-};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
 use std::error::Error;
@@ -51,7 +50,7 @@ async fn prepare_hyper_servers(
             }
         };
         let server = match PlainIncoming::from_std(l) {
-            Ok(incoming) => {
+            Ok(incoming) => 's: {
                 info!("Bound to {}", &addr);
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 let use_tls = cfg.tls.take();
@@ -61,62 +60,59 @@ async fn prepare_hyper_servers(
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if let Some(tls_cfg) = use_tls {
                     let a = tls_cfg.get_acceptor(incoming);
-                    tokio::spawn(async move {
-                        while let Ok(stream) = a.accept().await {
-                            let remote_addr = stream.remote_addr();
-                            trace!("Connected on {} by {}", &addr, &remote_addr);
+                    break 's tokio::spawn(async move {
+                        loop {
+                            let stream = match a.accept().await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    #[cfg(feature = "tlsrust_acme")]
+                                    if e.get_ref()
+                                        .and_then(|b| {
+                                            b.downcast_ref::<transport::tls::ACMEdone>().map(|_| ())
+                                        })
+                                        .is_some()
+                                    {
+                                        //this was an ACME challenge. Don't print an error
+                                        continue;
+                                    }
+                                    error!("{:?}", e);
+                                    continue;
+                                }
+                            };
                             let hcfg = hcfg.clone();
-                            auto::Builder::new(TokioExecutor::new())
-                                .serve_connection_with_upgrades(
-                                    TokioIo::new(stream),
-                                    service_fn(move |req: Request<Incoming>| {
-                                        //TODO req.extensions_mut().insert(remote_addr);
-                                        dispatch::handle_request(req, hcfg.clone(), remote_addr)
-                                    }),
-                                )
-                                .await?
+                            tokio::spawn(async move {
+                                let remote_addr = stream.remote_addr();
+                                trace!("Connected on {} by {}", &addr, &remote_addr);
+                                let service = service_fn(move |req: Request<Incoming>| {
+                                    //TODO req.extensions_mut().insert(remote_addr);
+                                    dispatch::handle_request(req, hcfg.clone(), remote_addr)
+                                });
+                                if let Err(err) = match stream.proto() {
+                                    Version::HTTP_2 => {
+                                        hyper::server::conn::http2::Builder::new(
+                                            TokioExecutor::new(),
+                                        )
+                                        .serve_connection(TokioIo::new(stream), service)
+                                        .await
+                                    }
+                                    Version::HTTP_11 => {
+                                        hyper::server::conn::http1::Builder::new()
+                                            .serve_connection(TokioIo::new(stream), service)
+                                            .with_upgrades()
+                                            .await
+                                    }
+                                    _ => unreachable!("neither h1 nor h2"),
+                                } {
+                                    error!("{} -> {}: {}", remote_addr, addr, err);
+                                }
+                            });
                         }
-                        Ok(())
-                    })
-                } else {
-                    tokio::spawn(async move {
-                        while let Ok(stream) = incoming.accept().await {
-                            let remote_addr = stream.remote_addr();
-                            trace!("Connected on {} by {}", &addr, &remote_addr);
-                            let hcfg = hcfg.clone();
-                            auto::Builder::new(TokioExecutor::new())
-                                .serve_connection_with_upgrades(
-                                    TokioIo::new(stream),
-                                    service_fn(move |req: Request<Incoming>| {
-                                        //TODO req.extensions_mut().insert(remote_addr);
-                                        dispatch::handle_request(req, hcfg.clone(), remote_addr)
-                                    }),
-                                )
-                                .await?
-                        }
-                        Ok(())
-                    })
+                    });
                 }
-                #[cfg(not(any(feature = "tlsrust", feature = "tlsnative")))]
-                {
-                    tokio::spawn(async move {
-                        while let Ok(stream) = incoming.accept().await {
-                            let remote_addr = stream.remote_addr();
-                            trace!("Connected on {} by {}", &addr, &remote_addr);
-                            let hcfg = hcfg.clone();
-                            auto::Builder::new(TokioExecutor::new())
-                                .serve_connection_with_upgrades(
-                                    TokioIo::new(stream),
-                                    service_fn(move |req: Request<Incoming>| {
-                                        //TODO req.extensions_mut().insert(remote_addr);
-                                        dispatch::handle_request(req, hcfg.clone(), remote_addr)
-                                    }),
-                                )
-                                .await?
-                        }
-                        Ok(())
-                    })
-                }
+                tokio::spawn(async move {
+                    run_http11_server(incoming, addr, hcfg).await?;
+                    Ok(())
+                })
             }
             Err(err) => {
                 error!("{}: {}", addr, err);
@@ -128,6 +124,42 @@ async fn prepare_hyper_servers(
     Ok(handles)
 }
 
+#[inline]
+async fn run_http11_server(
+    incoming: PlainIncoming,
+    addr: SocketAddr,
+    hcfg: Arc<HostCfg>,
+) -> Result<(), hyper::Error> {
+    let builder = hyper::server::conn::http1::Builder::new();
+    loop {
+        let stream = match incoming.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("{:?}", e);
+                continue;
+            }
+        };
+        let hcfg = hcfg.clone();
+        let builder = builder.clone();
+        tokio::spawn(async move {
+            let remote_addr = stream.remote_addr();
+            trace!("Connected on {} by {}", &addr, &remote_addr);
+            if let Err(err) = builder
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |req: Request<Incoming>| {
+                        //TODO req.extensions_mut().insert(remote_addr);
+                        dispatch::handle_request(req, hcfg.clone(), remote_addr)
+                    }),
+                )
+                .with_upgrades()
+                .await
+            {
+                error!("{} -> {}: {}", remote_addr, addr, err);
+            }
+        });
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -241,10 +273,5 @@ pub(crate) mod tests {
         let mut buf = [0u8; 15];
         test.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf[..15], b"HTTP/1.1 200 OK");
-
-        /*s.get(0).unwrap().abort();
-        drop(s);
-        let mut vec = Vec::new();
-        test.read_to_end(&mut vec).await.unwrap();*/
     }
 }

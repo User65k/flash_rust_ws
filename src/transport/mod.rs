@@ -27,6 +27,7 @@ use std::io;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::time::Duration;
 
+use hyper::Version;
 use tokio::net::TcpListener;
 
 use core::task::{Context, Poll};
@@ -167,11 +168,15 @@ pub struct PlainStream {
 pub trait Connection: AsyncRead + AsyncWrite {
     /// Returns the remote (peer) address of this connection.
     fn remote_addr(&self) -> SocketAddr;
+    fn proto(&self) -> Version;
 }
 impl Connection for PlainStream {
     #[inline]
     fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
+    }
+    fn proto(&self) -> Version {
+        Version::HTTP_11
     }
 }
 

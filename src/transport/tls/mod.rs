@@ -7,13 +7,10 @@ pub use self::rustls::{ParsedTLSConfig, TlsUserConfig};
 use self::rustls::{TLSConfig, UnderlyingAccept, UnderlyingTLSStream};
 
 use super::{Connection, PlainIncoming, PlainStream};
-use core::task::{Context, Poll};
-use futures_util::ready;
-use std::future::Future;
+use hyper::Version;
 use std::io;
-use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::AsyncWriteExt;
 
 use std::net::SocketAddr;
 
@@ -22,11 +19,6 @@ use async_acme::acme::ACME_TLS_ALPN_NAME;
 
 #[cfg(all(feature = "tlsrust", feature = "tlsnative"))]
 compile_error!("feature \"tlsrust\" and feature \"tlsnative\" cannot be enabled at the same time");
-
-enum State {
-    Handshaking(UnderlyingAccept<PlainStream>),
-    Streaming(UnderlyingTLSStream<PlainStream>),
-}
 
 pub(crate) trait TLSBuilderTrait {
     /// called by first vHost that wants TLS
@@ -49,90 +41,16 @@ pub(crate) trait TLSBuilderTrait {
     fn get_acceptor(self, incoming: PlainIncoming) -> TlsAcceptor;
 }
 
-// tokio_rustls::server::TlsStream doesn't expose constructor methods,
-// so we have to TlsAcceptor::accept and handshake to have access to it
-// TlsStream implements AsyncRead/AsyncWrite handshaking tokio_rustls::Accept first
-pub(crate) struct TlsStream {
-    state: State,
-    remote_addr: SocketAddr,
-}
-
-impl TlsStream {
-    fn new(stream: PlainStream, accept: &TlsAcceptor) -> TlsStream {
-        let remote_addr = stream.remote_addr();
-        let accept = ParsedTLSConfig::get_accept_feature(accept, stream);
-        TlsStream {
-            state: State::Handshaking(accept),
-            remote_addr,
-        }
-    }
-}
+pub type TlsStream = UnderlyingTLSStream<PlainStream>;
 impl Connection for TlsStream {
     #[inline]
     fn remote_addr(&self) -> SocketAddr {
-        self.remote_addr
+        self.get_ref().0.remote_addr
     }
-}
-
-impl AsyncRead for TlsStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let pin = self.get_mut();
-        match pin.state {
-            State::Handshaking(ref mut accept) => match ready!(Pin::new(accept).poll(cx)) {
-                Ok(mut stream) => {
-                    #[cfg(feature = "tlsrust_acme")]
-                    if stream.get_ref().1.alpn_protocol() == Some(ACME_TLS_ALPN_NAME) {
-                        log::debug!("completed acme-tls/1 handshake");
-                        return Pin::new(&mut stream).poll_shutdown(cx);
-                        //EOF
-                    }
-
-                    let result = Pin::new(&mut stream).poll_read(cx, buf);
-                    pin.state = State::Streaming(stream);
-                    result
-                }
-                Err(err) => Poll::Ready(Err(err)),
-            },
-            State::Streaming(ref mut stream) => Pin::new(stream).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for TlsStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let pin = self.get_mut();
-        match pin.state {
-            State::Handshaking(ref mut accept) => match ready!(Pin::new(accept).poll(cx)) {
-                Ok(mut stream) => {
-                    let result = Pin::new(&mut stream).poll_write(cx, buf);
-                    pin.state = State::Streaming(stream);
-                    result
-                }
-                Err(err) => Poll::Ready(Err(err)),
-            },
-            State::Streaming(ref mut stream) => Pin::new(stream).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.state {
-            State::Handshaking(_) => Poll::Ready(Ok(())),
-            State::Streaming(ref mut stream) => Pin::new(stream).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.state {
-            State::Handshaking(_) => Poll::Ready(Ok(())),
-            State::Streaming(ref mut stream) => Pin::new(stream).poll_shutdown(cx),
+    fn proto(&self) -> hyper::Version {
+        match self.get_ref().1.alpn_protocol() {
+            Some(b"h2") => Version::HTTP_2,
+            _ => Version::HTTP_11,
         }
     }
 }
@@ -151,6 +69,28 @@ impl TlsAcceptor {
     }
     pub(crate) async fn accept(&self) -> io::Result<TlsStream> {
         let stream = self.incoming.accept().await?;
-        Ok(TlsStream::new(stream, &self))
+        let mut stream = ParsedTLSConfig::get_accept_feature(self, stream).await?;
+
+        #[cfg(feature = "tlsrust_acme")]
+        if stream.get_ref().1.alpn_protocol() == Some(ACME_TLS_ALPN_NAME) {
+            log::debug!("completed acme-tls/1 handshake");
+            stream.shutdown().await?;
+            return Err(io::Error::other(ACMEdone()));
+        }
+
+        Ok(stream)
+    }
+}
+
+pub struct ACMEdone();
+impl std::error::Error for ACMEdone {}
+impl std::fmt::Display for ACMEdone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ACMEdone").finish()
+    }
+}
+impl std::fmt::Debug for ACMEdone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ACMEdone").finish()
     }
 }
