@@ -207,6 +207,7 @@ pub async fn forward(
     let mut resp = match config.client.as_ref().unwrap().request(req).await {
         Ok(r) => r,
         Err(err) => {
+            error!("Bad Gateway: {}", err);
             let mut resp = Response::new(BoxBody::empty());
             *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
 
