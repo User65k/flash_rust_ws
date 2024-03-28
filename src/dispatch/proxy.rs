@@ -8,7 +8,7 @@ use hyper::{
     header::{self, HeaderName, HeaderValue},
     http::uri,
     upgrade::OnUpgrade,
-    HeaderMap, Request, Response, StatusCode, Uri,
+    HeaderMap, Request, Response, StatusCode, Uri, Version,
 };
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
@@ -45,10 +45,10 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
 }
 /// remove connection headers before http/1.1
 /// https://datatracker.ietf.org/doc/html/rfc2616#section-14.10
-fn remove_connection_headers(v: hyper::Version, headers: &mut HeaderMap) {
+fn remove_connection_headers(v: Version, headers: &mut HeaderMap) {
     match v {
-        hyper::Version::HTTP_09 => {}
-        hyper::Version::HTTP_10 => {}
+        Version::HTTP_09 => {}
+        Version::HTTP_10 => {}
         _ => return,
     }
     let value = match headers.get(header::CONNECTION) {
@@ -61,6 +61,56 @@ fn remove_connection_headers(v: hyper::Version, headers: &mut HeaderMap) {
             headers.remove(name);
         }
     }
+}
+
+fn get_upgrade_type(headers: &HeaderMap) -> Option<String> {
+    if headers
+        .get(header::CONNECTION)
+        .map(|value| {
+            value
+                .to_str()
+                .unwrap()
+                .split(',')
+                .any(|e| e.trim() == header::UPGRADE)
+        })
+        .unwrap_or(false)
+    {
+        if let Some(upgrade_value) = headers.get(header::UPGRADE) {
+            debug!(
+                "Found upgrade header with value: {:?}",
+                upgrade_value
+            );
+            // https://book.hacktricks.xyz/pentesting-web/h2c-smuggling
+            if upgrade_value == "h2c" {
+                // an http proto upgrade needs to be done with the proxy, not the system behind it
+                // as the proto upgrade is not specific to this usecase it is not handled here (if at all)
+                return None;
+            }
+
+            return Some(upgrade_value.to_str().unwrap().to_owned());
+        }
+    }
+
+    None
+}
+
+fn change_req_from_h2_to_h11(req: &mut Request<IncomingBody>) {
+    let mut value_buf = BytesMut::with_capacity(512);
+    let mut first = false;
+    for v in req.headers().get_all(header::COOKIE) {
+        if !first {
+            first = true;
+        } else {
+            bytes::BufMut::put_u8(&mut value_buf, b';');
+        }
+        let v = v.as_bytes();
+        bytes::BufMut::put_slice(&mut value_buf, v); //copy
+    }
+    if first {
+        req.headers_mut()
+        .insert(header::COOKIE, HeaderValue::from_bytes(value_buf.as_ref()).expect("was a HV before"));
+    }
+    *req.version_mut() = hyper::Version::HTTP_11;
 }
 
 pub async fn forward(
@@ -102,6 +152,9 @@ pub async fn forward(
                 .any(|e| e.trim() == TRAILERS)
         })
         .unwrap_or(false);
+    let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
+    let request_upgrade = get_upgrade_type(req.headers());
+
     remove_connection_headers(req.version(), req.headers_mut());
     remove_hop_by_hop_headers(req.headers_mut());
     if contains_te_trailers_value {
@@ -191,18 +244,26 @@ pub async fn forward(
         req.headers_mut().remove(header::VIA);
     }
 
-    let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
-    if request_upgraded.is_some() {
+    if request_upgraded.is_some() && request_upgrade.is_some() {
         req.headers_mut()
             .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
     }
 
-    //new host header
-    req.headers_mut().insert(
-        header::HOST,
-        HeaderValue::from_bytes(config.forward.authority.as_str().as_bytes())
-            .expect("authority not a header value"),
-    );
+    match config.forward.scheme.as_str() {
+        "http" => {
+            if req.version() == hyper::Version::HTTP_2 {
+                change_req_from_h2_to_h11(&mut req);
+            }
+
+            //new host header
+            req.headers_mut().insert(
+                header::HOST,
+                HeaderValue::from_bytes(config.forward.authority.as_str().as_bytes())
+                    .expect("authority not a header value"),
+            );
+        },
+        _ => unreachable!("config should not allow other values"),
+    }
 
     let mut resp = match config.client.as_ref().unwrap().request(req).await {
         Ok(r) => r,
@@ -224,6 +285,7 @@ pub async fn forward(
     };
     debug!("response: {:?} {:?}", resp.status(), resp.headers());
 
+    let resp_upgrade = get_upgrade_type(resp.headers());
     remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());
 
@@ -240,6 +302,10 @@ pub async fn forward(
     }
 
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+        if request_upgrade != resp_upgrade {
+            error!("client upgrade {:?} != server upgrade {:?}", request_upgrade, resp_upgrade);
+            return Err(ErrorKind::InvalidInput.into())
+        }
         if let Some(request_upgraded) = request_upgraded {
             let response_upgraded = resp
                 .extensions_mut()
@@ -317,6 +383,7 @@ pub struct Proxy {
     pub force_dir: bool,
     //timeout: u8,
     //max_req_body_size: u32,
+    //allowed_upgrades: Vec<String>,
     //allowed_methods: Vec<String>,
     //header_policy: u8,
     //filter_req_header: Vec<HeaderNameCfg>,
