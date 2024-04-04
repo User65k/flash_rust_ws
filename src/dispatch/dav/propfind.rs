@@ -1,6 +1,6 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use chrono::{DateTime, Utc};
-use hyper::{body::Body as _, Request, Response, StatusCode};
+use hyper::{body::Body as _, Response, StatusCode};
 use std::{
     fs::Metadata,
     io::{Error as IoError, ErrorKind, Read, Write},
@@ -16,11 +16,14 @@ use xml::{
     EmitterConfig, ParserConfig,
 };
 
-use crate::body::{FRWSResult, IncomingBody, IncomingBodyTrait};
 use crate::config::{AbsPathBuf, Utf8PathBuf};
+use crate::{
+    body::{FRWSResult, IncomingBody, IncomingBodyTrait},
+    dispatch::Req,
+};
 
 pub async fn handle_propfind(
-    req: Request<IncomingBody>,
+    req: Req<IncomingBody>,
     path: PathBuf,
     root: &AbsPathBuf,
     web_mount: &Utf8PathBuf,
@@ -76,7 +79,7 @@ pub async fn handle_propfind(
     Ok(res)
 }
 
-async fn get_props_wanted(req: Request<IncomingBody>) -> Result<Vec<OwnedName>, IoError> {
+async fn get_props_wanted(req: Req<IncomingBody>) -> Result<Vec<OwnedName>, IoError> {
     if let Some(0) = req.body().size_hint().exact() {
         //Windows explorer does not send a body
         Ok(vec![
@@ -84,8 +87,8 @@ async fn get_props_wanted(req: Request<IncomingBody>) -> Result<Vec<OwnedName>, 
             OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
         ])
     } else {
-        let read = req
-            .into_body()
+        let (_, body) = req.into_parts();
+        let read = body
             .buffer(9 * 1024)
             .await
             .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
@@ -104,47 +107,6 @@ async fn get_props_wanted(req: Request<IncomingBody>) -> Result<Vec<OwnedName>, 
         })
         .map_err(|_| IoError::new(ErrorKind::InvalidData, "xml parse error"))?;
         Ok(props)
-    }
-}
-
-impl Buf for crate::body::BufferedBody<IncomingBody, Bytes> {
-    fn remaining(&self) -> usize {
-        match self {
-            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
-            crate::body::BufferedBody::Buffer { buf, len: _ } => {
-                buf.iter().map(|buf| buf.remaining()).sum()
-            }
-        }
-    }
-    fn chunk(&self) -> &[u8] {
-        match self {
-            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
-            crate::body::BufferedBody::Buffer { buf, len: _ } => {
-                buf.front().map(Buf::chunk).unwrap_or_default()
-            }
-        }
-    }
-    fn advance(&mut self, mut cnt: usize) {
-        let bufs = match self {
-            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
-            crate::body::BufferedBody::Buffer { buf, len: _ } => buf,
-        };
-        while cnt > 0 {
-            if let Some(front) = bufs.front_mut() {
-                let rem = front.remaining();
-                if rem > cnt {
-                    front.advance(cnt);
-                    return;
-                } else {
-                    front.advance(rem);
-                    cnt -= rem;
-                }
-            } else {
-                //no data -> panic?
-                return;
-            }
-            bufs.pop_front();
-        }
     }
 }
 

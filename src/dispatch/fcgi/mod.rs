@@ -20,7 +20,8 @@ use crate::{
     config::{StaticFiles, Utf8PathBuf},
 };
 
-use super::{staticf, WebPath};
+use super::staticf;
+use super::webpath::Req;
 
 const SCRIPT_NAME: &[u8] = b"SCRIPT_NAME";
 const PATH_INFO: &[u8] = b"PATH_INFO";
@@ -36,11 +37,10 @@ const SCRIPT_FILENAME: &[u8] = b"SCRIPT_FILENAME";
 
 pub async fn fcgi_call(
     fcgi_cfg: &FCGIApp,
-    req: Request<IncomingBody>,
-    req_path: &super::WebPath<'_>,
+    req: Req<IncomingBody>,
     web_mount: &Utf8PathBuf,
     fs_full_path: Option<&Path>,
-    path_info: Option<&super::WebPath<'_>>,
+    path_info_offset: Option<usize>,
     remote_addr: SocketAddr,
 ) -> FRWSResult {
     let app = if let Some(app) = &fcgi_cfg.app {
@@ -56,10 +56,9 @@ pub async fn fcgi_call(
     let params = create_params(
         fcgi_cfg,
         &req,
-        req_path,
         web_mount,
         fs_full_path,
-        path_info,
+        path_info_offset,
         remote_addr,
     );
     trace!("to FCGI: {:?}", &params);
@@ -143,11 +142,12 @@ pub async fn fcgi_call(
 
 fn create_params(
     fcgi_cfg: &FCGIApp,
-    req: &Request<IncomingBody>,
-    req_path: &super::WebPath,
+    req: &Req<IncomingBody>,
     web_mount: &Utf8PathBuf,
+    // resolved path on file system
     fs_full_path: Option<&Path>,
-    path_info: Option<&super::WebPath<'_>>,
+    // offset in request path that is virtual/path_info
+    path_info_offset: Option<usize>,
     remote_addr: SocketAddr,
 ) -> HashMap<Bytes, Bytes> {
     let mut params = HashMap::new();
@@ -162,12 +162,11 @@ fn create_params(
         */
         let mut abs_name;
 
-        if let Some(pi) = path_info {
+        if let Some(pi) = path_info_offset {
             // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
-            let pi = pi.prefixed_as_abs_url_path(&Utf8PathBuf::empty(), 0, false);
+            abs_name = req.path().prefixed_as_abs_url_path(web_mount, 0, false);
 
-            abs_name = req_path.prefixed_as_abs_url_path(web_mount, 0, false);
-            abs_name.truncate(abs_name.len() - pi.len()); //strip path_info
+            let pi = abs_name.split_off(web_mount.as_str().len() + pi); //strip path_info
 
             params.insert(
                 // must CGI/1.1  4.1.13, everybody cares
@@ -175,16 +174,25 @@ fn create_params(
                 Bytes::from(pi),
             );
         } else {
-            let index_file_name = full_path.file_name().and_then(|o| o.to_str());
-            let post = index_file_name.map_or(0, |v| v.len());
-
-            abs_name = req_path.prefixed_as_abs_url_path(web_mount, post, false);
-
-            //add index file
-            if let Some(f) = index_file_name {
-                if !abs_name.ends_with(f) {
-                    abs_name.push_str(f);
+            let add_index = req.is_dir_req();
+            'no_pi: {
+                if add_index {
+                    let index_file_name = full_path.file_name().and_then(|o| o.to_str());
+                    if let Some(f) = index_file_name {
+                        abs_name = req
+                            .path()
+                            .prefixed_as_abs_url_path(web_mount, f.len(), false);
+                        //if !abs_name.ends_with(f) { // -> its a dir request
+                        if !abs_name.ends_with('/') {
+                            abs_name.push('/');
+                        }
+                        abs_name.push_str(f);
+                        //}
+                        break 'no_pi;
+                    }
                 }
+                //nothing to add
+                abs_name = req.path().prefixed_as_abs_url_path(web_mount, 0, false);
             }
         }
 
@@ -210,7 +218,9 @@ fn create_params(
             Bytes::from(abs_web_mount),
         );
         //... so everything inside it is PATH_INFO
-        let abs_path = req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false);
+        let abs_path = req
+            .path()
+            .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false);
         params.insert(
             // opt CGI/1.1   4.1.5
             Bytes::from(PATH_INFO),
@@ -218,19 +228,19 @@ fn create_params(
         );
         //this matches what lighttpd does without check_local
     }
+    let auth = req.extensions().get::<hyper::http::uri::Authority>();
 
     params.insert(
         // must CGI/1.1  4.1.14, flup cares for this
         Bytes::from(SERVER_NAME),
-        Bytes::from(super::get_host(req).unwrap_or_default().to_string()),
+        Bytes::from(auth.map(|a| a.host()).unwrap_or_default().to_string()),
     );
 
     params.insert(
         // must CGI/1.1  4.1.15, flup cares for this
         Bytes::from(SERVER_PORT),
         Bytes::from(
-            req.uri()
-                .port()
+            auth.and_then(|a| a.port())
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "80".to_string()),
         ),
@@ -259,7 +269,7 @@ fn create_params(
         params.insert(
             // REQUEST_URI common
             Bytes::from(REQUEST_URI),
-            Bytes::from(req.uri().path().to_string()),
+            Bytes::from(req.unsafe_original_path().to_string()),
         );
     }
     if fcgi_cfg.set_script_filename {
@@ -270,7 +280,10 @@ fn create_params(
                 path_to_bytes(full_path)
             } else {
                 // I am guessing here
-                Bytes::from(req_path.prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false))
+                Bytes::from(
+                    req.path()
+                        .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false),
+                )
             },
         );
     }
@@ -300,8 +313,8 @@ pub async fn resolve_path<'a>(
     full_path: PathBuf,
     is_dir_request: bool,
     sf: &StaticFiles,
-    req_path: &'a WebPath<'a>,
-) -> Result<(PathBuf, staticf::ResolveResult, Option<WebPath<'a>>), IoError> {
+    req: &'a Req<IncomingBody>,
+) -> Result<(PathBuf, staticf::ResolveResult, Option<usize>), IoError> {
     match staticf::resolve_path(&full_path, is_dir_request, &sf.index).await {
         Ok((p, r)) => Ok((p, r, None)),
         Err(err) => {
@@ -338,7 +351,7 @@ pub async fn resolve_path<'a>(
                 }
                 match fp.strip_prefix(&sf.dir) {
                     Ok(file) => {
-                        let path_info = req_path.strip_prefix(file).ok();
+                        let path_info = req.is_prefix(file).ok().map(|i| i + 1);
                         let (p, r) = staticf::resolve_path(&fp, false, &None).await?;
                         Ok((p, r, path_info))
                     }
@@ -346,7 +359,9 @@ pub async fn resolve_path<'a>(
                         // we have left the webroot
                         error!(
                             "Somehow {:?} turned into {:?} and left {:?}",
-                            req_path, fp, sf.dir
+                            req.path(),
+                            fp,
+                            sf.dir
                         );
                         Err(err)
                     }

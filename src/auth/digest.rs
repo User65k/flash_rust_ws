@@ -1,6 +1,7 @@
 use crate::auth::{get_map_from_header, strip_prefix};
 use crate::body::{BoxBody, FRWSResp};
-use hyper::{body::Body, header, Request, Response, StatusCode};
+use crate::dispatch::Req;
+use hyper::{body::Body, header, Response, StatusCode};
 use lazy_static::lazy_static;
 use log::{info, trace};
 use md5::Context;
@@ -95,7 +96,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool, ()> {
 
 pub async fn check_digest<B: Body>(
     auth_file: &Path,
-    req: &Request<B>,
+    req: &Req<B>,
     realm: &str,
 ) -> Result<Option<FRWSResp>, IoError> {
     match req
@@ -242,16 +243,18 @@ mod tests {
     use super::*;
     use crate::dispatch::test::TempFile;
     use crate::logging::init_stderr_logging;
+    use hyper::Request;
     use std::path::PathBuf;
 
-    fn create_req(header: Option<&str>) -> Request<String> {
-        match header {
+    fn create_req(header: Option<&str>) -> Req<String> {
+        Req::from_req(match header {
             Some(h) => Request::builder()
                 .header(header::AUTHORIZATION, h)
                 .body(String::new())
                 .unwrap(),
             None => Request::new(String::new()),
-        }
+        })
+        .unwrap()
     }
 
     #[tokio::test]

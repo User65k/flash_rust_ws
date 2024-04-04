@@ -39,7 +39,7 @@ impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
                 comp => {
                     parts.push(comp);
                     len += 1 + comp.len();
-                    continue;
+                    continue; //don't reset the offset
                 }
             }
             if parts.is_empty() {
@@ -69,6 +69,9 @@ impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
     }
 }
 
+/// Normalized path
+///
+/// never starts or ends in /
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct WebPath<'a>(Cow<'a, str>);
@@ -151,17 +154,118 @@ impl<'a> WebPath<'a> {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    /// Get rid of the linked lifetime
-    pub fn into_owned<'b>(self) -> WebPath<'b> {
-        // not as trait as we change lifetime
-        match self.0 {
-            Cow::Borrowed(b) => WebPath(Cow::Owned(b.to_owned())),
-            Cow::Owned(o) => WebPath(Cow::Owned(o)),
-        }
+}
+
+enum WebPathSelfRef {
+    Owned(String),
+    ///index into orig_uri.path
+    Borrowed(usize),
+}
+/// request with normalized path added
+pub struct Req<B> {
+    parts: hyper::http::request::Parts,
+    /// normalized path
+    path: WebPathSelfRef,
+    /// path with striped mount point
+    prefix_len: usize,
+    body: B,
+}
+impl<B> Req<B> {
+    pub fn from_req(req: hyper::Request<B>) -> Result<Req<B>, IoError> {
+        let (parts, body) = req.into_parts();
+        let req_path = WebPath::try_from(&parts.uri)?;
+        let path = match req_path.0 {
+            Cow::Borrowed(b) => WebPathSelfRef::Borrowed({
+                //its either everything or starting at an offset
+                parts.uri.path().len() - b.len()
+            }),
+            Cow::Owned(o) => WebPathSelfRef::Owned(o),
+        };
+        Ok(Req {
+            parts,
+            path,
+            prefix_len: 0,
+            body,
+        })
     }
     #[cfg(test)]
-    pub fn parsed(v: &'a str) -> WebPath<'a> {
-        WebPath(Cow::from(v))
+    pub fn test_on_mount(req: hyper::Request<B>) -> Req<B> {
+        let req = Self::from_req(req).unwrap();
+        let offset = req
+            .is_prefix(Path::new("mount"))
+            .expect("request goes into /mount/...");
+        req.strip_prefix(offset)
+    }
+    /// return the normalized path. With mount point stripped away
+    pub fn path(&self) -> WebPath<'_> {
+        WebPath(Cow::Borrowed(match &self.path {
+            WebPathSelfRef::Owned(s) => &s[self.prefix_len..],
+            WebPathSelfRef::Borrowed(b) => &self.parts.uri.path()[*b + self.prefix_len..],
+        }))
+    }
+    #[cfg(feature = "fcgi")]
+    /// return the original path of the request.
+    /// Not checked for anything.
+    pub fn unsafe_original_path(&self) -> &str {
+        self.parts.uri.path()
+    }
+    #[cfg(feature = "fcgi")]
+    pub fn version(&self) -> hyper::Version {
+        self.parts.version
+    }
+    #[cfg(feature = "fcgi")]
+    pub fn extensions(&self) -> &hyper::http::Extensions {
+        &self.parts.extensions
+    }
+    pub fn is_dir_req(&self) -> bool {
+        self.parts.uri.path().as_bytes().last() == Some(&b'/')
+    }
+    pub fn query(&self) -> Option<&str> {
+        self.parts.uri.query()
+    }
+    pub fn body(&self) -> &B {
+        &self.body
+    }
+    pub fn method(&self) -> &hyper::Method {
+        &self.parts.method
+    }
+    pub fn headers(&self) -> &hyper::HeaderMap<hyper::header::HeaderValue> {
+        &self.parts.headers
+    }
+    pub fn into_parts(self) -> (hyper::http::request::Parts, B) {
+        (self.parts, self.body)
+    }
+    /// return the mount point
+    pub fn mount(&self) -> &str {
+        match &self.path {
+            WebPathSelfRef::Owned(s) => &s[..self.prefix_len],
+            WebPathSelfRef::Borrowed(b) => &self.parts.uri.path()[*b..*b + self.prefix_len],
+        }
+    }
+    /// check if `.path()` has a prefix and return the prefixes length
+    pub fn is_prefix(&self, base: &'_ Path) -> Result<usize, ()> {
+        let path = self.path();
+        let mut strip = base.components();
+        let mut path = path.0.split('/');
+        let mut offset = 0;
+        loop {
+            match (strip.next(), path.next()) {
+                (None, None) => {
+                    offset -= 1; //no next dir -> no final separator
+                    break;
+                }
+                (Some(c), p @ Some(s)) if c.as_os_str().to_str() == p => offset += 1 + s.len(),
+                (None, Some(_)) => break,
+                _ => return Err(()),
+            }
+        }
+        Ok(offset)
+    }
+    /// split off a `mount()` from `path()` at `offset`
+    pub fn strip_prefix(mut self, offset: usize) -> Self {
+        debug_assert_eq!(self.prefix_len, 0);
+        self.prefix_len = offset;
+        self
     }
 }
 
@@ -351,5 +455,13 @@ mod tests {
                 .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false),
             "/test bla/ja"
         );
+    }
+    #[test]
+    fn borrowed_req() {
+        let req = hyper::Request::get("/mount/dir/file").body(()).unwrap();
+        let req = Req::test_on_mount(req);
+        assert_eq!(req.path(), "dir/file");
+        assert_eq!(req.mount(), "mount/");
+        assert!(matches!(req.path().0, Cow::Borrowed(_)));
     }
 }

@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use hyper::{header, HeaderMap, Request, Response, StatusCode};
+use hyper::{header, HeaderMap, Response, StatusCode};
 use log::error;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
@@ -13,19 +13,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     body::{BoxBody, FRWSResult, IncomingBody},
-    dispatch::upgrades::MyUpgraded,
+    dispatch::{upgrades::MyUpgraded, webpath::Req},
 };
 
 pub async fn upgrade(
-    req: Request<IncomingBody>,
+    req: Req<IncomingBody>,
     ws: &Websocket,
-    req_path: &super::WebPath<'_>,
     _remote_addr: SocketAddr,
 ) -> FRWSResult {
     //update the request
     let mut res = Response::new(BoxBody::empty());
     //TODO? check if path is deeper than it should -> 404
-    if !req_path.is_empty() {
+    if !req.path().is_empty() {
         *res.status_mut() = StatusCode::NOT_FOUND;
         return Ok(res);
     }
@@ -41,6 +40,9 @@ pub async fn upgrade(
             return Ok(res);
         }
     }
+
+    let (parts, body) = req.into_parts();
+    let req = hyper::Request::from_parts(parts, body);
 
     let ws_accept = if let Ok(req) = ClientRequest::parse(|name| {
         let h = req.headers().get(name)?;
