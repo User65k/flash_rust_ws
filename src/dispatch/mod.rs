@@ -13,10 +13,11 @@ mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 use hyper::body::Body as HttpBody;
-pub use webpath::WebPath;
+pub use webpath::{Req, WebPath};
 
 use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
 use crate::config::{self, Utf8PathBuf};
+use hyper::http::uri::Authority;
 use hyper::{
     body::Incoming, header, http::Error as HTTPError, Request, Response, StatusCode, Version,
 }; //, Method};
@@ -78,14 +79,13 @@ fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
 /// `web_mount` first part of URI, selecting the wwwr. Used for links in the response
 /// `req_path` second part of URI - a path within the wwwr. Used to select a file
 async fn handle_wwwroot(
-    req: Request<IncomingBody>,
+    req: Req<IncomingBody>,
     wwwr: &config::WwwRoot,
-    req_path: WebPath<'_>,
     web_mount: &Utf8PathBuf,
     remote_addr: SocketAddr,
 ) -> FRWSResult {
     debug!("working root {:?}", wwwr);
-    let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
+    let is_dir_request = req.is_dir_req();
     /*
     A web_mount is always a folder.
     Unless...
@@ -112,9 +112,9 @@ async fn handle_wwwroot(
             force_dir: false, ..
         }) => {}
         _ => {
-            if req_path.is_empty() && !is_dir_request {
+            if req.path().is_empty() && !is_dir_request {
                 //mount paths must be a dir - always
-                return Ok(staticf::redirect(&req, &req_path, web_mount));
+                return Ok(staticf::redirect(&req, web_mount));
             }
         }
     }
@@ -145,8 +145,7 @@ async fn handle_wwwroot(
         config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, static_files }) => {
             if fcgi.exec.is_none() {
                 //FCGI + dont check for file -> always FCGI
-                return fcgi::fcgi_call(fcgi, req, &req_path, web_mount, None, None, remote_addr)
-                    .await;
+                return fcgi::fcgi_call(fcgi, req, web_mount, None, None, remote_addr).await;
             }
             match static_files {
                 Some(sf) => sf,
@@ -155,28 +154,26 @@ async fn handle_wwwroot(
         }
         #[cfg(feature = "websocket")]
         config::UseCase::Websocket(ws) => {
-            return websocket::upgrade(req, ws, &req_path, remote_addr).await;
+            return websocket::upgrade(req, ws, remote_addr).await;
         }
         #[cfg(feature = "webdav")]
         config::UseCase::Webdav(dav) => {
-            return dav::do_dav(req, &req_path, dav, web_mount, remote_addr).await;
+            return dav::do_dav(req, dav, web_mount, remote_addr).await;
         }
         #[cfg(test)]
         config::UseCase::UnitTest(ut) => {
-            return ut.body(req_path, web_mount, remote_addr);
+            return ut.body(req.path(), web_mount, remote_addr);
         }
         #[cfg(feature = "proxy")]
-        config::UseCase::Proxy(config) => {
-            return proxy::forward(req, &req_path, remote_addr, config).await
-        }
+        config::UseCase::Proxy(config) => return proxy::forward(req, remote_addr, config).await,
     };
 
-    let full_path = req_path.prefix_with(&sf.dir);
+    let full_path = req.path().prefix_with(&sf.dir);
     debug!("check for file: {:?}", full_path);
 
     #[cfg(feature = "fcgi")]
     let (full_path, resolved_file, path_info) =
-        fcgi::resolve_path(full_path, is_dir_request, sf, &req_path).await?;
+        fcgi::resolve_path(full_path, is_dir_request, sf, &req).await?;
     #[cfg(not(feature = "fcgi"))]
     let (full_path, resolved_file) =
         staticf::resolve_path(&full_path, is_dir_request, &sf.index).await?;
@@ -195,7 +192,7 @@ async fn handle_wwwroot(
     match resolved_file {
         ResolveResult::IsDirectory => {
             //request for a file that is a directory
-            Ok(staticf::redirect(&req, &req_path, web_mount))
+            Ok(staticf::redirect(&req, web_mount))
         }
         ResolveResult::Found(file, metadata, mime) => {
             #[cfg(feature = "fcgi")]
@@ -205,10 +202,9 @@ async fn handle_wwwroot(
                     return fcgi::fcgi_call(
                         fcgi,
                         req,
-                        &req_path,
                         web_mount,
                         Some(&full_path),
-                        path_info.as_ref(),
+                        path_info,
                         remote_addr,
                     )
                     .await;
@@ -216,7 +212,7 @@ async fn handle_wwwroot(
             }
 
             if ext_in_list(&sf.serve, &full_path) {
-                staticf::return_file(&req, file, metadata, mime).await
+                staticf::return_file(req, file, metadata, mime).await
             } else {
                 Err(IoError::new(
                     ErrorKind::PermissionDenied,
@@ -235,16 +231,16 @@ async fn handle_vhost(
     cfg: &config::VHost,
     remote_addr: SocketAddr,
 ) -> FRWSResult {
-    let req_path: WebPath = req.uri().try_into()?;
-    debug!("req_path {:?}", req_path);
+    let req = Req::from_req(req)?;
+    debug!("req_path {:?}", req.path());
 
     //we want the longest match
     //BTreeMap is sorted from small to big
     for (mount_path, wwwr) in cfg.paths.iter().rev() {
         trace!("checking mount point: {:?}", mount_path);
-        if let Ok(full_path) = req_path.strip_prefix(mount_path) {
-            let req_path = full_path.into_owned(); // T_T
-            let mut resp = handle_wwwroot(req, wwwr, req_path, mount_path, remote_addr).await?;
+        if let Ok(offset) = req.is_prefix(mount_path) {
+            let req = req.strip_prefix(offset);
+            let mut resp = handle_wwwroot(req, wwwr, mount_path, remote_addr).await?;
             insert_default_headers(resp.headers_mut(), &wwwr.header);
             return Ok(resp);
         }
@@ -257,14 +253,12 @@ async fn handle_vhost(
 }
 
 /// return the Host header
-fn get_host<B: HttpBody>(req: &Request<B>) -> Option<&str> {
+fn get_host<B: HttpBody>(req: &Request<B>) -> Option<Authority> {
     match req.version() {
-        Version::HTTP_2 => req.uri().host(),
+        Version::HTTP_2 => req.uri().authority().cloned(),
         Version::HTTP_11 | Version::HTTP_10 | Version::HTTP_09 => {
             if let Some(host) = req.headers().get(header::HOST) {
-                if let Ok(host) = host.to_str() {
-                    return Some(host.split(':').next().unwrap());
-                }
+                return Authority::from_maybe_shared(host.clone()).ok();
             }
             None
         }
@@ -274,16 +268,19 @@ fn get_host<B: HttpBody>(req: &Request<B>) -> Option<&str> {
 
 /// picks the matching vHost and calls `handle_vhost`
 async fn dispatch_to_vhost(
-    req: Request<IncomingBody>,
+    mut req: Request<IncomingBody>,
     cfg: Arc<config::HostCfg>,
     remote_addr: SocketAddr,
 ) -> FRWSResult {
-    if let Some(host) = get_host(&req) {
+    if let Some(auth) = get_host(&req) {
+        let host = auth.host();
         trace!("Host: {:?}", host);
         if let Some(hcfg) = cfg.vhosts.get(host) {
+            req.extensions_mut().insert(auth);
             //user wants this host
             return handle_vhost(req, hcfg, remote_addr).await;
         }
+        req.extensions_mut().insert(auth);
     }
 
     if let Some(hcfg) = &cfg.default_host {

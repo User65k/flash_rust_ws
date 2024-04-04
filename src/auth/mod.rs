@@ -1,6 +1,6 @@
 use crate::body::{FRWSResp, IncomingBody};
 use crate::config::Authenticatoin;
-use hyper::Request;
+use crate::dispatch::Req;
 use std::collections::HashMap;
 use std::io::Error as IoError;
 
@@ -8,7 +8,7 @@ mod digest;
 
 pub async fn check_is_authorized(
     auth: &Authenticatoin,
-    req: &Request<IncomingBody>,
+    req: &Req<IncomingBody>,
 ) -> Result<Option<FRWSResp>, IoError> {
     match auth {
         Authenticatoin::Digest { userfile, realm } => {

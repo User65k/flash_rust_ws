@@ -2,9 +2,10 @@ use crate::body::{BoxBody, FRWSResult, IncomingBody};
 use crate::config::{AbsPathBuf, Utf8PathBuf};
 
 use super::staticf::{self, resolve_path, return_file, ResolveResult};
+use super::Req;
 use bytes::{BufMut, Bytes, BytesMut};
 use hyper::body::Body as _;
-use hyper::{header, http::HeaderValue, HeaderMap, Method, Request, Response, StatusCode};
+use hyper::{header, http::HeaderValue, HeaderMap, Method, Response, StatusCode};
 use serde::Deserialize;
 use std::{
     convert::TryFrom,
@@ -37,8 +38,7 @@ enum DavMethod {
 /// req_path is relative from config.root
 /// web_mount is config.root from the client perspective
 pub async fn do_dav(
-    req: Request<IncomingBody>,
-    req_path: &super::WebPath<'_>,
+    req: Req<IncomingBody>,
     config: &Config,
     web_mount: &Utf8PathBuf,
     _remote_addr: SocketAddr,
@@ -88,7 +88,7 @@ pub async fn do_dav(
     {
         return Err(IoError::new(ErrorKind::PermissionDenied, "read only mount"));
     }
-    let full_path = req_path.prefix_with(&config.dav);
+    let full_path = req.path().prefix_with(&config.dav);
 
     if !config.follow_symlinks {
         let fp = if matches!(m, DavMethod::PUT | DavMethod::MKCOL) {
@@ -126,7 +126,7 @@ pub async fn do_dav(
         DavMethod::PROPFIND => {
             propfind::handle_propfind(req, full_path, &config.dav, web_mount).await
         }
-        DavMethod::GET => handle_get(req, &full_path, req_path, web_mount).await,
+        DavMethod::GET => handle_get(req, &full_path, web_mount).await,
         DavMethod::PUT => handle_put(req, &full_path, config.dont_overwrite).await,
         DavMethod::MKCOL => handle_mkdir(&full_path).await,
         DavMethod::COPY => {
@@ -201,9 +201,8 @@ async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
 }
 
 async fn handle_get(
-    req: Request<IncomingBody>,
+    req: Req<IncomingBody>,
     full_path: &Path,
-    req_path: &super::WebPath<'_>,
     web_mount: &Utf8PathBuf,
 ) -> FRWSResult {
     //we could serve dir listings as well. with a litte webdav client :-D
@@ -211,18 +210,18 @@ async fn handle_get(
 
     match file_lookup {
         ResolveResult::IsDirectory => {
-            let is_dir_request = req.uri().path().as_bytes().last() == Some(&b'/');
+            let is_dir_request = req.is_dir_req();
             if is_dir_request {
                 list_dir(
                     full_path,
-                    req_path.prefixed_as_abs_url_path(web_mount, 0, true),
+                    req.path().prefixed_as_abs_url_path(web_mount, 0, true),
                 )
                 .await
             } else {
-                Ok(staticf::redirect(&req, req_path, web_mount))
+                Ok(staticf::redirect(&req, web_mount))
             }
         }
-        ResolveResult::Found(file, metadata, mime) => return_file(&req, file, metadata, mime).await,
+        ResolveResult::Found(file, metadata, mime) => return_file(req, file, metadata, mime).await,
     }
 }
 async fn handle_delete(full_path: &Path) -> FRWSResult {
@@ -308,11 +307,7 @@ impl AsyncRead for BodyW {
         }
     }
 }
-async fn handle_put(
-    req: Request<IncomingBody>,
-    full_path: &Path,
-    dont_overwrite: bool,
-) -> FRWSResult {
+async fn handle_put(req: Req<IncomingBody>, full_path: &Path, dont_overwrite: bool) -> FRWSResult {
     // Check if file exists before proceeding
     if dont_overwrite && metadata(full_path).await.is_ok() {
         return Err(IoError::new(
@@ -328,10 +323,8 @@ async fn handle_put(
     }
     log::info!("about to store {:?}", full_path);
     let mut f = File::create(full_path).await?;
-    let mut b = BodyW {
-        s: req.into_body(),
-        b: None,
-    };
+    let (_, s) = req.into_parts();
+    let mut b = BodyW { s, b: None };
     redirect(&mut b, &mut f).await?;
     let res = Response::new(BoxBody::empty());
     //MAY 405 if file is a folder

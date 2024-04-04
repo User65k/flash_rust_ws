@@ -12,10 +12,7 @@ use crate::body::{
     test::{to_bytes, TestBody},
     FRWSResp, FRWSResult,
 };
-use crate::{
-    config::{group_config, AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf},
-    dispatch::WebPath,
-};
+use crate::config::{group_config, AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf};
 
 trait OldBodyApi: Body {
     fn data(&mut self) -> OldApiFut;
@@ -166,17 +163,20 @@ fn params_php_example() {
         allow_multiline_header: false,
         multiple_header: None,
     };
-    let req = Request::get("/php/")
-        .header(header::HOST, "example.com")
+    let mut req = Request::get("/mount/")
         .version(Version::HTTP_11)
         .body(TestBody::empty())
         .unwrap();
+    //done in dispatch_to_vhost
+    req.extensions_mut()
+        .insert(hyper::http::uri::Authority::from_static("example.com"));
+
+    let req = Req::test_on_mount(req);
 
     let params = create_params(
         &fcgi_cfg,
         &req,
-        &WebPath::parsed(""),
-        &Utf8PathBuf::from("php"),
+        &Utf8PathBuf::from("mount"),
         Some(Path::new("/opt/php/index.php")),
         None,
         "1.2.3.4:1337".parse().unwrap(),
@@ -205,7 +205,45 @@ fn params_php_example() {
     );
     assert_eq!(
         params.get(&Bytes::from(SCRIPT_NAME)),
-        Some(&"/php/index.php".into())
+        Some(&"/mount/index.php".into())
+    );
+}
+#[test]
+fn add_index_to_folder() {
+    let fcgi_cfg = FCGIApp {
+        sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
+        exec: None,
+        set_script_filename: true,
+        set_request_uri: false,
+        timeout: 0,
+        params: None,
+        bin: None,
+        app: None,
+        buffer_request: None,
+        allow_multiline_header: false,
+        multiple_header: None,
+    };
+    let req = Request::get("/mount/php/")
+        .version(Version::HTTP_11)
+        .body(TestBody::empty())
+        .unwrap();
+    let req = Req::test_on_mount(req);
+
+    let params = create_params(
+        &fcgi_cfg,
+        &req,
+        &Utf8PathBuf::from("mount"),
+        Some(Path::new("/opt/php/index.php")),
+        None,
+        "1.2.3.4:1337".parse().unwrap(),
+    );
+    assert_eq!(
+        params.get(&Bytes::from(SCRIPT_FILENAME)),
+        Some(&"/opt/php/index.php".into())
+    );
+    assert_eq!(
+        params.get(&Bytes::from(SCRIPT_NAME)),
+        Some(&"/mount/php/index.php".into())
     );
 }
 #[test]
@@ -223,17 +261,20 @@ fn params_flup_example() {
         allow_multiline_header: false,
         multiple_header: None,
     };
-    let req = Request::get("/flup/status")
+    let mut req = Request::get("/mount/status")
         .header(header::HOST, "localhost")
         .version(Version::HTTP_10)
         .body(TestBody::empty())
         .unwrap();
+    //done in dispatch_to_vhost
+    req.extensions_mut()
+        .insert(hyper::http::uri::Authority::from_static("localhost"));
+    let req = Req::test_on_mount(req);
 
     let params = create_params(
         &fcgi_cfg,
         &req,
-        &WebPath::parsed("status"),
-        &Utf8PathBuf::from("flup"),
+        &Utf8PathBuf::from("mount"),
         None,
         None,
         "[::1]:1337".parse().unwrap(),
@@ -254,15 +295,18 @@ fn params_flup_example() {
     assert_eq!(params.get(&Bytes::from(REMOTE_ADDR)), Some(&"::1".into()));
 
     assert_eq!(params.get(&Bytes::from(SCRIPT_FILENAME)), None);
-    assert_eq!(params.get(&Bytes::from(SCRIPT_NAME)), Some(&"/flup".into()));
+    assert_eq!(
+        params.get(&Bytes::from(SCRIPT_NAME)),
+        Some(&"/mount".into())
+    );
     assert_eq!(params.get(&Bytes::from(PATH_INFO)), Some(&"/status".into()));
     assert_eq!(
         params.get(&Bytes::from(REQUEST_URI)),
-        Some(&"/flup/status".into())
+        Some(&"/mount/status".into())
     );
 }
 
-async fn handle_wwwroot(req: Request<TestBody>, mount: UseCase, req_path: &str) -> FRWSResult {
+async fn handle_wwwroot(req: Request<TestBody>, mount: UseCase) -> FRWSResult {
     let wwwr = crate::config::WwwRoot {
         mount,
         header: None,
@@ -270,14 +314,9 @@ async fn handle_wwwroot(req: Request<TestBody>, mount: UseCase, req_path: &str) 
     };
     let remote_addr = "127.0.0.1:8080".parse().unwrap();
 
-    crate::dispatch::handle_wwwroot(
-        req,
-        &wwwr,
-        crate::dispatch::WebPath::parsed(req_path),
-        &Utf8PathBuf::from("mount"),
-        remote_addr,
-    )
-    .await
+    let req = Req::test_on_mount(req);
+
+    crate::dispatch::handle_wwwroot(req, &wwwr, &Utf8PathBuf::from("mount"), remote_addr).await
 }
 #[tokio::test]
 async fn resolve_file() {
@@ -310,7 +349,7 @@ async fn resolve_file() {
     let req = Request::get("/mount/test_fcgi_fallthroug")
         .body(TestBody::empty())
         .unwrap();
-    let res = handle_wwwroot(req, mount, "test_fcgi_fallthroug").await;
+    let res = handle_wwwroot(req, mount).await;
     let res = res.unwrap();
     assert_eq!(res.status(), 200);
     let body = to_bytes(res.into_body()).await;
@@ -347,7 +386,7 @@ async fn dont_resolve_file() {
     let req = Request::get("/mount/dont_fallthroug.php%00.txt")
         .body(TestBody::empty())
         .unwrap();
-    let res = handle_wwwroot(req, mount, "dont_fallthroug.php\0.txt").await;
+    let res = handle_wwwroot(req, mount).await;
     let res = res.unwrap_err();
     assert_eq!(res.kind(), std::io::ErrorKind::InvalidInput);
 }
@@ -392,13 +431,13 @@ async fn simple_fcgi_post() {
         allow_multiline_header: false,
         multiple_header: None,
     };
-    let req = Request::post("http://1/Public/test.php")
+    let req = Request::post("http://1/mount/Public/test.php")
         .header("Content-Length", "8")
         .header("Content-Type", "multipart/form-data")
         .body(TestBody::from("test=123"))
         .unwrap();
 
-    let (mut app_socket, req_task) = test_from_wwwr(req, "Public/test.php", fcgi_cfg, None).await;
+    let (mut app_socket, req_task) = test_from_wwwr(req, fcgi_cfg, None).await;
 
     let mut buf = BytesMut::with_capacity(4096);
     //actual request
@@ -442,19 +481,17 @@ async fn simple_fcgi_post() {
 /// (as well as the Task doing the request)
 async fn test_from_wwwr(
     req: Request<TestBody>,
-    req_path: &str,
     mut fcgi: FCGIApp,
     static_files: Option<StaticFiles>,
 ) -> (TcpStream, tokio::task::JoinHandle<FRWSResp>) {
     // pick a free port
     let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
-    let req_path = req_path.to_owned();
     let m = tokio::spawn(async move {
         let sock = Addr::Inet(a);
 
         fcgi.app = Some(FCGIAppPool::new(&sock).await.expect("ConPool failed"));
         let mount = UseCase::FCGI(FcgiMnt { fcgi, static_files });
-        let res = handle_wwwroot(req, mount, &req_path).await;
+        let res = handle_wwwroot(req, mount).await;
         res.unwrap()
     });
 
@@ -531,7 +568,7 @@ async fn resolve_file_with_path_info() {
     let file_content = &b""[..]; // not executed anyway -> runs mock_app instead
     let tf = crate::dispatch::test::TempFile::create("test.php", file_content);
 
-    let (mut app_socket, t) = test_from_wwwr(req, "test.php/path_info", fcgi, Some(sf)).await;
+    let (mut app_socket, t) = test_from_wwwr(req, fcgi, Some(sf)).await;
 
     let mut buf = BytesMut::with_capacity(4096);
 
@@ -593,7 +630,7 @@ async fn resolve_index() {
     let file_content = &b""[..]; // not executed anyway -> runs mock_app instead
     let tf = crate::dispatch::test::TempFile::create("index.php", file_content);
 
-    let (mut app_socket, t) = test_from_wwwr(req, "", fcgi, Some(sf)).await;
+    let (mut app_socket, t) = test_from_wwwr(req, fcgi, Some(sf)).await;
 
     let mut buf = BytesMut::with_capacity(4096);
 
@@ -656,7 +693,7 @@ async fn file_request_dont_add_index() {
     let _tf = crate::dispatch::test::TempFile::create("noindex.php", file_content);
     let picked_file = crate::dispatch::test::TempFile::create("something.php", file_content);
 
-    let (mut app_socket, t) = test_from_wwwr(req, "something.php", fcgi, Some(sf)).await;
+    let (mut app_socket, t) = test_from_wwwr(req, fcgi, Some(sf)).await;
 
     let mut buf = BytesMut::with_capacity(4096);
 
@@ -699,8 +736,15 @@ async fn test_resolve_path() {
         index: None,
         serve: None,
     };
-    let e = resolve_path(full_path, false, &sf, &WebPath::parsed("a/b/c/d"))
-        .await
-        .unwrap_err();
+
+    let req = Req::test_on_mount(
+        Request::get("/mount/a/b/c/d")
+            .body(TestBody::empty())
+            .unwrap(),
+    );
+
+    assert_eq!(req.path(), "a/b/c/d");
+
+    let e = resolve_path(full_path, false, &sf, &req).await.unwrap_err();
     assert_eq!(e.kind(), ErrorKind::NotFound);
 }

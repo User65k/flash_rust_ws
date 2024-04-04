@@ -1,8 +1,9 @@
-use bytes::{Buf, Bytes};
-use futures_util::Future;
+#[cfg(any(feature = "fcgi", feature = "webdav"))]
+use bytes::Buf;
+use bytes::Bytes;
 use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
-use log::trace;
 use pin_project_lite::pin_project;
+#[cfg(any(feature = "fcgi", feature = "webdav"))]
 use std::collections::VecDeque;
 use std::io::Error as IoError;
 use std::pin::Pin;
@@ -11,6 +12,7 @@ use std::task::{Context, Poll};
 pub type FRWSResp = hyper::Response<BoxBody>;
 pub type FRWSResult = Result<hyper::Response<BoxBody>, IoError>;
 
+#[cfg(any(feature = "fcgi", feature = "webdav"))]
 /// Request Body
 ///
 /// matches Incoming from hyper, but also allows tests to do shortcuts
@@ -29,6 +31,7 @@ pub trait IncomingBodyTrait:
         }
     }
 }
+#[cfg(any(feature = "fcgi", feature = "webdav"))]
 impl IncomingBodyTrait for IncomingBody {}
 
 #[cfg(test)]
@@ -56,6 +59,7 @@ pub mod test {
         }
     }
     impl TestBody {
+        #[cfg(feature = "webdav")]
         pub fn from(b: &'static str) -> TestBody {
             TestBody(Some(Bytes::from_static(b.as_bytes())))
         }
@@ -111,10 +115,57 @@ pub mod test {
     }
 }
 
+#[cfg(any(feature = "fcgi", feature = "webdav"))]
 pub enum BufferedBody<Body, Buf> {
+    #[cfg_attr(not(feature = "fcgi"), allow(dead_code))]
     Passthrough(Body),
-    Buffer { buf: VecDeque<Buf>, len: usize },
+    Buffer {
+        buf: VecDeque<Buf>,
+        len: usize,
+    },
 }
+#[cfg(feature = "webdav")]
+impl Buf for crate::body::BufferedBody<IncomingBody, Bytes> {
+    fn remaining(&self) -> usize {
+        match self {
+            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
+            crate::body::BufferedBody::Buffer { buf, len: _ } => {
+                buf.iter().map(|buf| buf.remaining()).sum()
+            }
+        }
+    }
+    fn chunk(&self) -> &[u8] {
+        match self {
+            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
+            crate::body::BufferedBody::Buffer { buf, len: _ } => {
+                buf.front().map(Buf::chunk).unwrap_or_default()
+            }
+        }
+    }
+    fn advance(&mut self, mut cnt: usize) {
+        let bufs = match self {
+            crate::body::BufferedBody::Passthrough(_) => unreachable!(),
+            crate::body::BufferedBody::Buffer { buf, len: _ } => buf,
+        };
+        while cnt > 0 {
+            if let Some(front) = bufs.front_mut() {
+                let rem = front.remaining();
+                if rem > cnt {
+                    front.advance(cnt);
+                    return;
+                } else {
+                    front.advance(rem);
+                    cnt -= rem;
+                }
+            } else {
+                //no data -> panic?
+                return;
+            }
+            bufs.pop_front();
+        }
+    }
+}
+#[cfg(feature = "fcgi")]
 impl<Body> HttpBody for BufferedBody<Body, Body::Data>
 where
     Body: HttpBody + Send + Sync + Unpin,
@@ -142,6 +193,7 @@ where
         }
     }
 }
+#[cfg(feature = "fcgi")]
 impl<Body> BufferedBody<Body, Body::Data>
 where
     Body: HttpBody + Send + Sync + Unpin,
@@ -152,6 +204,7 @@ where
         BufferedBody::Passthrough(body)
     }
 }
+#[cfg(any(feature = "fcgi", feature = "webdav"))]
 pin_project! {
     /// Future for `body.buffer()`
     pub struct BufferBody<B>{
@@ -162,7 +215,10 @@ pin_project! {
         len: usize
     }
 }
-impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> Future for BufferBody<B> {
+#[cfg(any(feature = "fcgi", feature = "webdav"))]
+impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> futures_util::Future
+    for BufferBody<B>
+{
     type Output = Result<BufferedBody<B, Bytes>, IoError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -186,7 +242,7 @@ impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> Future for BufferB
                     continue;
                 }
                 Poll::Ready(None) => {
-                    trace!("buffered input body of {} Bytes", this.len);
+                    log::trace!("buffered input body of {} Bytes", this.len);
                     Poll::Ready(Ok(BufferedBody::Buffer {
                         buf: this.buf.take().unwrap(),
                         len: *this.len,

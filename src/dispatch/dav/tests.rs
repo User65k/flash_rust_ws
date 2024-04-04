@@ -5,9 +5,10 @@ use hyper::Request;
 use super::{do_dav, Config};
 use crate::body::FRWSResult;
 use crate::body::{test::to_bytes, test::TestBody as Body};
+use crate::dispatch::Req;
 use crate::{
     config::{AbsPathBuf, UseCase, Utf8PathBuf},
-    dispatch::{test::TempFile, WebPath},
+    dispatch::test::TempFile,
 };
 #[test]
 fn basic_config() {
@@ -33,17 +34,14 @@ dav = "blablahui"
     );
     assert!(cfg.is_err());
 }
-async fn handle_req(
-    req: hyper::http::request::Builder,
-    body: Body,
-    req_path: WebPath<'_>,
-    config: &Config,
-) -> FRWSResult {
+async fn handle_req(req: hyper::http::request::Builder, body: Body, config: &Config) -> FRWSResult {
     let req = req.body(body).unwrap();
 
     let addr: SocketAddr = "1.2.3.4:1234".parse().unwrap();
 
-    do_dav(req, &req_path, config, &Utf8PathBuf::from("mount"), addr).await
+    let req = Req::test_on_mount(req);
+
+    do_dav(req, config, &Utf8PathBuf::from("mount"), addr).await
 }
 
 #[tokio::test]
@@ -60,7 +58,6 @@ async fn get_file() {
     let res = handle_req(
         Request::get("/mount/test_resolve_file_dav"),
         Body::empty(),
-        WebPath::parsed("test_resolve_file_dav"),
         &config,
     )
     .await
@@ -78,14 +75,9 @@ async fn options() {
         dont_overwrite: false,
         follow_symlinks: false,
     };
-    let res = handle_req(
-        Request::options("/mount/"),
-        Body::empty(),
-        WebPath::parsed(""),
-        &config,
-    )
-    .await
-    .unwrap();
+    let res = handle_req(Request::options("/mount/"), Body::empty(), &config)
+        .await
+        .unwrap();
 
     assert_eq!(res.status(), 200);
     assert_eq!(
@@ -113,7 +105,6 @@ async fn put_move_delete() {
     let res = handle_req(
         Request::put("/mount/test_create_file"),
         Body::from("test123"),
-        WebPath::parsed("test_create_file"),
         &config,
     )
     .await
@@ -131,7 +122,6 @@ async fn put_move_delete() {
             .uri("/mount/test_create_file")
             .header("Destination", "/mount/test_moved_file"),
         Body::empty(),
-        WebPath::parsed("test_create_file"),
         &config,
     )
     .await
@@ -147,7 +137,6 @@ async fn put_move_delete() {
     let res = handle_req(
         Request::delete("/mount/test_moved_file"),
         Body::empty(),
-        WebPath::parsed("test_moved_file"),
         &config,
     )
     .await
@@ -171,7 +160,6 @@ async fn mkcol_propfind() {
             .method("MKCOL")
             .uri("/mount/no_exist_dir/dir"),
         Body::empty(),
-        WebPath::parsed("no_exist_dir/dir"),
         &config,
     )
     .await
@@ -184,7 +172,6 @@ async fn mkcol_propfind() {
             .method("MKCOL")
             .uri("/mount/test_create_dir"),
         Body::empty(),
-        WebPath::parsed("test_create_dir"),
         &config,
     )
     .await
@@ -206,7 +193,6 @@ async fn mkcol_propfind() {
 <a:prop><a:getcontentlength/></a:prop>
 </a:propfind>"##,
         ),
-        WebPath::parsed("test_create_dir/"),
         &config,
     )
     .await
@@ -241,7 +227,6 @@ async fn mkcol_propfind() {
 <a:prop><a:getcontentlength/></a:prop>
 </a:propfind>"##,
         ),
-        WebPath::parsed("test_create_dir/"),
         &config,
     )
     .await
@@ -277,7 +262,6 @@ async fn mkcol_propfind() {
     let res = handle_req(
         Request::delete("/mount/test_create_dir"),
         Body::empty(),
-        WebPath::parsed("test_create_dir"),
         &config,
     )
     .await

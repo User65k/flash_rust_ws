@@ -1,7 +1,7 @@
 use crate::{
     body::{BoxBody, FRWSResult, IncomingBody},
     config::Utf8PathBuf,
-    dispatch::upgrades::MyUpgraded,
+    dispatch::{upgrades::MyUpgraded,webpath::Req}
 };
 use bytes::{Bytes, BytesMut};
 use hyper::{
@@ -114,14 +114,14 @@ fn change_req_from_h2_to_h11(req: &mut Request<IncomingBody>) {
 }
 
 pub async fn forward(
-    mut req: Request<IncomingBody>,
-    req_path: &super::WebPath<'_>,
+    req: Req<IncomingBody>,
     remote_addr: SocketAddr,
     config: &Proxy,
 ) -> FRWSResult {
-    let query = req.uri().query();
 
-    let mut new_path = req_path.prefixed_as_abs_url_path(
+    let query = req.query();
+
+    let mut new_path = req.path().prefixed_as_abs_url_path(
         &config.forward.path,
         query.map(|s| s.len() + 1).unwrap_or(0),
         true,
@@ -139,6 +139,10 @@ pub async fn forward(
         .build()
         .unwrap(); //can't happen - all parts set
     trace!("Forward to {}", &new_uri);
+
+
+    let (parts, body) = req.into_parts();
+    let mut req = hyper::Request::from_parts(parts, body);
     *req.uri_mut() = new_uri;
 
     let contains_te_trailers_value = req
@@ -190,9 +194,9 @@ pub async fn forward(
 
             buf.extend_from_slice(ip_str.as_bytes());
             //add host header
-            if let Some(host) = super::get_host(&req) {
+            if let Some(host) = req.extensions().get::<uri::Authority>() {
                 buf.extend_from_slice(b"; host=");
-                buf.extend_from_slice(host.as_bytes());
+                buf.extend_from_slice(host.as_str().as_bytes());
             }
             //;proto=http;by=203.0.113.43
             req.headers_mut()
@@ -520,7 +524,6 @@ mod tests {
     use crate::{
         body::{test::TestBody, FRWSResp},
         config::{UseCase, Utf8PathBuf},
-        dispatch::WebPath,
     };
     #[test]
     fn basic_config() {
@@ -543,13 +546,16 @@ mod tests {
     /// send a request to a FCGI mount and return its TcpStream
     /// (as well as the Task doing the request)
     async fn test_forward(
-        req: Request<TestBody>,
-        req_path: &str,
+        mut req: Request<TestBody>,
         mut proxy: Proxy,
     ) -> (TcpStream, tokio::task::JoinHandle<FRWSResp>) {
         // pick a free port
         let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
-        let req_path = req_path.to_owned();
+
+        if let Some(host) = req.headers().get(hyper::header::HOST).cloned() {
+            req.extensions_mut().insert(hyper::http::uri::Authority::from_maybe_shared(host).unwrap());
+        }
+        let req = Req::test_on_mount(req);
 
         proxy.forward.authority = a.to_string().parse().unwrap();
         proxy.setup().await.unwrap();
@@ -557,7 +563,6 @@ mod tests {
         let m = tokio::spawn(async move {
             let res = forward(
                 req,
-                &WebPath::parsed(&req_path),
                 "1.2.3.4:42".parse().unwrap(),
                 &proxy,
             )
@@ -574,7 +579,6 @@ mod tests {
             .unwrap();
         let (mut s, t) = test_forward(
             req,
-            "some/path",
             Proxy {
                 forward: "http://ignored/base_path".to_string().try_into().unwrap(),
                 add_forwarded_header: ForwardedHeader::Remove,
@@ -611,7 +615,6 @@ mod tests {
             .unwrap();
         let (mut s, t) = test_forward(
             req,
-            "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
                 add_forwarded_header: ForwardedHeader::Replace,
@@ -657,7 +660,6 @@ mod tests {
             .unwrap();
         let (mut s, t) = test_forward(
             req,
-            "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
                 add_forwarded_header: ForwardedHeader::Remove,
@@ -697,6 +699,8 @@ mod tests {
     async fn web_mount_is_a_folder() {
         let req = Request::get("/mount").body(TestBody::empty()).unwrap();
 
+        let req = Req::test_on_mount(req);
+
         let proxy = Proxy {
             forward: "http://localhost:0/".to_string().try_into().unwrap(),
             add_forwarded_header: ForwardedHeader::Remove,
@@ -715,7 +719,6 @@ mod tests {
                     header: None,
                     auth: None,
                 },
-                WebPath::parsed(""),
                 &Utf8PathBuf::from("/mount"),
                 "1.2.3.4:42".parse().unwrap(),
             )
@@ -732,7 +735,6 @@ mod tests {
         let req = Request::get("/mount").body(TestBody::empty()).unwrap();
         let (mut s, t) = test_forward(
             req,
-            "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
                 add_forwarded_header: ForwardedHeader::Remove,
@@ -766,7 +768,6 @@ mod tests {
             .unwrap();
         let (mut s, t) = test_forward(
             req,
-            "",
             Proxy {
                 forward: "http://ignored/".to_string().try_into().unwrap(),
                 add_forwarded_header: ForwardedHeader::Extend,
