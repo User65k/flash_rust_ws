@@ -76,12 +76,9 @@ fn ext_in_list(list: &Option<Vec<Utf8PathBuf>>, path: &Path) -> bool {
 /// - forwarding to FCGI
 /// - returning a static file
 ///
-/// `web_mount` first part of URI, selecting the wwwr. Used for links in the response
-/// `req_path` second part of URI - a path within the wwwr. Used to select a file
 async fn handle_wwwroot(
     req: Req<IncomingBody>,
     wwwr: &config::WwwRoot,
-    web_mount: &Utf8PathBuf,
     remote_addr: SocketAddr,
 ) -> FRWSResult {
     debug!("working root {:?}", wwwr);
@@ -114,7 +111,7 @@ async fn handle_wwwroot(
         _ => {
             if req.path().is_empty() && !is_dir_request {
                 //mount paths must be a dir - always
-                return Ok(staticf::redirect(&req, web_mount));
+                return Ok(staticf::redirect(&req));
             }
         }
     }
@@ -145,7 +142,7 @@ async fn handle_wwwroot(
         config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, static_files }) => {
             if fcgi.exec.is_none() {
                 //FCGI + dont check for file -> always FCGI
-                return fcgi::fcgi_call(fcgi, req, web_mount, None, None, remote_addr).await;
+                return fcgi::fcgi_call(fcgi, req, None, None, remote_addr).await;
             }
             match static_files {
                 Some(sf) => sf,
@@ -158,11 +155,11 @@ async fn handle_wwwroot(
         }
         #[cfg(feature = "webdav")]
         config::UseCase::Webdav(dav) => {
-            return dav::do_dav(req, dav, web_mount, remote_addr).await;
+            return dav::do_dav(req, dav, remote_addr).await;
         }
         #[cfg(test)]
         config::UseCase::UnitTest(ut) => {
-            return ut.body(req.path(), web_mount, remote_addr);
+            return ut.body(req.path(), req.mount(), remote_addr);
         }
         #[cfg(feature = "proxy")]
         config::UseCase::Proxy(config) => return proxy::forward(req, remote_addr, config).await,
@@ -192,7 +189,7 @@ async fn handle_wwwroot(
     match resolved_file {
         ResolveResult::IsDirectory => {
             //request for a file that is a directory
-            Ok(staticf::redirect(&req, web_mount))
+            Ok(staticf::redirect(&req))
         }
         ResolveResult::Found(file, metadata, mime) => {
             #[cfg(feature = "fcgi")]
@@ -202,7 +199,6 @@ async fn handle_wwwroot(
                     return fcgi::fcgi_call(
                         fcgi,
                         req,
-                        web_mount,
                         Some(&full_path),
                         path_info,
                         remote_addr,
@@ -240,7 +236,7 @@ async fn handle_vhost(
         trace!("checking mount point: {:?}", mount_path);
         if let Ok(offset) = req.is_prefix(mount_path) {
             let req = req.strip_prefix(offset);
-            let mut resp = handle_wwwroot(req, wwwr, mount_path, remote_addr).await?;
+            let mut resp = handle_wwwroot(req, wwwr, remote_addr).await?;
             insert_default_headers(resp.headers_mut(), &wwwr.header);
             return Ok(resp);
         }

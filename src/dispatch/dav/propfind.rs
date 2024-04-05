@@ -16,7 +16,7 @@ use xml::{
     EmitterConfig, ParserConfig,
 };
 
-use crate::config::{AbsPathBuf, Utf8PathBuf};
+use crate::config::AbsPathBuf;
 use crate::{
     body::{FRWSResult, IncomingBody, IncomingBodyTrait},
     dispatch::Req,
@@ -26,7 +26,6 @@ pub async fn handle_propfind(
     req: Req<IncomingBody>,
     path: PathBuf,
     root: &AbsPathBuf,
-    web_mount: &Utf8PathBuf,
 ) -> FRWSResult {
     // Get the depth
     let depth = req
@@ -36,7 +35,9 @@ pub async fn handle_propfind(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(u32::MAX); //infinity
 
-    let props = get_props_wanted(req).await?;
+    let web_mount = req.mount().to_owned();
+    let (_, body) = req.into_parts();
+    let props = get_props_wanted(body).await?;
 
     //log::debug!("Propfind {:?} {:?}", path, props);
 
@@ -61,10 +62,10 @@ pub async fn handle_propfind(
         .write(XmlWEvent::start_element("D:multistatus").ns("D", "DAV:"))
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
 
-    handle_propfind_path(&mut xmlwriter, &path, root, web_mount, &meta, &props)
+    handle_propfind_path(&mut xmlwriter, &path, root, &web_mount, &meta, &props)
         .map_err(|se| IoError::new(ErrorKind::Other, se))?;
     if meta.is_dir() && depth > 0 {
-        handle_propfind_path_recursive(&path, root, web_mount, depth, &mut xmlwriter, &props)
+        handle_propfind_path_recursive(&path, root, &web_mount, depth, &mut xmlwriter, &props)
             .await
             .map_err(|se| IoError::new(ErrorKind::Other, se))?;
     }
@@ -79,15 +80,14 @@ pub async fn handle_propfind(
     Ok(res)
 }
 
-async fn get_props_wanted(req: Req<IncomingBody>) -> Result<Vec<OwnedName>, IoError> {
-    if let Some(0) = req.body().size_hint().exact() {
+async fn get_props_wanted(body: IncomingBody) -> Result<Vec<OwnedName>, IoError> {
+    if let Some(0) = body.size_hint().exact() {
         //Windows explorer does not send a body
         Ok(vec![
             OwnedName::qualified("resourcetype", "DAV", Option::<String>::None),
             OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
         ])
     } else {
-        let (_, body) = req.into_parts();
         let read = body
             .buffer(9 * 1024)
             .await
@@ -162,7 +162,7 @@ fn handle_propfind_path<W: Write>(
     xmlwriter: &mut EventWriter<W>,
     abs_path: &Path,
     root: &Path,
-    web_mount: &Utf8PathBuf,
+    web_mount: &str,
     meta: &Metadata,
     props: &[OwnedName],
 ) -> Result<(), XmlWError> {
@@ -176,7 +176,7 @@ fn handle_propfind_path<W: Write>(
         .ok_or_else(|| IoError::new(ErrorKind::Other, "path is outside of root"))?;
 
     xmlwriter.write(XmlWEvent::characters("/"))?;
-    xmlwriter.write(XmlWEvent::characters(web_mount.as_str()))?;
+    xmlwriter.write(XmlWEvent::characters(web_mount))?;
     #[cfg(unix)]
     {
         xmlwriter.write(XmlWEvent::characters("/"))?;
@@ -232,7 +232,7 @@ fn handle_propfind_path<W: Write>(
 async fn handle_propfind_path_recursive<W: Write>(
     path: &Path,
     root: &Path,
-    web_mount: &Utf8PathBuf,
+    web_mount: &str,
     depth: u32,
     xmlwriter: &mut EventWriter<W>,
     props: &[OwnedName],

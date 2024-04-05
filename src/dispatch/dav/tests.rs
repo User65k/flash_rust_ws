@@ -7,7 +7,7 @@ use crate::body::FRWSResult;
 use crate::body::{test::to_bytes, test::TestBody as Body};
 use crate::dispatch::Req;
 use crate::{
-    config::{AbsPathBuf, UseCase, Utf8PathBuf},
+    config::{AbsPathBuf, UseCase},
     dispatch::test::TempFile,
 };
 #[test]
@@ -41,7 +41,7 @@ async fn handle_req(req: hyper::http::request::Builder, body: Body, config: &Con
 
     let req = Req::test_on_mount(req);
 
-    do_dav(req, config, &Utf8PathBuf::from("mount"), addr).await
+    do_dav(req, config, addr).await
 }
 
 #[tokio::test]
