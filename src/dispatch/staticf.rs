@@ -70,10 +70,10 @@ pub async fn return_file(
         .map(BoxBody::File))
 }
 
-pub fn redirect(req: &Req<IncomingBody>, web_mount: &Utf8PathBuf) -> FRWSResp {
+pub fn redirect(req: &Req<IncomingBody>) -> FRWSResp {
     //request for a file that is a directory
     let mut target_url = req.path().prefixed_as_abs_url_path(
-        web_mount,
+        req.mount(),
         req.query().map_or(1, |q| q.len() + 2),
         true,
     );
@@ -196,7 +196,7 @@ mod tests {
 
         let req = Req::test_on_mount(req);
 
-        crate::dispatch::handle_wwwroot(req, &wwwr, &Utf8PathBuf::from("mount"), remote_addr).await
+        crate::dispatch::handle_wwwroot(req, &wwwr, remote_addr).await
     }
 
     #[tokio::test]
@@ -459,7 +459,7 @@ mod tests {
     fn redir_test() {
         let req = Request::get("/mount/this").body(TestBody::empty()).unwrap();
         let req = Req::test_on_mount(req);
-        let resp = super::redirect(&req, &Utf8PathBuf::from("/mount"));
+        let resp = super::redirect(&req);
         assert_eq!(
             resp.headers().get(header::LOCATION).unwrap(),
             "/mount/this/"
@@ -467,7 +467,7 @@ mod tests {
 
         let req = Request::get("/mount").body(TestBody::empty()).unwrap();
         let req = Req::test_on_mount(req);
-        let resp = super::redirect(&req, &Utf8PathBuf::from("/mount"));
+        let resp = super::redirect(&req);
         assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/mount/");
     }
 }

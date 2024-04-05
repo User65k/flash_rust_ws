@@ -176,7 +176,6 @@ fn params_php_example() {
     let params = create_params(
         &fcgi_cfg,
         &req,
-        &Utf8PathBuf::from("mount"),
         Some(Path::new("/opt/php/index.php")),
         None,
         "1.2.3.4:1337".parse().unwrap(),
@@ -232,7 +231,6 @@ fn add_index_to_folder() {
     let params = create_params(
         &fcgi_cfg,
         &req,
-        &Utf8PathBuf::from("mount"),
         Some(Path::new("/opt/php/index.php")),
         None,
         "1.2.3.4:1337".parse().unwrap(),
@@ -274,7 +272,6 @@ fn params_flup_example() {
     let params = create_params(
         &fcgi_cfg,
         &req,
-        &Utf8PathBuf::from("mount"),
         None,
         None,
         "[::1]:1337".parse().unwrap(),
@@ -316,7 +313,7 @@ async fn handle_wwwroot(req: Request<TestBody>, mount: UseCase) -> FRWSResult {
 
     let req = Req::test_on_mount(req);
 
-    crate::dispatch::handle_wwwroot(req, &wwwr, &Utf8PathBuf::from("mount"), remote_addr).await
+    crate::dispatch::handle_wwwroot(req, &wwwr, remote_addr).await
 }
 #[tokio::test]
 async fn resolve_file() {
@@ -747,4 +744,55 @@ async fn test_resolve_path() {
 
     let e = resolve_path(full_path, false, &sf, &req).await.unwrap_err();
     assert_eq!(e.kind(), ErrorKind::NotFound);
+}
+#[test]
+/// https://www.nginx.com/resources/wiki/start/topics/examples/phpfcgi/
+fn params_nginx_example() {
+    let fcgi_cfg = FCGIApp {
+        sock: Addr::Inet("127.0.0.1:1234".parse().unwrap()),
+        exec: None,
+        set_script_filename: true,
+        set_request_uri: true,
+        timeout: 0,
+        params: None,
+        bin: None,
+        app: None,
+        buffer_request: None,
+        allow_multiline_header: false,
+        multiple_header: None,
+    };
+    let req = Request::get("/mount/test.php/foo/bar.php?v=1")
+        .version(Version::HTTP_11)
+        .body(TestBody::empty())
+        .unwrap();
+
+    let req = Req::test_on_mount(req);
+
+    let params = create_params(
+        &fcgi_cfg,
+        &req,
+        Some(Path::new("/var/www/test.php")),
+        Some(10),
+        "1.2.3.4:1337".parse().unwrap(),
+    );
+
+    assert_eq!(
+        params.get(&Bytes::from(SCRIPT_FILENAME)),
+        Some(&"/var/www/test.php".into())
+    );
+    assert_eq!(
+        params.get(&Bytes::from(SCRIPT_NAME)),
+        Some(&"/mount/test.php".into())
+    );
+    assert_eq!(
+        params.get(&Bytes::from(REQUEST_URI)),
+        Some(&"/mount/test.php/foo/bar.php?v=1".into())
+    );
+    assert_eq!(
+        params.get(&Bytes::from(PATH_INFO)),
+        Some(&"/foo/bar.php".into())
+    );
+/*
+  'DOCUMENT_URI' => '/test.php/foo/bar.php',
+*/
 }
