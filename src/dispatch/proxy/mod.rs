@@ -1,7 +1,7 @@
 use crate::{
     body::{BoxBody, FRWSResult, IncomingBody},
     config::Utf8PathBuf,
-    dispatch::{upgrades::MyUpgraded,webpath::Req}
+    dispatch::{upgrades::MyUpgraded, webpath::Req},
 };
 use bytes::{Bytes, BytesMut};
 use hyper::{
@@ -10,18 +10,19 @@ use hyper::{
     upgrade::OnUpgrade,
     HeaderMap, Request, Response, StatusCode, Uri, Version,
 };
-use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
-    rt::TokioExecutor,
-};
 use log::{debug, error, trace};
 use serde::Deserialize;
 use std::{
     convert::TryFrom,
     io::{Error as IoError, ErrorKind},
 };
-use std::{error::Error, net::SocketAddr};
+use std::net::SocketAddr;
 use tokio::io::copy_bidirectional;
+
+mod client;
+use client::Client;
+#[cfg(test)]
+mod test;
 
 /// these have to be removed
 static HOP_BY_HOP_HEADERS: [HeaderName; 7] = [
@@ -107,8 +108,10 @@ fn change_req_from_h2_to_h11(req: &mut Request<IncomingBody>) {
         bytes::BufMut::put_slice(&mut value_buf, v); //copy
     }
     if first {
-        req.headers_mut()
-        .insert(header::COOKIE, HeaderValue::from_bytes(value_buf.as_ref()).expect("was a HV before"));
+        req.headers_mut().insert(
+            header::COOKIE,
+            HeaderValue::from_bytes(value_buf.as_ref()).expect("was a HV before"),
+        );
     }
     *req.version_mut() = hyper::Version::HTTP_11;
 }
@@ -132,18 +135,8 @@ pub async fn forward(
         new_path.push_str(q);
     }
 
-    let new_uri = Uri::builder()
-        .scheme(config.forward.scheme.clone())
-        .authority(config.forward.authority.clone())
-        .path_and_query(new_path)
-        .build()
-        .unwrap(); //can't happen - all parts set
-    trace!("Forward to {}", &new_uri);
-
-
     let (parts, body) = req.into_parts();
     let mut req = hyper::Request::from_parts(parts, body);
-    *req.uri_mut() = new_uri;
 
     let contains_te_trailers_value = req
         .headers()
@@ -167,7 +160,7 @@ pub async fn forward(
     }
 
     match config.add_forwarded_header {
-        ForwardedHeader::Replace  | ForwardedHeader::Extend => {
+        ForwardedHeader::Replace | ForwardedHeader::Extend => {
             //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Forwarded
             let mut buf = BytesMut::with_capacity(512);
 
@@ -253,36 +246,43 @@ pub async fn forward(
             .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
     }
 
-    match config.forward.scheme.as_str() {
-        "http" => {
-            if req.version() == hyper::Version::HTTP_2 {
-                change_req_from_h2_to_h11(&mut req);
-            }
-
-            //new host header
-            req.headers_mut().insert(
-                header::HOST,
-                HeaderValue::from_bytes(config.forward.authority.as_str().as_bytes())
-                    .expect("authority not a header value"),
-            );
-        },
-        _ => unreachable!("config should not allow other values"),
+    let req_vers = config
+        .client
+        .as_ref()
+        .unwrap()
+        .get_supported_version()
+        .await;
+    if req_vers == Version::HTTP_11 && req.version() == Version::HTTP_2 {
+        // we need to downgrade from h2 to h1.1
+        change_req_from_h2_to_h11(&mut req);
     }
 
-    let mut resp = match config.client.as_ref().unwrap().request(req).await {
+    if req.version() == Version::HTTP_2 {
+        let new_uri = Uri::builder()
+            .scheme(config.forward.scheme.clone())
+            .authority(config.forward.host.as_bytes())
+            .path_and_query(new_path)
+            .build()
+            .unwrap(); //can't happen - all parts set
+        trace!("Forward to {}", &new_uri);
+        *req.uri_mut() = new_uri;
+    } else {
+        let new_uri = Uri::builder().path_and_query(new_path).build().unwrap(); //can't happen - only path_and_query set
+        trace!("Forward to {}", &new_uri);
+        *req.uri_mut() = new_uri;
+        //new host header
+        req.headers_mut()
+            .insert(header::HOST, config.forward.host.clone());
+    }
+    let mut resp = match config.request(req).await {
         Ok(r) => r,
         Err(err) => {
             error!("Bad Gateway: {}", err);
             let mut resp = Response::new(BoxBody::empty());
             *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
 
-            if let Some(io_e) = err
-                .source()
-                .and_then(|cause| cause.downcast_ref::<IoError>())
-            {
-                if io_e.kind() == ErrorKind::TimedOut {
-                    *resp.status_mut() = hyper::StatusCode::GATEWAY_TIMEOUT;
-                }
+            if err.kind() == ErrorKind::TimedOut {
+                *resp.status_mut() = hyper::StatusCode::GATEWAY_TIMEOUT;
             }
             return Ok(resp);
         }
@@ -307,8 +307,11 @@ pub async fn forward(
 
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
         if request_upgrade != resp_upgrade {
-            error!("client upgrade {:?} != server upgrade {:?}", request_upgrade, resp_upgrade);
-            return Err(ErrorKind::InvalidInput.into())
+            error!(
+                "client upgrade {:?} != server upgrade {:?}",
+                request_upgrade, resp_upgrade
+            );
+            return Err(ErrorKind::InvalidInput.into());
         }
         if let Some(request_upgraded) = request_upgraded {
             let response_upgraded = resp
@@ -331,7 +334,7 @@ pub async fn forward(
 
             //was removed by remove_hop_by_hop_headers
             resp.headers_mut()
-            .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+                .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
 
             tokio::spawn(async move {
                 let mut request_upgraded =
@@ -358,16 +361,16 @@ fn into_header_value(src: Bytes) -> Result<HeaderValue, IoError> {
 #[derive(Deserialize, Debug, Default)]
 #[serde(from = "bool")]
 enum ForwardedHeader {
-    Remove,     //false
-    Extend,     //true
+    Remove, //false
+    Extend, //true
     #[default]
-    Replace     //?
+    Replace, //?
 }
 impl From<bool> for ForwardedHeader {
     fn from(value: bool) -> Self {
         if value {
             ForwardedHeader::Extend
-        }else{
+        } else {
             ForwardedHeader::Remove
         }
     }
@@ -393,15 +396,25 @@ pub struct Proxy {
     //filter_req_header: Vec<HeaderNameCfg>,
     //filter_resp_header: Vec<HeaderNameCfg>,
     #[serde(skip)]
-    client: Option<Client<HttpConnector, IncomingBody>>,
+    client: Option<Client>,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(try_from = "String")]
 struct ProxyAdress {
     scheme: uri::Scheme,
-    authority: uri::Authority,
+    host: HeaderValue,
     path: Utf8PathBuf,
+    addr: ProxySocket,
+}
+/// type for a late DNS request
+///
+/// only parse it once, if its an IP.
+/// else, resolve it regularly
+#[derive(Debug)]
+enum ProxySocket {
+    Ip(SocketAddr),
+    Dns((String, u16)),
 }
 
 impl TryFrom<String> for ProxyAdress {
@@ -431,6 +444,19 @@ impl TryFrom<String> for ProxyAdress {
                 anyhow::bail!("No authority/host given");
             }
         };
+        let host = HeaderValue::from_bytes(authority.as_str().as_bytes())?;
+        let port = match authority.port_u16() {
+            Some(p) => p,
+            None => {
+                if scheme == uri::Scheme::HTTPS {
+                    443
+                } else {
+                    80
+                }
+            }
+        };
+        let addr = (authority.host(), port).into();
+
         let path = if let Some(pq) = p.path_and_query {
             if pq.query().is_some() {
                 anyhow::bail!("query is not supported. Please request support for it. https://github.com/User65k/flash_rust_ws/issues");
@@ -441,8 +467,9 @@ impl TryFrom<String> for ProxyAdress {
         };
         Ok(ProxyAdress {
             scheme,
-            authority,
+            host,
             path,
+            addr,
         })
     }
 }
@@ -450,461 +477,25 @@ impl TryFrom<String> for ProxyAdress {
 fn yes() -> bool {
     true
 }
+impl From<(&str, u16)> for ProxySocket {
+    fn from(value: (&str, u16)) -> Self {
+        let (host, port) = value;
 
-impl Proxy {
-    pub async fn setup(&mut self) -> Result<(), String> {
-        match self.forward.scheme.as_str() {
-            "http" => self.client = Some(Client::builder(TokioExecutor::new()).build_http()),
-            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
-            "https" => { /*
-                 let connector = Connector::new();
-                 let client = Client::builder().build::<_, Body>(connector);
-                 self.client = Some(client);*/
-            }
-            s => {
-                return Err(format!("{} is not known", s));
-            }
-        }
-        Ok(())
-    }
-}
+        // try to parse the host as a regular IP address first
+        if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
+            let addr = std::net::SocketAddrV4::new(addr, port);
+            let addr = std::net::SocketAddr::V4(addr);
 
-/*pub struct Connector;
-
-impl Connector {
-    pub fn new() -> Connector {
-        Connector {}
-    }
-}
-#[cfg(feature = "tlsrust")]
-use tokio_rustls::{TlsConnector, rustls::client::ClientConfig};
-
-
-impl Service<Uri> for Connector {
-    type Response = TlsStream;
-    type Error = std::io::Error;
-    // We can't "name" an `async` generated future.
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // This connector is always ready, but others might not be.
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, dst: Uri) -> Self::Future {
-        let fut = async move {
-            let host = match dst.host() {
-                Some(s) => s,
-                None => {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing host"));
-                }
-            };
-            let port = match dst.port() {
-                Some(port) => port.as_u16(),
-                None => 443,
-            };
-            let stream = TcpStream::connect((host, port)).await?;
-            let config = ClientConfig::builder().with_safe_defaults().with_root_certificates(root_store).with_no_client_auth();
-            TlsConnector::connect(&self, host, stream).await
-        };
-
-        Box::pin(fut)
-    }
-}*/
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hyper::Request;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpStream,
-    };
-
-    use crate::{
-        body::{test::TestBody, FRWSResp},
-        config::{UseCase, Utf8PathBuf},
-    };
-    #[test]
-    fn basic_config() {
-        if let Ok(UseCase::Proxy(p)) = toml::from_str(
-            r#"
-            forward = "http://remote/path"
-        "#,
-        ) {
-            assert_eq!(p.forward.authority, "remote");
-            assert_eq!(p.forward.scheme, uri::Scheme::HTTP);
-            assert_eq!(p.forward.path, Utf8PathBuf::from("/path"));
-            assert!(p.force_dir);
-            assert!(matches!(p.add_forwarded_header, ForwardedHeader::Replace));
-            assert!(!p.add_x_forwarded_for_header);
-        } else {
-            panic!("not proxy");
-        }
-    }
-
-    /// send a request to a FCGI mount and return its TcpStream
-    /// (as well as the Task doing the request)
-    async fn test_forward(
-        mut req: Request<TestBody>,
-        mut proxy: Proxy,
-    ) -> (TcpStream, tokio::task::JoinHandle<FRWSResp>) {
-        // pick a free port
-        let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
-
-        if let Some(host) = req.headers().get(hyper::header::HOST).cloned() {
-            req.extensions_mut().insert(hyper::http::uri::Authority::from_maybe_shared(host).unwrap());
-        }
-        let req = Req::test_on_mount(req);
-
-        proxy.forward.authority = a.to_string().parse().unwrap();
-        proxy.setup().await.unwrap();
-
-        let m = tokio::spawn(async move {
-            let res = forward(
-                req,
-                "1.2.3.4:42".parse().unwrap(),
-                &proxy,
-            )
-            .await;
-            res.unwrap()
-        });
-        let (app_socket, _) = app_listener.accept().await.unwrap();
-        (app_socket, m)
-    }
-    #[tokio::test]
-    async fn simple_fwd() {
-        let req = Request::get("/mount/some/path")
-            .body(TestBody::empty())
-            .unwrap();
-        let (mut s, t) = test_forward(
-            req,
-            Proxy {
-                forward: "http://ignored/base_path".to_string().try_into().unwrap(),
-                add_forwarded_header: ForwardedHeader::Remove,
-                add_x_forwarded_for_header: false,
-                add_via_header_to_client: Some("rproxy1".to_string()),
-                add_via_header_to_server: None,
-                force_dir: true,
-                client: None,
-            },
-        )
-        .await;
-
-        let mut buf = [0u8; 25];
-        let i = s.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf[..i], b"GET /base_path/some/path ");
-
-        s.write_all(b"HTTP/1.0 500 Not so OK\r\n\r\n")
-            .await
-            .unwrap();
-        let r = t.await.unwrap();
-        assert_eq!(r.status(), 500);
-        assert_eq!(
-            r.headers().get(header::VIA),
-            Some(&HeaderValue::from_static("HTTP/1.0 rproxy1"))
-        );
-    }
-    #[tokio::test]
-    async fn add_headers() {
-        let req = Request::get("/mount/")
-            .header(header::HOST, "a_host")
-            .header(header::FORWARDED, "for=10.10.10.10")
-            .version(hyper::Version::HTTP_10)
-            .body(TestBody::empty())
-            .unwrap();
-        let (mut s, t) = test_forward(
-            req,
-            Proxy {
-                forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: ForwardedHeader::Replace,
-                add_x_forwarded_for_header: true,
-                add_via_header_to_client: None,
-                add_via_header_to_server: Some("rproxy1".to_string()),
-                force_dir: true,
-                client: None,
-            },
-        )
-        .await;
-
-        let mut buf = [0u8; 16];
-        let i = s.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf[..i], b"GET / HTTP/1.0\r\n");
-        let mut buf = BytesMut::with_capacity(4096);
-        s.read_buf(&mut buf).await.unwrap();
-
-        assert_eq!(get_header(&buf, "via").unwrap(), b"HTTP/1.0 rproxy1");
-        assert_eq!(
-            get_header(&buf, "forwarded").unwrap(),
-            b"for=1.2.3.4; host=a_host"
-        );
-
-        //return something else than 200
-        s.write_all(b"HTTP/1.0 500 Not so OK\r\n\r\n")
-            .await
-            .unwrap();
-        let r = t.await.unwrap();
-        assert_eq!(r.status(), 500);
-    }
-    #[tokio::test]
-    async fn remove_hop_headers() {
-        let req = Request::get("/mount/")
-            .header(header::CONNECTION, "close")
-            .header(header::TRANSFER_ENCODING, "value")
-            .header("keep-alive", "value")
-            .header(header::TE, "value")
-            .header(header::TRAILER, "value")
-            .header(header::PROXY_AUTHENTICATE, "value")
-            .header(header::PROXY_AUTHORIZATION, "value")
-            .body(TestBody::empty())
-            .unwrap();
-        let (mut s, t) = test_forward(
-            req,
-            Proxy {
-                forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: ForwardedHeader::Remove,
-                add_x_forwarded_for_header: false,
-                add_via_header_to_client: None,
-                add_via_header_to_server: None,
-                force_dir: true,
-                client: None,
-            },
-        )
-        .await;
-
-        let mut buf = Vec::with_capacity(4096);
-        s.read_buf(&mut buf).await.unwrap();
-
-        let dont_include = [
-            "keep-alive",
-            "transfer-encoding",
-            "te",
-            "connection",
-            "trailer",
-            "proxy-authorization",
-            "proxy-authenticate",
-        ];
-        for kw in dont_include {
-            assert_eq!(get_header(&buf, kw), None);
+            return ProxySocket::Ip(addr);
         }
 
-        //return something else than 200
-        s.write_all(b"HTTP/1.0 500 Not so OK\r\n\r\n")
-            .await
-            .unwrap();
-        let r = t.await.unwrap();
-        assert_eq!(r.status(), 500);
-    }
-    #[tokio::test]
-    async fn web_mount_is_a_folder() {
-        let req = Request::get("/mount").body(TestBody::empty()).unwrap();
+        if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
+            let addr = std::net::SocketAddrV6::new(addr, port, 0, 0);
+            let addr = std::net::SocketAddr::V6(addr);
 
-        let req = Req::test_on_mount(req);
-
-        let proxy = Proxy {
-            forward: "http://localhost:0/".to_string().try_into().unwrap(),
-            add_forwarded_header: ForwardedHeader::Remove,
-            add_x_forwarded_for_header: false,
-            add_via_header_to_client: None,
-            add_via_header_to_server: None,
-            force_dir: true,
-            client: None,
-        };
-
-        let t = tokio::spawn(async move {
-            let res = crate::dispatch::handle_wwwroot(
-                req,
-                &crate::config::WwwRoot {
-                    mount: crate::config::UseCase::Proxy(proxy),
-                    header: None,
-                    auth: None,
-                },
-                &Utf8PathBuf::from("/mount"),
-                "1.2.3.4:42".parse().unwrap(),
-            )
-            .await;
-            res.unwrap()
-        });
-
-        let r = t.await.unwrap();
-        assert_eq!(r.status(), 301);
-        assert_eq!(r.headers().get(header::LOCATION).unwrap(), "/mount/");
-    }
-    #[tokio::test]
-    async fn force_dir_false() {
-        let req = Request::get("/mount").body(TestBody::empty()).unwrap();
-        let (mut s, t) = test_forward(
-            req,
-            Proxy {
-                forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: ForwardedHeader::Remove,
-                add_x_forwarded_for_header: false,
-                add_via_header_to_client: None,
-                add_via_header_to_server: None,
-                force_dir: false,
-                client: None,
-            },
-        )
-        .await;
-
-        let mut buf = Vec::with_capacity(4096);
-        s.read_buf(&mut buf).await.unwrap();
-
-        //return something else than 200
-        s.write_all(b"HTTP/1.0 201 Not so OK\r\n\r\n")
-            .await
-            .unwrap();
-        let r = t.await.unwrap();
-        assert_eq!(r.status(), 201);
-    }
-    /// ensure that via and forwarded entries are in the correct order
-    #[tokio::test]
-    async fn header_chaining() {
-        let req = Request::get("/mount/")
-            .header(header::VIA, "HTTP/0.9 someone")
-            .header(&X_FORWARDED_FOR, "10.10.10.10")
-            .header(header::FORWARDED, "for=10.10.10.10")
-            .body(TestBody::empty())
-            .unwrap();
-        let (mut s, t) = test_forward(
-            req,
-            Proxy {
-                forward: "http://ignored/".to_string().try_into().unwrap(),
-                add_forwarded_header: ForwardedHeader::Extend,
-                add_x_forwarded_for_header: true,
-                add_via_header_to_client: Some("my_front".to_string()),
-                add_via_header_to_server: Some("me".to_string()),
-                force_dir: true,
-                client: None,
-            },
-        )
-        .await;
-
-        let mut buf = Vec::with_capacity(4096);
-        s.read_buf(&mut buf).await.unwrap();
-
-        assert_eq!(
-            get_header(&buf, "via").unwrap(),
-            b"HTTP/0.9 someone, HTTP/1.1 me"
-        );
-        assert_eq!(
-            get_header(&buf, "forwarded").unwrap(),
-            b"for=10.10.10.10, for=1.2.3.4"
-        );
-        assert_eq!(
-            get_header(&buf, "x-forwarded-for").unwrap(),
-            b"10.10.10.10, 1.2.3.4"
-        );
-
-        //return something else than 200
-        s.write_all(b"HTTP/1.0 203 Not so OK\r\nvia: HTTP/0.9 another\r\n\r\n")
-            .await
-            .unwrap();
-        let r = t.await.unwrap();
-        assert_eq!(
-            r.headers().get(header::VIA).unwrap().as_bytes(),
-            b"HTTP/0.9 another, HTTP/1.0 my_front"
-        );
-        assert_eq!(r.status(), 203);
-    }
-
-    async fn full_server_test(
-    ) -> Result<(tokio::net::TcpStream, tokio::net::TcpListener), Box<dyn std::error::Error>> {
-        //We can not use a Request Object for the test,
-        //as it has no associated connection
-        let (server_listener, a) = crate::tests::local_socket_pair().await?;
-        let (target_listener, target_add) = crate::tests::local_socket_pair().await.unwrap();
-
-        let mut proxy = Proxy {
-            forward: "http://ignored/".to_string().try_into().unwrap(),
-            add_forwarded_header: ForwardedHeader::Remove,
-            add_x_forwarded_for_header: false,
-            add_via_header_to_client: None,
-            add_via_header_to_server: None,
-            force_dir: false,
-            client: None,
-        };
-        proxy.forward.authority = target_add.to_string().parse().unwrap();
-        proxy.setup().await.unwrap();
-
-        let mut listening_ifs = std::collections::HashMap::new();
-        let mut cfg = crate::config::HostCfg::new(server_listener.into_std()?);
-        let mut vh = crate::config::VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
-            crate::config::WwwRoot {
-                mount: UseCase::Proxy(proxy),
-                header: None,
-                auth: None,
-            },
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = crate::prepare_hyper_servers(listening_ifs).await?;
-
-        let client = tokio::net::TcpStream::connect(a).await?;
-
-        Ok((client, target_listener))
-    }
-    ///test upgrade
-    #[tokio::test]
-    async fn upgrade() {
-        let (mut client, target_listener) = full_server_test().await.unwrap();
-
-        let t = tokio::spawn(async move {
-            let (mut server, _) = target_listener.accept().await.unwrap();
-            let mut buf = Vec::with_capacity(4096);
-            server.read_buf(&mut buf).await.unwrap();
-            assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
-            assert_eq!(get_header(&buf, "upgrade").unwrap(), b"something");
-
-            server
-                .write_all(b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\nUpgrade: something\r\nConnection: Upgrade\r\n\r\n")
-                .await
-                .unwrap();
-
-            buf.clear();
-            server.read_buf(&mut buf).await.unwrap();
-            assert_eq!(buf, b"\x01\x02\x03\xff");
-
-            server.write_all(b"\xff\xfe\x00").await.unwrap();
-        });
-
-        client
-            .write_all(b"GET /a HTTP/1.1\r\nUpgrade: something\r\nConnection: Upgrade\r\n\r\n")
-            .await
-            .unwrap();
-
-        let mut buf = Vec::with_capacity(4096);
-        client.read_buf(&mut buf).await.unwrap();
-        assert_eq!(&buf[..34], b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\n");
-        assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
-        assert_eq!(get_header(&buf, "upgrade").unwrap(), b"something");
-
-        client.write_all(b"\x01\x02\x03\xff").await.unwrap();
-        buf.clear();
-        client.read_buf(&mut buf).await.unwrap();
-        assert_eq!(buf, b"\xff\xfe\x00");
-
-        t.await.unwrap();
-    }
-
-    /// search a HTTP header value inside of a byte stream.
-    fn get_header<'a>(haystack: &'a [u8], param: &'_ str) -> Option<&'a [u8]> {
-        if let Some(pos) = haystack.windows(param.len() + 4).position(|window| {
-            &window[2..param.len() + 2] == param.as_bytes()
-                && &window[..2] == b"\r\n"
-                && &window[param.len() + 2..] == b": "
-        }) {
-            let start = pos + param.len() + 4;
-            if let Some(len) = haystack[start..]
-                .windows(2)
-                .position(|window| window == b"\r\n")
-            {
-                return Some(&haystack[start..start + len]);
-            }
+            return ProxySocket::Ip(addr);
         }
-        None
+
+        ProxySocket::Dns((host.to_owned(), port))
     }
 }
