@@ -1,6 +1,6 @@
 use std::io::{Error as IoError, ErrorKind};
 
-use hyper::{body::Incoming, Request, Response, Version};
+use hyper::{body::Incoming, Request, Response, Version, client::conn::{http1, http2}};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::{net::TcpStream, sync::RwLock};
 #[cfg(feature = "tlsrust")]
@@ -48,8 +48,8 @@ impl super::Proxy {
 
 #[derive(Debug)]
 pub struct Client {
-    h1: RwLock<Option<hyper::client::conn::http1::SendRequest<IncomingBody>>>,
-    h2: RwLock<Option<hyper::client::conn::http2::SendRequest<IncomingBody>>>,
+    h1: RwLock<Option<http1::SendRequest<IncomingBody>>>,
+    h2: RwLock<Option<http2::SendRequest<IncomingBody>>>,
 }
 impl Client {
     pub fn new() -> Client {
@@ -76,14 +76,14 @@ impl Client {
 
         match scheme.as_str() {
             "http" => {
-                let (s, r) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+                let (s, r) = http1::handshake(TokioIo::new(io))
                     .await
                     .map_err(IoError::other)?;
                 tokio::spawn(r.with_upgrades());
                 *self.h1.write().await = Some(s);
             }
             super::HTTP2_PLAINTEXT_KNOWN => {
-                let (s, r) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io))
+                let (s, r) = http2::handshake(TokioExecutor::new(), TokioIo::new(io))
                     .await
                     .map_err(IoError::other)?;
                 tokio::spawn(r);
@@ -107,11 +107,11 @@ impl Client {
                     c.connect(domain, io).await?
                 };
                 if io.get_ref().1.alpn_protocol().is_some_and(|v|v == b"h2") {
-                    let (s , r) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io)).await.map_err(IoError::other)?;
+                    let (s , r) = http2::handshake(TokioExecutor::new(), TokioIo::new(io)).await.map_err(IoError::other)?;
                     tokio::spawn(r);
                     *self.h2.write().await = Some(s);
                 }else{
-                    let (s , r) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await.map_err(IoError::other)?;
+                    let (s , r) = http1::handshake(TokioIo::new(io)).await.map_err(IoError::other)?;
                     tokio::spawn(r);
                     *self.h1.write().await = Some(s);
                 }
