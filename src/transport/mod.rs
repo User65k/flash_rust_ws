@@ -30,17 +30,10 @@ use std::time::Duration;
 use hyper::Version;
 use tokio::net::TcpListener;
 
-use core::task::{Context, Poll};
-use std::pin::Pin;
-
-//use hyper::server::conn::AddrStream;
-//pub use tokio::net::TcpStream as PlainStream;
+pub use tokio::net::TcpStream as PlainStream;
 use log::{debug, error, trace};
 
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, RawFd};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 pub mod tls;
@@ -48,7 +41,6 @@ pub mod tls;
 /// A stream of connections from binding to an address.
 #[must_use = "streams do nothing unless polled"]
 pub struct PlainIncoming {
-    addr: SocketAddr,
     listener: TcpListener,
     sleep_on_errors: bool,
     tcp_nodelay: bool,
@@ -58,19 +50,11 @@ impl PlainIncoming {
     pub(super) fn from_std(std_listener: StdTcpListener) -> Result<Self, io::Error> {
         std_listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(std_listener)?;
-        let addr = listener.local_addr()?;
         Ok(PlainIncoming {
             listener,
-            addr,
             sleep_on_errors: true,
             tcp_nodelay: false,
         })
-    }
-
-    /// Get the local address bound to this listener.
-    #[allow(dead_code)]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.addr
     }
 
     /// Set the value of `TCP_NODELAY` option for accepted connections.
@@ -100,14 +84,14 @@ impl PlainIncoming {
         self.sleep_on_errors = val;
     }
 
-    pub(crate) async fn accept(&self) -> io::Result<PlainStream> {
+    pub(crate) async fn accept(&self) -> io::Result<(PlainStream, SocketAddr)> {
         loop {
             match self.listener.accept().await {
-                Ok((socket, addr)) => {
+                Ok((socket, remote)) => {
                     if let Err(e) = socket.set_nodelay(self.tcp_nodelay) {
                         trace!("error trying to set TCP nodelay: {}", e);
                     }
-                    return Ok(PlainStream::new(socket, addr));
+                    return Ok((socket, remote));
                 }
                 Err(e) => {
                     // Connection errors can be ignored directly, continue by
@@ -150,118 +134,18 @@ fn is_connection_error(e: &io::Error) -> bool {
 impl fmt::Debug for PlainIncoming {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PlainIncoming")
-            .field("addr", &self.addr)
             .field("sleep_on_errors", &self.sleep_on_errors)
             .field("tcp_nodelay", &self.tcp_nodelay)
             .finish()
     }
 }
 
-#[pin_project::pin_project]
-#[derive(Debug)]
-pub struct PlainStream {
-    #[pin]
-    inner: TcpStream,
-    pub(super) remote_addr: SocketAddr,
-}
-
 pub trait Connection: AsyncRead + AsyncWrite {
     /// Returns the remote (peer) address of this connection.
-    fn remote_addr(&self) -> SocketAddr;
     fn proto(&self) -> Version;
 }
 impl Connection for PlainStream {
-    #[inline]
-    fn remote_addr(&self) -> SocketAddr {
-        self.remote_addr
-    }
     fn proto(&self) -> Version {
         Version::HTTP_11
-    }
-}
-
-impl PlainStream {
-    pub(super) fn new(tcp: TcpStream, addr: SocketAddr) -> PlainStream {
-        PlainStream {
-            inner: tcp,
-            remote_addr: addr,
-        }
-    }
-
-    /// Consumes the PlainStream and returns the underlying IO object
-    #[inline]
-    #[allow(dead_code)]
-    pub fn into_inner(self) -> TcpStream {
-        self.inner
-    }
-
-    /// Attempt to receive data on the socket, without removing that data
-    /// from the queue, registering the current task for wakeup if data is
-    /// not yet available.
-    #[allow(dead_code)]
-    pub fn poll_peek(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<usize>> {
-        self.inner.poll_peek(cx, buf)
-    }
-}
-
-impl AsyncRead for PlainStream {
-    #[inline]
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        self.project().inner.poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for PlainStream {
-    #[inline]
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.project().inner.poll_write(cx, buf)
-    }
-
-    #[inline]
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        self.project().inner.poll_write_vectored(cx, bufs)
-    }
-
-    #[inline]
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // TCP flush is a noop
-        Poll::Ready(Ok(()))
-    }
-
-    #[inline]
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.project().inner.poll_shutdown(cx)
-    }
-
-    #[inline]
-    fn is_write_vectored(&self) -> bool {
-        // Note that since `self.inner` is a `TcpStream`, this could
-        // *probably* be hard-coded to return `true`...but it seems more
-        // correct to ask it anyway (maybe we're on some platform without
-        // scatter-gather IO?)
-        self.inner.is_write_vectored()
-    }
-}
-
-#[cfg(unix)]
-impl AsRawFd for PlainStream {
-    fn as_raw_fd(&self) -> RawFd {
-        self.inner.as_raw_fd()
     }
 }

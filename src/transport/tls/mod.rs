@@ -43,10 +43,6 @@ pub(crate) trait TLSBuilderTrait {
 
 pub type TlsStream = UnderlyingTLSStream<PlainStream>;
 impl Connection for TlsStream {
-    #[inline]
-    fn remote_addr(&self) -> SocketAddr {
-        self.get_ref().0.remote_addr
-    }
     fn proto(&self) -> hyper::Version {
         match self.get_ref().1.alpn_protocol() {
             Some(b"h2") => Version::HTTP_2,
@@ -67,8 +63,8 @@ impl TlsAcceptor {
             incoming,
         }
     }
-    pub(crate) async fn accept(&self) -> io::Result<TlsStream> {
-        let stream = self.incoming.accept().await?;
+    pub(crate) async fn accept(&self) -> io::Result<(TlsStream, SocketAddr)> {
+        let (stream, remote) = self.incoming.accept().await?;
         let mut stream = ParsedTLSConfig::get_accept_feature(self, stream).await?;
 
         #[cfg(feature = "tlsrust_acme")]
@@ -78,7 +74,7 @@ impl TlsAcceptor {
             return Err(io::Error::other(ACMEdone()));
         }
 
-        Ok(stream)
+        Ok((stream, remote))
     }
 }
 

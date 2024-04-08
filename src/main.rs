@@ -62,7 +62,7 @@ async fn prepare_hyper_servers(
                     let a = tls_cfg.get_acceptor(incoming);
                     break 's tokio::spawn(async move {
                         loop {
-                            let stream = match a.accept().await {
+                            let (stream, remote_addr) = match a.accept().await {
                                 Ok(s) => s,
                                 Err(e) => {
                                     #[cfg(feature = "tlsrust_acme")]
@@ -81,7 +81,6 @@ async fn prepare_hyper_servers(
                             };
                             let hcfg = hcfg.clone();
                             tokio::spawn(async move {
-                                let remote_addr = stream.remote_addr();
                                 trace!("Connected on {} by {}", &addr, &remote_addr);
                                 let service = service_fn(move |req: Request<Incoming>| {
                                     //TODO req.extensions_mut().insert(remote_addr);
@@ -132,7 +131,7 @@ async fn run_http11_server(
 ) -> Result<(), hyper::Error> {
     let builder = hyper::server::conn::http1::Builder::new();
     loop {
-        let stream = match incoming.accept().await {
+        let (stream, remote_addr) = match incoming.accept().await {
             Ok(s) => s,
             Err(e) => {
                 error!("{:?}", e);
@@ -142,7 +141,6 @@ async fn run_http11_server(
         let hcfg = hcfg.clone();
         let builder = builder.clone();
         tokio::spawn(async move {
-            let remote_addr = stream.remote_addr();
             trace!("Connected on {} by {}", &addr, &remote_addr);
             if let Err(err) = builder
                 .serve_connection(
