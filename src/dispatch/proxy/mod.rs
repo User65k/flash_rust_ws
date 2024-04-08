@@ -417,6 +417,7 @@ enum ProxySocket {
     Dns((String, u16)),
 }
 
+const HTTP2_PLAINTEXT_KNOWN: &str = "h2";
 impl TryFrom<String> for ProxyAdress {
     type Error = anyhow::Error;
 
@@ -425,11 +426,14 @@ impl TryFrom<String> for ProxyAdress {
         let p = uri.into_parts();
         let scheme = match p.scheme {
             Some(s) if s == uri::Scheme::HTTP => uri::Scheme::HTTP,
-            /*#[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
             Some(s) if s == uri::Scheme::HTTPS => uri::Scheme::HTTPS,
-            #[cfg(not(any(feature = "tlsrust", feature = "tlsnative")))]*/
+            #[cfg(not(any(feature = "tlsrust", feature = "tlsnative")))]
             Some(s) if s == uri::Scheme::HTTPS => {
                 anyhow::bail!("TLS support is disabled");
+            }
+            Some(s) if s.as_str() == HTTP2_PLAINTEXT_KNOWN => {
+                s
             }
             Some(s) => {
                 anyhow::bail!("{} is not known", s);

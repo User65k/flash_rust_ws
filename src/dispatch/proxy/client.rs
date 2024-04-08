@@ -1,8 +1,10 @@
 use std::io::{Error as IoError, ErrorKind};
 
 use hyper::{body::Incoming, Request, Response, Version};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::{net::TcpStream, sync::RwLock};
+#[cfg(feature = "tlsrust")]
+use tokio_rustls::rustls::pki_types::{DnsName, ServerName};
 
 use crate::body::IncomingBody;
 
@@ -56,8 +58,8 @@ impl Client {
             h2: RwLock::new(None),
         }
     }
-    async fn connect(&self, addr: &ProxySocket, scheme: &hyper::http::uri::Scheme) -> Result<(), IoError> {
-        let addr = match addr {
+    async fn connect(&self, proxy_addr: &ProxySocket, scheme: &hyper::http::uri::Scheme) -> Result<(), IoError> {
+        let addr = match proxy_addr {
             ProxySocket::Ip(addr) => *addr,
             ProxySocket::Dns((host, port)) => {
                 let host = host.clone();
@@ -79,24 +81,41 @@ impl Client {
                     .map_err(IoError::other)?;
                 tokio::spawn(r.with_upgrades());
                 *self.h1.write().await = Some(s);
-            } /*
-            "https" => {
-            //version depends on ALPN
-            let mut cc = tokio_rustls::rustls::client::ClientConfig::builder().dangerous().with_custom_certificate_verifier(verifier).with_no_client_auth();
-            cc.alpn_protocols.push(b"h2".to_vec());
-            cc.alpn_protocols.push(b"http/1.1".to_vec());
-            let c: tokio_rustls::TlsConnector = std::sync::Arc::new(cc).into();
-            let io = c.connect(domain, io).await?;
-            if io.get_ref().1.alpn_protocol().is_some_and(|v|v == b"h2") {
-            let (s , r) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io)).await.map_err(|e|IoError::other(e))?;
-            tokio::spawn(r);
-             *self.h2.borrow_mut() = Some(s);
-            }else{
-            let (s , r) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await.map_err(|e|IoError::other(e))?;
-            tokio::spawn(r);
-             *self.h1.borrow_mut() = Some(s);
             }
-            },*/
+            super::HTTP2_PLAINTEXT_KNOWN => {
+                let (s, r) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io))
+                    .await
+                    .map_err(IoError::other)?;
+                tokio::spawn(r);
+                *self.h2.write().await = Some(s);
+            }
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            "https" => {
+                //version depends on ALPN
+                #[cfg(feature = "tlsrust")]
+                let io = {
+                    let mut cc = tokio_rustls::rustls::client::ClientConfig::builder().dangerous().with_custom_certificate_verifier(std::sync::Arc::new(rustls::AnyCert::new())).with_no_client_auth();
+                    cc.alpn_protocols.push(b"h2".to_vec());
+                    cc.alpn_protocols.push(b"http/1.1".to_vec());
+                    let c: tokio_rustls::TlsConnector = std::sync::Arc::new(cc).into();
+
+                    let domain = match proxy_addr {
+                        ProxySocket::Ip(sa) => ServerName::IpAddress(sa.ip().into()),
+                        ProxySocket::Dns((n,_)) => ServerName::DnsName(DnsName::try_from(n.clone()).expect("name already worked in DNS")),
+                    };
+
+                    c.connect(domain, io).await?
+                };
+                if io.get_ref().1.alpn_protocol().is_some_and(|v|v == b"h2") {
+                    let (s , r) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(io)).await.map_err(IoError::other)?;
+                    tokio::spawn(r);
+                    *self.h2.write().await = Some(s);
+                }else{
+                    let (s , r) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await.map_err(IoError::other)?;
+                    tokio::spawn(r);
+                    *self.h1.write().await = Some(s);
+                }
+            },
             _ => unreachable!("config should not allow other values"),
         }
         Ok(())
@@ -109,3 +128,57 @@ impl Client {
         }
     }
 }
+
+#[cfg(feature = "tlsrust")]
+mod rustls {
+    use tokio_rustls::rustls::{client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier}, crypto::{verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms}, pki_types::{CertificateDer, ServerName}, DigitallySignedStruct};
+    #[derive(Debug)]
+    pub struct AnyCert(WebPkiSupportedAlgorithms);
+    impl AnyCert {
+        pub fn new() -> AnyCert {
+            AnyCert(tokio_rustls::rustls::crypto::ring::default_provider().signature_verification_algorithms)
+        }
+    }
+    impl ServerCertVerifier for AnyCert {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: tokio_rustls::rustls::pki_types::UnixTime,
+        ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+            verify_tls12_signature(message, cert, dss, &self.0)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+            verify_tls13_signature(message, cert, dss, &self.0)
+        }
+        fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+            self.0.supported_schemes()
+        }
+    }
+}
+
+/*
+     GET / HTTP/1.1
+     Host: server.example.com
+     Connection: Upgrade, HTTP2-Settings
+     Upgrade: h2c
+     HTTP2-Settings: <base64url encoding of HTTP/2 SETTINGS payload>
+
+*/
