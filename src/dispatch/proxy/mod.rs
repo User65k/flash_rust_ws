@@ -125,7 +125,7 @@ pub async fn forward(
     let query = req.query();
 
     let mut new_path = req.path().prefixed_as_abs_url_path(
-        &config.forward.path,
+        config.forward.path.as_str(),
         query.map(|s| s.len() + 1).unwrap_or(0),
         true,
     );

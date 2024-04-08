@@ -30,14 +30,14 @@ impl UnitTestUseCase {
     pub fn body(
         &self,
         req_path: WebPath<'_>,
-        web_mount: &Utf8PathBuf,
+        web_mount: &str,
         remote_addr: SocketAddr,
     ) -> FRWSResult {
         if let Some(r) = self.req_path {
             assert_eq!(req_path, r);
         }
         if let Some(m) = self.mount {
-            assert_eq!(web_mount.as_str(), m);
+            assert_eq!(web_mount, m);
         }
         if let Some(a) = self.remote_addr {
             assert_eq!(remote_addr, a);

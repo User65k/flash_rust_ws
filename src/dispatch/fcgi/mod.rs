@@ -17,7 +17,7 @@ use tokio::time::timeout;
 
 use crate::{
     body::{BoxBody, BufferedBody, FRWSResult, IncomingBody, IncomingBodyTrait as _},
-    config::{StaticFiles, Utf8PathBuf},
+    config::StaticFiles,
 };
 
 use super::staticf;
@@ -38,7 +38,6 @@ const SCRIPT_FILENAME: &[u8] = b"SCRIPT_FILENAME";
 pub async fn fcgi_call(
     fcgi_cfg: &FCGIApp,
     req: Req<IncomingBody>,
-    web_mount: &Utf8PathBuf,
     fs_full_path: Option<&Path>,
     path_info_offset: Option<usize>,
     remote_addr: SocketAddr,
@@ -56,7 +55,6 @@ pub async fn fcgi_call(
     let params = create_params(
         fcgi_cfg,
         &req,
-        web_mount,
         fs_full_path,
         path_info_offset,
         remote_addr,
@@ -143,7 +141,6 @@ pub async fn fcgi_call(
 fn create_params(
     fcgi_cfg: &FCGIApp,
     req: &Req<IncomingBody>,
-    web_mount: &Utf8PathBuf,
     // resolved path on file system
     fs_full_path: Option<&Path>,
     // offset in request path that is virtual/path_info
@@ -164,9 +161,9 @@ fn create_params(
 
         if let Some(pi) = path_info_offset {
             // - PATH_INFO derived from the portion of the URI path hierarchy following the part that identifies the script itself.
-            abs_name = req.path().prefixed_as_abs_url_path(web_mount, 0, false);
+            abs_name = req.path().prefixed_as_abs_url_path(req.mount(), 0, false);
 
-            let pi = abs_name.split_off(web_mount.as_str().len() + pi); //strip path_info
+            let pi = abs_name.split_off(req.mount().len() + pi); //strip path_info
 
             params.insert(
                 // must CGI/1.1  4.1.13, everybody cares
@@ -181,18 +178,16 @@ fn create_params(
                     if let Some(f) = index_file_name {
                         abs_name = req
                             .path()
-                            .prefixed_as_abs_url_path(web_mount, f.len(), false);
-                        //if !abs_name.ends_with(f) { // -> its a dir request
-                        if !abs_name.ends_with('/') {
+                            .prefixed_as_abs_url_path(req.mount(), f.len()+1, false);
+                        if !abs_name.ends_with('/') { // same as !req.path().is_empty()
                             abs_name.push('/');
                         }
                         abs_name.push_str(f);
-                        //}
                         break 'no_pi;
                     }
                 }
                 //nothing to add
-                abs_name = req.path().prefixed_as_abs_url_path(web_mount, 0, false);
+                abs_name = req.path().prefixed_as_abs_url_path(req.mount(), 0, false);
             }
         }
 
@@ -207,9 +202,9 @@ fn create_params(
 
         //let mut abs_web_mount = PathBuf::from("/");
         //abs_web_mount.push(web_mount);
-        let mut abs_web_mount = String::with_capacity(web_mount.as_str().len() + 1);
+        let mut abs_web_mount = String::with_capacity(req.mount().len() + 1);
         abs_web_mount.push('/');
-        abs_web_mount.push_str(web_mount.as_str());
+        abs_web_mount.push_str(req.mount());
 
         params.insert(
             // must CGI/1.1  4.1.13, everybody cares
@@ -220,7 +215,7 @@ fn create_params(
         //... so everything inside it is PATH_INFO
         let abs_path = req
             .path()
-            .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false);
+            .prefixed_as_abs_url_path("", 0, false);
         params.insert(
             // opt CGI/1.1   4.1.5
             Bytes::from(PATH_INFO),
@@ -266,10 +261,18 @@ fn create_params(
         Bytes::from(&b"frws"[..]),
     );
     if fcgi_cfg.set_request_uri {
+        let q = req.query();
+        let mut r_uri = req.path().prefixed_as_abs_url_path(req.mount(), q.map_or(0, |q| q.len() + 1), false);
+
+        if let Some(q) = q {
+            r_uri.push('?');
+            r_uri.push_str(q);
+        }
+
         params.insert(
             // REQUEST_URI common
             Bytes::from(REQUEST_URI),
-            Bytes::from(req.unsafe_original_path().to_string()),
+            Bytes::from(r_uri),
         );
     }
     if fcgi_cfg.set_script_filename {
@@ -282,7 +285,7 @@ fn create_params(
                 // I am guessing here
                 Bytes::from(
                     req.path()
-                        .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false),
+                        .prefixed_as_abs_url_path("", 0, false),
                 )
             },
         );

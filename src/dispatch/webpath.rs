@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
-use crate::config::{AbsPathBuf, Utf8PathBuf};
+use crate::config::AbsPathBuf;
 
 impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
     type Error = IoError;
@@ -26,6 +26,11 @@ impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
             match p {
                 "" => {
                     skip += 1;
+                    if len == path.len() {
+                        //a dir request ends with this and would clear the offset
+                        len += 1;
+                        break;
+                    }
                 }
                 "." => {
                     skip += 2;
@@ -120,12 +125,11 @@ impl<'a> WebPath<'a> {
     /// Create "/{pre}/{WebPath}" and leave extra_cap of free space at the end
     pub fn prefixed_as_abs_url_path(
         &self,
-        pre: &Utf8PathBuf,
+        pre: &str,
         extra_cap: usize,
         encode: bool,
     ) -> String {
         //https://docs.rs/hyper-staticfile/latest/src/hyper_staticfile/response_builder.rs.html#75-123
-        let pre = pre.as_str();
         let s = self.0.as_ref();
         let capa = pre.len() + s.len() + extra_cap + 2;
         let mut r = String::with_capacity(capa);
@@ -204,12 +208,6 @@ impl<B> Req<B> {
         }))
     }
     #[cfg(feature = "fcgi")]
-    /// return the original path of the request.
-    /// Not checked for anything.
-    pub fn unsafe_original_path(&self) -> &str {
-        self.parts.uri.path()
-    }
-    #[cfg(feature = "fcgi")]
     pub fn version(&self) -> hyper::Version {
         self.parts.version
     }
@@ -223,9 +221,6 @@ impl<B> Req<B> {
     pub fn query(&self) -> Option<&str> {
         self.parts.uri.query()
     }
-    pub fn body(&self) -> &B {
-        &self.body
-    }
     pub fn method(&self) -> &hyper::Method {
         &self.parts.method
     }
@@ -237,10 +232,14 @@ impl<B> Req<B> {
     }
     /// return the mount point
     pub fn mount(&self) -> &str {
-        match &self.path {
+        let m = match &self.path {
             WebPathSelfRef::Owned(s) => &s[..self.prefix_len],
             WebPathSelfRef::Borrowed(b) => &self.parts.uri.path()[*b..*b + self.prefix_len],
+        };
+        if m.ends_with('/') {
+            return &m[..self.prefix_len-1];
         }
+        m
     }
     /// check if `.path()` has a prefix and return the prefixes length
     pub fn is_prefix(&self, base: &'_ Path) -> Result<usize, ()> {
@@ -407,37 +406,37 @@ mod tests {
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false),
+                .prefixed_as_abs_url_path("", 0, false),
             "/test"
         );
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/"), 0, false),
+                .prefixed_as_abs_url_path("/", 0, false),
             "/test"
         );
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0, false),
+                .prefixed_as_abs_url_path("/something", 0, false),
             "/something/test"
         );
         assert_eq!(
             WebPath::try_from(&"/test".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0, false),
+                .prefixed_as_abs_url_path("/something/", 0, false),
             "/something/test"
         );
         assert_eq!(
             WebPath::try_from(&"/".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something/"), 0, false),
+                .prefixed_as_abs_url_path("/something/", 0, false),
             "/something/"
         );
         assert_eq!(
             WebPath::try_from(&"/".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from("/something"), 0, false),
+                .prefixed_as_abs_url_path("/something", 0, false),
             "/something/"
         );
     }
@@ -446,13 +445,13 @@ mod tests {
         assert_eq!(
             WebPath::try_from(&"/test%20bla/ja".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, true),
+                .prefixed_as_abs_url_path("", 0, true),
             "/test%20bla/ja"
         );
         assert_eq!(
             WebPath::try_from(&"/test%20bla/ja".parse().unwrap())
                 .unwrap()
-                .prefixed_as_abs_url_path(&Utf8PathBuf::from(""), 0, false),
+                .prefixed_as_abs_url_path("", 0, false),
             "/test bla/ja"
         );
     }
@@ -461,7 +460,16 @@ mod tests {
         let req = hyper::Request::get("/mount/dir/file").body(()).unwrap();
         let req = Req::test_on_mount(req);
         assert_eq!(req.path(), "dir/file");
-        assert_eq!(req.mount(), "mount/");
+        assert_eq!(req.mount(), "mount");
         assert!(matches!(req.path().0, Cow::Borrowed(_)));
+    }
+    #[test]
+    fn misc() {
+        assert!(matches!(
+            WebPath::try_from(&"/test/c/".parse().unwrap())
+                .unwrap()
+                .0,
+            Cow::Borrowed("test/c/")
+        ));
     }
 }

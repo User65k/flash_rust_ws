@@ -1,6 +1,5 @@
 use crate::body::{BoxBody, FRWSResult, IncomingBody};
-use crate::config::{AbsPathBuf, Utf8PathBuf};
-
+use crate::config::AbsPathBuf;
 use super::staticf::{self, resolve_path, return_file, ResolveResult};
 use super::Req;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -40,7 +39,6 @@ enum DavMethod {
 pub async fn do_dav(
     req: Req<IncomingBody>,
     config: &Config,
-    web_mount: &Utf8PathBuf,
     _remote_addr: SocketAddr,
 ) -> FRWSResult {
     let m = match req.method() {
@@ -124,9 +122,9 @@ pub async fn do_dav(
 
     match m {
         DavMethod::PROPFIND => {
-            propfind::handle_propfind(req, full_path, &config.dav, web_mount).await
+            propfind::handle_propfind(req, full_path, &config.dav).await
         }
-        DavMethod::GET => handle_get(req, &full_path, web_mount).await,
+        DavMethod::GET => handle_get(req, &full_path).await,
         DavMethod::PUT => handle_put(req, &full_path, config.dont_overwrite).await,
         DavMethod::MKCOL => handle_mkdir(&full_path).await,
         DavMethod::COPY => {
@@ -134,7 +132,7 @@ pub async fn do_dav(
                 req.headers(),
                 &full_path,
                 &config.dav,
-                web_mount,
+                req.mount(),
                 config.dont_overwrite,
             )
             .await
@@ -144,7 +142,7 @@ pub async fn do_dav(
                 req.headers(),
                 &full_path,
                 &config.dav,
-                web_mount,
+                req.mount(),
                 config.dont_overwrite,
             )
             .await
@@ -203,7 +201,6 @@ async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
 async fn handle_get(
     req: Req<IncomingBody>,
     full_path: &Path,
-    web_mount: &Utf8PathBuf,
 ) -> FRWSResult {
     //we could serve dir listings as well. with a litte webdav client :-D
     let (_, file_lookup) = resolve_path(full_path, false, &None).await?;
@@ -214,11 +211,11 @@ async fn handle_get(
             if is_dir_request {
                 list_dir(
                     full_path,
-                    req.path().prefixed_as_abs_url_path(web_mount, 0, true),
+                    req.path().prefixed_as_abs_url_path(req.mount(), 0, true),
                 )
                 .await
             } else {
-                Ok(staticf::redirect(&req, web_mount))
+                Ok(staticf::redirect(&req))
             }
         }
         ResolveResult::Found(file, metadata, mime) => return_file(req, file, metadata, mime).await,
@@ -334,7 +331,7 @@ async fn handle_put(req: Req<IncomingBody>, full_path: &Path, dont_overwrite: bo
 fn get_dst(
     header: &HeaderMap<HeaderValue>,
     root: &AbsPathBuf,
-    web_mount: &Path,
+    web_mount: &str,
 ) -> Result<PathBuf, IoError> {
     // Get the destination
     let dst = header
@@ -344,7 +341,7 @@ fn get_dst(
         .ok_or_else(|| IoError::new(ErrorKind::InvalidData, "no valid destination path"))?;
 
     let request_path = super::WebPath::try_from(&dst)?;
-    let path = request_path.strip_prefix(web_mount).map_err(|_| {
+    let path = request_path.strip_prefix(Path::new(web_mount)).map_err(|_| {
         IoError::new(
             ErrorKind::PermissionDenied,
             "destination path outside of mount",
@@ -357,7 +354,7 @@ async fn handle_copy(
     header: &HeaderMap<HeaderValue>,
     src_path: &Path,
     root: &AbsPathBuf,
-    web_mount: &Path,
+    web_mount: &str,
     mut dont_overwrite: bool,
 ) -> FRWSResult {
     let dst_path = get_dst(header, root, web_mount)?;
@@ -404,7 +401,7 @@ async fn handle_move(
     header: &HeaderMap<HeaderValue>,
     src_path: &Path,
     root: &AbsPathBuf,
-    web_mount: &Path,
+    web_mount: &str,
     mut dont_overwrite: bool,
 ) -> FRWSResult {
     let dst_path = get_dst(header, root, web_mount)?;

@@ -199,7 +199,6 @@ async fn web_mount_is_a_folder() {
                 header: None,
                 auth: None,
             },
-            &Utf8PathBuf::from("/mount"),
             "1.2.3.4:42".parse().unwrap(),
         )
         .await;
