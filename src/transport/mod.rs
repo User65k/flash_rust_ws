@@ -33,7 +33,6 @@ use tokio::net::TcpListener;
 pub use tokio::net::TcpStream as PlainStream;
 use log::{debug, error, trace};
 
-#[cfg(unix)]
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
