@@ -1,6 +1,6 @@
 use crate::{
     body::{BoxBody, FRWSResult, IncomingBody},
-    config::Utf8PathBuf,
+    config::{HeaderNameCfg, Utf8PathBuf},
     dispatch::{upgrades::MyUpgraded, webpath::Req},
 };
 use bytes::{Bytes, BytesMut};
@@ -64,7 +64,7 @@ fn remove_connection_headers(v: Version, headers: &mut HeaderMap) {
     }
 }
 
-fn get_upgrade_type(headers: &HeaderMap) -> Option<String> {
+fn get_upgrade_type(headers: &mut HeaderMap) -> Option<HeaderValue> {
     if headers
         .get(header::CONNECTION)
         .map(|value| {
@@ -76,19 +76,12 @@ fn get_upgrade_type(headers: &HeaderMap) -> Option<String> {
         })
         .unwrap_or(false)
     {
-        if let Some(upgrade_value) = headers.get(header::UPGRADE) {
+        if let Some(upgrade_value) = headers.remove(header::UPGRADE) {
             debug!(
                 "Found upgrade header with value: {:?}",
                 upgrade_value
             );
-            // https://book.hacktricks.xyz/pentesting-web/h2c-smuggling
-            if upgrade_value == "h2c" {
-                // an http proto upgrade needs to be done with the proxy, not the system behind it
-                // as the proto upgrade is not specific to this usecase it is not handled here (if at all)
-                return None;
-            }
-
-            return Some(upgrade_value.to_str().unwrap().to_owned());
+            return Some(upgrade_value);
         }
     }
 
@@ -96,6 +89,7 @@ fn get_upgrade_type(headers: &HeaderMap) -> Option<String> {
 }
 
 fn change_req_from_h2_to_h11(req: &mut Request<IncomingBody>) {
+    trace!("downgrading from h2 to h1.1");
     let mut value_buf = BytesMut::with_capacity(512);
     let mut first = false;
     for v in req.headers().get_all(header::COOKIE) {
@@ -114,6 +108,41 @@ fn change_req_from_h2_to_h11(req: &mut Request<IncomingBody>) {
         );
     }
     *req.version_mut() = hyper::Version::HTTP_11;
+}
+
+fn check_upgrade(up: HeaderValue, config: &Proxy) -> Option<HeaderValue> {
+    if let Some(upgrades) = config.allowed_upgrades.as_ref() {
+        //check the allow list
+        for u in upgrades {
+            if u == &up {
+                return Some(up);
+            }
+        }
+        None
+    }else{
+        // any upgrade is ok, but...
+        // https://book.hacktricks.xyz/pentesting-web/h2c-smuggling
+        if up == "h2c" {
+            // an http proto upgrade needs to be done with the proxy, not the system behind it
+            // as the proto upgrade is not specific to this usecase it is not handled here (if we handle it at all)
+            None
+        }else{
+            Some(up)
+        }
+    }
+}
+
+fn check_method(method: &hyper::Method, config: &Proxy) -> bool {
+    if let Some(methods) = config.allowed_methods.as_ref() {
+        for m in methods {
+            if method == m.as_str() {
+                return true;
+            }
+        }
+        false
+    }else{
+        method != hyper::Method::CONNECT
+    }
 }
 
 pub async fn forward(
@@ -136,6 +165,13 @@ pub async fn forward(
     }
 
     let (parts, body) = req.into_parts();
+
+    if !check_method(&parts.method, config) {
+        let mut resp = Response::new(BoxBody::empty());
+        *resp.status_mut() = hyper::StatusCode::METHOD_NOT_ALLOWED;
+        return Ok(resp);
+    }
+
     let mut req = hyper::Request::from_parts(parts, body);
 
     let contains_te_trailers_value = req
@@ -150,7 +186,7 @@ pub async fn forward(
         })
         .unwrap_or(false);
     let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
-    let request_upgrade = get_upgrade_type(req.headers());
+    let request_upgrade = get_upgrade_type(req.headers_mut()).and_then(|u|check_upgrade(u, config));
 
     remove_connection_headers(req.version(), req.headers_mut());
     remove_hop_by_hop_headers(req.headers_mut());
@@ -241,9 +277,11 @@ pub async fn forward(
         req.headers_mut().remove(header::VIA);
     }
 
-    if request_upgraded.is_some() && request_upgrade.is_some() {
+    if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
         req.headers_mut()
             .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+        req.headers_mut()
+            .insert(header::UPGRADE, val.clone());
     }
 
     let req_vers = config
@@ -264,11 +302,11 @@ pub async fn forward(
             .path_and_query(new_path)
             .build()
             .unwrap(); //can't happen - all parts set
-        trace!("Forward to {}", &new_uri);
+        trace!("Forward h2 to {}", &new_uri);
         *req.uri_mut() = new_uri;
     } else {
         let new_uri = Uri::builder().path_and_query(new_path).build().unwrap(); //can't happen - only path_and_query set
-        trace!("Forward to {}", &new_uri);
+        trace!("Forward h1 to {}", &new_uri);
         *req.uri_mut() = new_uri;
         //new host header
         req.headers_mut()
@@ -289,7 +327,7 @@ pub async fn forward(
     };
     debug!("response: {:?} {:?}", resp.status(), resp.headers());
 
-    let resp_upgrade = get_upgrade_type(resp.headers());
+    let resp_upgrade = get_upgrade_type(resp.headers_mut());
     remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());
 
@@ -335,6 +373,10 @@ pub async fn forward(
             //was removed by remove_hop_by_hop_headers
             resp.headers_mut()
                 .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+            if let Some(u) = resp_upgrade {
+                resp.headers_mut()
+                .insert(header::UPGRADE, u);
+            }
 
             tokio::spawn(async move {
                 let mut request_upgraded =
@@ -390,11 +432,11 @@ pub struct Proxy {
     pub force_dir: bool,
     //timeout: u8,
     //max_req_body_size: u32,
-    //allowed_upgrades: Vec<String>,
-    //allowed_methods: Vec<String>,
+    allowed_upgrades: Option<Vec<String>>,
+    allowed_methods: Option<Vec<String>>,
     //header_policy: u8,
-    //filter_req_header: Vec<HeaderNameCfg>,
-    //filter_resp_header: Vec<HeaderNameCfg>,
+    filter_req_header: Option<Vec<HeaderNameCfg>>,
+    filter_resp_header: Option<Vec<HeaderNameCfg>>,
     #[serde(skip)]
     client: Option<Client>,
 }
