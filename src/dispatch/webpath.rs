@@ -9,6 +9,10 @@ use crate::config::AbsPathBuf;
 impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
     type Error = IoError;
     fn try_from(uri: &'a Uri) -> Result<Self, Self::Error> {
+        if !uri.path().starts_with('/') {
+            return Err(IoError::new(ErrorKind::InvalidData, "path does not start with /"));
+        }
+
         let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
 
         //let needs_reencoding = matches!(path, Cow::Owned(_));

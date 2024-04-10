@@ -272,6 +272,28 @@ pub(crate) mod tests {
         test.write_all(b"GET /a/b HTTP/1.1\r\n\r\n").await.unwrap();
         let mut buf = [0u8; 15];
         test.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf[..15], b"HTTP/1.1 200 OK");
+        assert_eq!(&buf, b"HTTP/1.1 200 OK");
+    }
+    #[tokio::test]
+    async fn http_connect() {
+        let (l, a) = local_socket_pair().await.unwrap();
+
+        let mut listening_ifs = HashMap::new();
+        let mut cfg = HostCfg::new(l.into_std().unwrap());
+        let mut vh = VHost::new(a);
+        vh.paths.insert(
+            Utf8PathBuf::from("a"),
+            UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
+        );
+        cfg.default_host = Some(vh);
+        listening_ifs.insert(a, cfg);
+
+        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+
+        let mut test = TcpStream::connect(a).await.unwrap();
+        test.write_all(b"CONNECT host:80 HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut buf = [0u8; 24];
+        test.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"HTTP/1.1 400 Bad Request");
     }
 }
