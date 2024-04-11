@@ -10,7 +10,7 @@ use crate::{
     config::{UseCase, Utf8PathBuf},
 };
 
-fn create_conf(f: impl FnOnce(&mut Proxy)) -> Proxy{
+fn create_conf(f: impl FnOnce(&mut Proxy)) -> Proxy {
     let mut p = Proxy {
         forward: "http://ignored/".to_string().try_into().unwrap(),
         add_forwarded_header: ForwardedHeader::Remove,
@@ -63,7 +63,6 @@ async fn test_forward(
 
     proxy.forward.addr = ProxySocket::Ip(a);
     proxy.setup().await.unwrap();
-    let _ = app_listener.accept().await.unwrap(); //empty connection from setup
 
     let m = tokio::spawn(async move {
         let res = forward(req, "1.2.3.4:42".parse().unwrap(), &proxy).await;
@@ -79,7 +78,7 @@ async fn simple_fwd() {
         .unwrap();
     let (mut s, t) = test_forward(
         req,
-        create_conf(|p|{
+        create_conf(|p| {
             p.forward = "http://ignored/base_path".to_string().try_into().unwrap();
             p.add_via_header_to_client = Some("rproxy1".to_string());
         }),
@@ -110,7 +109,7 @@ async fn add_headers() {
         .unwrap();
     let (mut s, t) = test_forward(
         req,
-        create_conf(|p|{
+        create_conf(|p| {
             p.add_forwarded_header = ForwardedHeader::Replace;
             p.add_x_forwarded_for_header = true;
             p.add_via_header_to_server = Some("rproxy1".to_string());
@@ -149,11 +148,7 @@ async fn remove_hop_headers() {
         .header(header::PROXY_AUTHORIZATION, "value")
         .body(TestBody::empty())
         .unwrap();
-    let (mut s, t) = test_forward(
-        req,
-        create_conf(|_p|()),
-    )
-    .await;
+    let (mut s, t) = test_forward(req, create_conf(|_p| ())).await;
 
     let mut buf = Vec::with_capacity(4096);
     s.read_buf(&mut buf).await.unwrap();
@@ -184,8 +179,7 @@ async fn web_mount_is_a_folder() {
 
     let req = Req::test_on_mount(req);
 
-    let proxy = 
-    create_conf(|p|{
+    let proxy = create_conf(|p| {
         p.forward = "http://localhost:0/".to_string().try_into().unwrap();
     });
 
@@ -212,7 +206,7 @@ async fn force_dir_false() {
     let req = Request::get("/mount").body(TestBody::empty()).unwrap();
     let (mut s, t) = test_forward(
         req,
-        create_conf(|p|{
+        create_conf(|p| {
             p.force_dir = false;
         }),
     )
@@ -239,7 +233,7 @@ async fn header_chaining() {
         .unwrap();
     let (mut s, t) = test_forward(
         req,
-        create_conf(|p|{
+        create_conf(|p| {
             p.add_forwarded_header = ForwardedHeader::Extend;
             p.add_x_forwarded_for_header = true;
             p.add_via_header_to_client = Some("my_front".to_string());
@@ -288,7 +282,6 @@ async fn full_server_test(
     });
     proxy.forward.addr = ProxySocket::Ip(target_add);
     proxy.setup().await.unwrap();
-    let _ = target_listener.accept().await.unwrap(); //empty connection from setup
 
     let mut listening_ifs = std::collections::HashMap::new();
     let mut cfg = crate::config::HostCfg::new(server_listener.into_std()?);
@@ -404,36 +397,26 @@ async fn h11_keep_alive() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .await
             .unwrap();
-        
     });
     let mut buf = Vec::with_capacity(4096);
 
-    client
-        .write_all(b"GET /a HTTP/1.1\r\n\r\n")
-        .await
-        .unwrap();
+    client.write_all(b"GET /a HTTP/1.1\r\n\r\n").await.unwrap();
 
     client.read_buf(&mut buf).await.unwrap();
     assert_eq!(&buf[..15], b"HTTP/1.1 200 OK");
 
     buf.clear();
-    client
-        .write_all(b"GET /a HTTP/1.1\r\n\r\n")
-        .await
-        .unwrap();
+    client.write_all(b"GET /a HTTP/1.1\r\n\r\n").await.unwrap();
 
     client.read_buf(&mut buf).await.unwrap();
     assert_eq!(&buf[..15], b"HTTP/1.1 200 OK");
 
     buf.clear();
-    client
-        .write_all(b"GET /a HTTP/1.1\r\n\r\n")
-        .await
-        .unwrap();
+    client.write_all(b"GET /a HTTP/1.1\r\n\r\n").await.unwrap();
 
     client.read_buf(&mut buf).await.unwrap();
     assert_eq!(&buf[..15], b"HTTP/1.1 200 OK");
-    
+
     t.await.unwrap();
 }
 
@@ -445,19 +428,23 @@ async fn h2_simple_fwd() {
         .unwrap();
     let (s, t) = test_forward(
         req,
-        create_conf(|p|{
+        create_conf(|p| {
             p.forward = "h2://ignored/base_path".to_string().try_into().unwrap();
         }),
     )
     .await;
 
-    tokio::spawn(hyper::server::conn::http2::Builder::new(
-        hyper_util::rt::TokioExecutor::new(),
-    )
-    .serve_connection(hyper_util::rt::TokioIo::new(s), hyper::service::service_fn(|req| async move {
-        assert_eq!(req.uri(), "h2://ignored/base_path/some/path");
-        hyper::Response::builder().status(301).body(TestBody::empty())
-    }))
+    tokio::spawn(
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .serve_connection(
+                hyper_util::rt::TokioIo::new(s),
+                hyper::service::service_fn(|req| async move {
+                    assert_eq!(req.uri(), "h2://ignored/base_path/some/path");
+                    hyper::Response::builder()
+                        .status(301)
+                        .body(TestBody::empty())
+                }),
+            ),
     );
 
     let r = t.await.unwrap();

@@ -12,11 +12,11 @@ use hyper::{
 };
 use log::{debug, error, trace};
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::{
     convert::TryFrom,
     io::{Error as IoError, ErrorKind},
 };
-use std::net::SocketAddr;
 use tokio::io::copy_bidirectional;
 
 mod client;
@@ -77,10 +77,7 @@ fn get_upgrade_type(headers: &mut HeaderMap) -> Option<HeaderValue> {
         .unwrap_or(false)
     {
         if let Some(upgrade_value) = headers.remove(header::UPGRADE) {
-            debug!(
-                "Found upgrade header with value: {:?}",
-                upgrade_value
-            );
+            debug!("Found upgrade header with value: {:?}", upgrade_value);
             return Some(upgrade_value);
         }
     }
@@ -119,14 +116,14 @@ fn check_upgrade(up: HeaderValue, config: &Proxy) -> Option<HeaderValue> {
             }
         }
         None
-    }else{
+    } else {
         // any upgrade is ok, but...
         // https://book.hacktricks.xyz/pentesting-web/h2c-smuggling
         if up == "h2c" {
             // an http proto upgrade needs to be done with the proxy, not the system behind it
             // as the proto upgrade is not specific to this usecase it is not handled here (if we handle it at all)
             None
-        }else{
+        } else {
             Some(up)
         }
     }
@@ -140,7 +137,7 @@ fn check_method(method: &hyper::Method, config: &Proxy) -> bool {
             }
         }
         false
-    }else{
+    } else {
         method != hyper::Method::CONNECT
     }
 }
@@ -150,7 +147,6 @@ pub async fn forward(
     remote_addr: SocketAddr,
     config: &Proxy,
 ) -> FRWSResult {
-
     let query = req.query();
 
     let mut new_path = req.path().prefixed_as_abs_url_path(
@@ -186,7 +182,8 @@ pub async fn forward(
         })
         .unwrap_or(false);
     let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
-    let request_upgrade = get_upgrade_type(req.headers_mut()).and_then(|u|check_upgrade(u, config));
+    let request_upgrade =
+        get_upgrade_type(req.headers_mut()).and_then(|u| check_upgrade(u, config));
 
     remove_connection_headers(req.version(), req.headers_mut());
     remove_hop_by_hop_headers(req.headers_mut());
@@ -280,8 +277,7 @@ pub async fn forward(
     if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
         req.headers_mut()
             .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
-        req.headers_mut()
-            .insert(header::UPGRADE, val.clone());
+        req.headers_mut().insert(header::UPGRADE, val.clone());
     }
 
     let req_vers = config
@@ -374,8 +370,7 @@ pub async fn forward(
             resp.headers_mut()
                 .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
             if let Some(u) = resp_upgrade {
-                resp.headers_mut()
-                .insert(header::UPGRADE, u);
+                resp.headers_mut().insert(header::UPGRADE, u);
             }
 
             tokio::spawn(async move {
@@ -474,9 +469,7 @@ impl TryFrom<String> for ProxyAdress {
             Some(s) if s == uri::Scheme::HTTPS => {
                 anyhow::bail!("TLS support is disabled");
             }
-            Some(s) if s.as_str() == HTTP2_PLAINTEXT_KNOWN => {
-                s
-            }
+            Some(s) if s.as_str() == HTTP2_PLAINTEXT_KNOWN => s,
             Some(s) => {
                 anyhow::bail!("{} is not known", s);
             }
