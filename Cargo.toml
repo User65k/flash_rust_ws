@@ -1,6 +1,6 @@
 [package]
 name = "flash_rust_ws"
-version = "0.4.5"
+version = "0.5.0"
 authors = ["User65k <15049544+User65k@users.noreply.github.com>"]
 edition = "2021"
 license = "AGPL-3.0"
@@ -50,6 +50,8 @@ tokio-util = { version = "0.7", features=["codec"], optional = true }
 #webdav
 xml-rs = { version = "0.8", optional = true }
 chrono = { version = "0.4", optional = true }
+#proxy
+deadpool = {version="0.11", features=["unmanaged"], default-features = false, optional = true }
 
 anyhow = "1.0"
 async-stream-connection = {version="^1.0.1", features=["serde"], optional = true}
@@ -67,7 +69,7 @@ logrot = ["log4rs/background_rotation"]
 fcgi = ["async-fcgi", "async-stream-connection"]
 websocket = ["websocket-codec", "tokio-util", "futures-util/sink", "async-stream-connection"]
 webdav = ["xml-rs", "chrono"]
-proxy = ["hyper/client", "hyper-util/client", "hyper-util/client-legacy", "hyper-util/http1", "hyper-util/http2"]
+proxy = ["hyper/client", "deadpool"]
 
 [[bin]]
 name = "flash_rust_ws"
