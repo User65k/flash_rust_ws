@@ -1,4 +1,4 @@
-use super::ProxySocket;
+use super::cfg::ProxySocket;
 use crate::body::IncomingBody;
 use deadpool::unmanaged::{Object, Pool, PoolError};
 use hyper::{
@@ -7,7 +7,7 @@ use hyper::{
     Request, Response, Version,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use tokio::{net::TcpStream, sync::RwLock};
 
 impl super::Proxy {
@@ -15,16 +15,7 @@ impl super::Proxy {
         let client = Client::new();
 
         // check DNS and connection by just connecting
-        client
-            .connect(&self.forward.addr, &self.forward.scheme)
-            .await
-            .map_err(|e| {
-                if e.kind() == ErrorKind::NotFound {
-                    "No DNS Address could be obtained".to_string()
-                } else {
-                    e.to_string()
-                }
-            })?;
+        client.connect(self).await.map_err(|e| e.to_string())?;
 
         self.client = Some(client);
         Ok(())
@@ -78,9 +69,7 @@ impl super::Proxy {
                     Ok(()) => return h2.send_request(req).await.map_err(IoError::other),
                 }
             }
-            client
-                .connect(&self.forward.addr, &self.forward.scheme)
-                .await?;
+            client.connect(self).await?;
         }
     }
 }
@@ -95,7 +84,7 @@ async fn delay_drop(mut h1: Object<http1::SendRequest<IncomingBody>>) {
 
 /// simple HTTPClient to send requests
 ///
-/// does not support connection pooling, but will reuse connections on h2 and h1.1 (via keep-alive)
+/// does support connection pooling for h1 and will reuse connections on h2 and h1.1 (via keep-alive)
 #[derive(Debug)]
 pub struct Client {
     h1: RwLock<Option<Pool<http1::SendRequest<IncomingBody>>>>,
@@ -108,17 +97,13 @@ impl Client {
             h2: RwLock::new(None),
         }
     }
-    async fn add_to_h1_pool(&self, s: http1::SendRequest<IncomingBody>) {
+    async fn add_to_h1_pool(&self, s: http1::SendRequest<IncomingBody>, max_size: usize) {
         let mut lock = self.h1.write().await;
-        let pool = lock.get_or_insert(Pool::new(10));
+        let pool = lock.get_or_insert(Pool::new(max_size));
         pool.try_add(s).expect("pool should never close");
     }
-    async fn connect(
-        &self,
-        proxy_addr: &ProxySocket,
-        scheme: &hyper::http::uri::Scheme,
-    ) -> Result<(), IoError> {
-        let addr = match proxy_addr {
+    async fn connect(&self, cfg: &super::Proxy) -> Result<(), IoError> {
+        let addr = match &cfg.forward.addr {
             ProxySocket::Ip(addr) => *addr,
             ProxySocket::Dns((host, port)) => {
                 let host = host.clone();
@@ -128,20 +113,20 @@ impl Client {
                 })
                 .await??
                 .next()
-                .ok_or(ErrorKind::NotFound)?
+                .ok_or(IoError::other("No DNS Address could be obtained"))?
             }
         };
         let io = TcpStream::connect(addr).await?;
 
-        match scheme.as_str() {
+        match cfg.forward.scheme.as_str() {
             "http" => {
                 let (s, r) = http1::handshake(TokioIo::new(io))
                     .await
                     .map_err(IoError::other)?;
                 tokio::spawn(r.with_upgrades());
-                self.add_to_h1_pool(s).await;
+                self.add_to_h1_pool(s, cfg.h1_pool_size).await;
             }
-            super::HTTP2_PLAINTEXT_KNOWN => {
+            super::cfg::HTTP2_PLAINTEXT_KNOWN => {
                 let (s, r) = http2::handshake(TokioExecutor::new(), TokioIo::new(io))
                     .await
                     .map_err(IoError::other)?;
@@ -151,7 +136,13 @@ impl Client {
             #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
             "https" => {
                 //version depends on ALPN
-                let (io, is_h2) = Self::wrap_tls(io, proxy_addr).await?;
+
+                let roots = cfg
+                    .tls_root
+                    .as_ref()
+                    .ok_or(IoError::other("No TLS root cert configured"))?;
+
+                let (io, is_h2) = Self::wrap_tls(io, &cfg.forward.addr, roots).await?;
                 if is_h2 {
                     let (s, r) = http2::handshake(TokioExecutor::new(), TokioIo::new(io))
                         .await
@@ -163,7 +154,7 @@ impl Client {
                         .await
                         .map_err(IoError::other)?;
                     tokio::spawn(r);
-                    self.add_to_h1_pool(s).await;
+                    self.add_to_h1_pool(s, cfg.h1_pool_size).await;
                 }
             }
             _ => unreachable!("config should not allow other values"),
@@ -177,90 +168,72 @@ impl Client {
             Version::HTTP_11
         }
     }
-    #[cfg(feature = "tlsrust")]
-    async fn wrap_tls(
-        io: TcpStream,
-        proxy_addr: &ProxySocket,
-    ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, bool), IoError> {
-        use tokio_rustls::rustls::client::ClientConfig;
-        use tokio_rustls::rustls::pki_types::{DnsName, ServerName};
-        //use tokio_rustls::rustls::RootCertStore;
-
-        //let mut root_store = RootCertStore::empty();
-        //crate::transport::tls::rustls::load_certs(a);
-        //root_store.add(der);
-
-        let mut cc = ClientConfig::builder()
-            //.with_root_certificates(root_store).with_no_client_auth();
-            .dangerous()
-            .with_custom_certificate_verifier(std::sync::Arc::new(rustls::AnyCert::new()))
-            .with_no_client_auth();
-        cc.alpn_protocols.push(b"h2".to_vec());
-        cc.alpn_protocols.push(b"http/1.1".to_vec());
-        let c: tokio_rustls::TlsConnector = std::sync::Arc::new(cc).into();
-
-        let domain = match proxy_addr {
-            ProxySocket::Ip(sa) => ServerName::IpAddress(sa.ip().into()),
-            ProxySocket::Dns((n, _)) => ServerName::DnsName(
-                DnsName::try_from(n.clone()).expect("name already worked in DNS"),
-            ),
-        };
-
-        let s = c.connect(domain, io).await?;
-        let is_h2 = s.get_ref().1.alpn_protocol().is_some_and(|v| v == b"h2");
-        Ok((s, is_h2))
-    }
 }
 
 #[cfg(feature = "tlsrust")]
-mod rustls {
-    use tokio_rustls::rustls::{
-        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        crypto::{verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms},
-        pki_types::{CertificateDer, ServerName},
-        DigitallySignedStruct,
-    };
-    #[derive(Debug)]
-    pub struct AnyCert(WebPkiSupportedAlgorithms);
-    impl AnyCert {
-        pub fn new() -> AnyCert {
-            AnyCert(
-                tokio_rustls::rustls::crypto::ring::default_provider()
-                    .signature_verification_algorithms,
-            )
+pub mod tls {
+    use super::ProxySocket;
+    use serde::Deserialize;
+    use std::io::Error as IoError;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::net::TcpStream;
+    use tokio_rustls::rustls::client::ClientConfig;
+    use tokio_rustls::rustls::pki_types::{DnsName, ServerName};
+    use tokio_rustls::rustls::RootCertStore;
+
+    #[derive(Deserialize, Debug)]
+    #[serde(try_from = "PathBuf")]
+    pub struct RootCert(Arc<RootCertStore>);
+
+    impl TryFrom<PathBuf> for RootCert {
+        type Error = anyhow::Error;
+
+        fn try_from(value: PathBuf) -> Result<Self, Self::Error> {
+            // Open certificate file.
+            let certfile = std::fs::File::open(value)?;
+            let mut reader = std::io::BufReader::new(certfile);
+
+            // Load and return certificates
+            let certs = rustls_pemfile::certs(&mut reader).filter_map(|e| e.ok());
+
+            let mut root_store = RootCertStore::empty();
+            for der in certs {
+                root_store.add(der)?;
+            }
+            Ok(Self(Arc::new(root_store)))
         }
     }
-    impl ServerCertVerifier for AnyCert {
-        fn verify_server_cert(
-            &self,
-            _end_entity: &CertificateDer<'_>,
-            _intermediates: &[CertificateDer<'_>],
-            _server_name: &ServerName<'_>,
-            _ocsp_response: &[u8],
-            _now: tokio_rustls::rustls::pki_types::UnixTime,
-        ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
-            Ok(ServerCertVerified::assertion())
-        }
 
-        fn verify_tls12_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
-            verify_tls12_signature(message, cert, dss, &self.0)
+    impl RootCert {
+        fn get_store(&self) -> Arc<RootCertStore> {
+            self.0.clone()
         }
+    }
 
-        fn verify_tls13_signature(
-            &self,
-            message: &[u8],
-            cert: &CertificateDer<'_>,
-            dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
-            verify_tls13_signature(message, cert, dss, &self.0)
-        }
-        fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
-            self.0.supported_schemes()
+    impl super::Client {
+        pub async fn wrap_tls(
+            io: TcpStream,
+            proxy_addr: &ProxySocket,
+            roots: &RootCert,
+        ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, bool), IoError> {
+            let mut cc = ClientConfig::builder()
+                .with_root_certificates(roots.get_store())
+                .with_no_client_auth();
+            cc.alpn_protocols.push(b"h2".to_vec());
+            cc.alpn_protocols.push(b"http/1.1".to_vec());
+            let c: tokio_rustls::TlsConnector = std::sync::Arc::new(cc).into();
+
+            let domain = match proxy_addr {
+                ProxySocket::Ip(sa) => ServerName::IpAddress(sa.ip().into()),
+                ProxySocket::Dns((n, _)) => ServerName::DnsName(
+                    DnsName::try_from(n.clone()).expect("name already worked for DNS"),
+                ),
+            };
+
+            let s = c.connect(domain, io).await?;
+            let is_h2 = s.get_ref().1.alpn_protocol().is_some_and(|v| v == b"h2");
+            Ok((s, is_h2))
         }
     }
 }

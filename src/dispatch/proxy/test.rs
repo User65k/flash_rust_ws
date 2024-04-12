@@ -1,3 +1,4 @@
+use super::cfg::ProxySocket;
 use super::*;
 use hyper::Request;
 use tokio::{
@@ -23,6 +24,8 @@ fn create_conf(f: impl FnOnce(&mut Proxy)) -> Proxy {
         allowed_methods: None,
         filter_req_header: None,
         filter_resp_header: None,
+        h1_pool_size: 2,
+        tls_root: None,
     };
     f(&mut p);
     p
