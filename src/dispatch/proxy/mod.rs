@@ -1,5 +1,6 @@
 use crate::{
     body::{BoxBody, FRWSResult, IncomingBody},
+    config::HeaderNameCfg,
     dispatch::{upgrades::MyUpgraded, webpath::Req},
 };
 use bytes::{Bytes, BytesMut};
@@ -138,6 +139,18 @@ fn check_method(method: &hyper::Method, config: &Proxy) -> bool {
         method != hyper::Method::CONNECT
     }
 }
+fn filter_header(headers: &mut HeaderMap, filter: &Option<Vec<HeaderNameCfg>>) {
+    if let Some(allowed) = filter {
+        let old = core::mem::replace(headers, HeaderMap::with_capacity(headers.len()));
+        let mut last = true;
+        headers.extend(old.into_iter().filter(|(h, _v)| {
+            if let Some(h) = h {
+                last = allowed.iter().any(|a| a.0 == *h);
+            }
+            last
+        }));
+    }
+}
 
 pub async fn forward(
     req: Req<IncomingBody>,
@@ -188,6 +201,7 @@ pub async fn forward(
         req.headers_mut()
             .insert(header::TE, HeaderValue::from_static(TRAILERS));
     }
+    filter_header(req.headers_mut(), &config.filter_req_header);
 
     match config.add_forwarded_header {
         ForwardedHeader::Replace | ForwardedHeader::Extend => {
@@ -323,6 +337,7 @@ pub async fn forward(
     let resp_upgrade = get_upgrade_type(resp.headers_mut());
     remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());
+    filter_header(resp.headers_mut(), &config.filter_resp_header);
 
     if let Some(host) = &config.add_via_header_to_client {
         //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Via

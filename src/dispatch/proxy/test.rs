@@ -453,3 +453,52 @@ async fn h2_simple_fwd() {
     let r = t.await.unwrap();
     assert_eq!(r.status(), 301);
 }
+
+#[tokio::test]
+async fn filter_headers() {
+    let req = Request::get("/mount/")
+        .header("some", "value")
+        .header("thing", "value")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+        .header("Accept-Encoding", "gzip, deflate, br, zstd")
+        .header("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
+        .header("Cache-Control", "max-age=0")
+        .header("Cookie", "_octo=GH1.1.821435309.1704463705; logged_in=no; _gh_sess=2qhyBsnL%2FTCqdE1MoHl9%2BMUWchfdzRz8YHHEbIFHaLSun5TRiGqaRZG88C%2B7g38pdQTspFFR3cJrrffmdxbja7XIXNTmkc7a9WT6m2EcqC0u8Ut4hWkz0JlEwSGe3bNGm60kYMcLeYF0h%2BtPLUp57gBxf6iy7l%2BljNjEVuTpQiBBMo%2FAT5VVbGXO2%2Fd%2B8tGskyizS9I227SYpU7N8WN7CI%2BGFcvLDpqmF4hr8WwJhO4OoW0hEwoyYwd4tlsePR5PtzJiZHPD91Pzow1w6dW56w%3D%3D--H8yiiZL8FqeSie7Z--3kYhBPCwCOlTLbLTigkNmw%3D%3D; preferred_color_mode=light; tz=Europe%2FBerlin")
+        .header("If-None-Match", "W/\"39da1b67f97f7caf432e699491ee62a4")
+        .header("Referer", "https://nnethercote.github.io/")
+        .header("Sec-Ch-Ua", "\"Chromium\";v=\"123\", \"Not:A-Brand\";v=\"8\"")
+        .header("Sec-Ch-Ua-Mobile", "?0")
+        .header("Sec-Ch-Ua-Platform", "\"Linux\"")
+        .header("Sec-Fetch-Dest", "document")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Site", "same-origin")
+        .header("Sec-Fetch-User", "?1")
+        .header("Upgrade-Insecure-Requests", "1")
+        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+        .body(TestBody::empty())
+        .unwrap();
+    let (mut s, t) = test_forward(
+        req,
+        create_conf(|p| {
+            p.filter_req_header = Some(vec![HeaderNameCfg("some".try_into().unwrap())]);
+            p.filter_resp_header = Some(vec![HeaderNameCfg("foo".try_into().unwrap())]);
+        }),
+    )
+    .await;
+
+    let mut buf = Vec::with_capacity(4096);
+    s.read_buf(&mut buf).await.unwrap();
+
+    assert_eq!(get_header(&buf, "thing"), None);
+    assert_eq!(get_header(&buf, "some"), Some(&b"value"[..]));
+
+    //return something else than 200
+    s.write_all(b"HTTP/1.0 200 OK\r\nfoo: 1\r\nbar: 2\r\n\r\n")
+        .await
+        .unwrap();
+    let r = t.await.unwrap();
+
+    let h = "1".try_into().unwrap();
+    assert_eq!(r.headers().get("foo"), Some(&h));
+    assert_eq!(r.headers().get("bar"), None);
+}
