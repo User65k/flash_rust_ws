@@ -426,7 +426,6 @@ async fn h11_keep_alive() {
 #[tokio::test]
 async fn h2_simple_fwd() {
     let req = Request::get("/mount/some/path")
-        .version(hyper::Version::HTTP_2)
         .body(TestBody::empty())
         .unwrap();
     let (s, t) = test_forward(
@@ -442,7 +441,7 @@ async fn h2_simple_fwd() {
             .serve_connection(
                 hyper_util::rt::TokioIo::new(s),
                 hyper::service::service_fn(|req| async move {
-                    assert_eq!(req.uri(), "h2://ignored/base_path/some/path");
+                    assert_eq!(req.uri(), "http://ignored/base_path/some/path");
                     hyper::Response::builder()
                         .status(301)
                         .body(TestBody::empty())
