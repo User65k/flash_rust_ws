@@ -122,7 +122,7 @@ async fn add_headers() {
 
     let mut buf = [0u8; 16];
     let i = s.read_exact(&mut buf).await.unwrap();
-    assert_eq!(&buf[..i], b"GET / HTTP/1.0\r\n");
+    assert_eq!(&buf[..i], b"GET / HTTP/1.1\r\n");
     let mut buf = BytesMut::with_capacity(4096);
     s.read_buf(&mut buf).await.unwrap();
 
@@ -500,4 +500,74 @@ async fn filter_headers() {
     let h = "1".try_into().unwrap();
     assert_eq!(r.headers().get("foo"), Some(&h));
     assert_eq!(r.headers().get("bar"), None);
+}
+
+#[cfg(feature = "tlsrust")]
+async fn create_tls_cfg() -> (tokio_rustls::TlsAcceptor, crate::dispatch::test::TempFile) {
+    use std::sync::Arc;
+
+    use crate::dispatch::test::TempFile;
+    use rustls_pemfile::{read_one, Item};
+    use tokio_rustls::{rustls::{pki_types::PrivateKeyDer, ServerConfig}, TlsAcceptor};
+
+    let c = crate::transport::tls::test::CERT;
+    let crt_file = TempFile::create("example.com_localhost.pem", c);
+    let cert_chain = match read_one(&mut &c[..]) {
+        Ok(Some(Item::X509Certificate(der))) => der,
+        _ => panic!(),
+    };
+    let mut k = crate::transport::tls::test::ED_KEY;
+    let key_der = match read_one(&mut k) {
+        Ok(Some(Item::Pkcs8Key(der))) => PrivateKeyDer::Pkcs8(der),
+        _ => panic!(),
+    };
+
+    let sc = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_chain], key_der)
+        .unwrap();
+    let connector = TlsAcceptor::from(Arc::new(sc));
+
+    (connector, crt_file)
+}
+#[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+#[tokio::test]
+async fn https_simple_fwd() {
+    let (accept, cert) = create_tls_cfg().await;
+
+    let req = Request::get("/mount/some/path")
+        .body(TestBody::empty())
+        .unwrap();
+
+    // pick a free port
+    let (app_listener, a) = crate::tests::local_socket_pair().await.unwrap();
+    let accept = tokio::spawn(async move {
+        let (plain, _) = app_listener.accept().await?;
+        accept.accept(plain).await
+    });
+    let req = Req::test_on_mount(req);
+    let mut proxy = create_conf(|p| {
+        p.forward = "https://127.0.0.1/base_path".to_string().try_into().unwrap();
+        p.tls_root = Some(cert.get_path().to_path_buf().try_into().unwrap());
+    });
+    proxy.forward.addr = ProxySocket::Ip(a);
+    proxy.setup().await.unwrap();
+
+    let t = tokio::spawn(async move {
+        let res = forward(req, "1.2.3.4:42".parse().unwrap(), &proxy).await;
+        res.unwrap()
+    });
+
+    let mut s = accept.await.unwrap().unwrap();
+
+    let mut buf = [0u8; 25];
+    let i = s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf[..i], b"GET /base_path/some/path ");
+
+    s.write_all(b"HTTP/1.0 301 Blah\r\n\r\n")
+        .await
+        .unwrap();
+
+    let r = t.await.unwrap();
+    assert_eq!(r.status(), 301);
 }
