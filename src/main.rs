@@ -289,7 +289,9 @@ pub(crate) mod tests {
         let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
 
         let mut test = TcpStream::connect(a).await.unwrap();
-        test.write_all(b"CONNECT host:80 HTTP/1.1\r\n\r\n").await.unwrap();
+        test.write_all(b"CONNECT host:80 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
         let mut buf = [0u8; 24];
         test.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"HTTP/1.1 400 Bad Request");
@@ -300,10 +302,10 @@ pub(crate) mod tests {
         use rustls_pemfile::{read_one, Item};
         use tokio_rustls::rustls::{ClientConfig, RootCertStore};
         use tokio_rustls::TlsConnector;
-    
+
         let key_file = TempFile::create("edkey.pem", crate::transport::tls::test::ED_KEY);
         let crt_file = TempFile::create("example.com.pem", crate::transport::tls::test::CERT);
-    
+
         let u1: transport::tls::TlsUserConfig = toml::from_str(
             format!(
                 "host.Files = [{{key = {:?}, cert = {:?}}}]",
@@ -314,7 +316,7 @@ pub(crate) mod tests {
         )
         .expect("cfg");
         let cfg = transport::tls::ParsedTLSConfig::new(&u1, None).expect("tls cfg");
-    
+
         let mut root_cert_store = RootCertStore::empty();
         let mut c = crate::transport::tls::test::CERT;
         let der = match read_one(&mut c) {
@@ -325,7 +327,7 @@ pub(crate) mod tests {
         let config = ClientConfig::builder()
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
-    
+
         let connector = TlsConnector::from(Arc::new(config));
         (connector, cfg)
     }
@@ -333,14 +335,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn https_get() {
         let (l, a) = local_socket_pair().await.unwrap();
-    
+
         let mut listening_ifs = HashMap::new();
         let mut cfg = HostCfg::new(l.into_std().unwrap());
-    
+
         let (connector, tlscfg) = create_tls_cfg().await;
-    
+
         cfg.tls = Some(tlscfg);
-    
+
         let mut vh = VHost::new(a);
         vh.paths.insert(
             Utf8PathBuf::from("a"),
@@ -348,9 +350,9 @@ pub(crate) mod tests {
         );
         cfg.default_host = Some(vh);
         listening_ifs.insert(a, cfg);
-    
+
         let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
-    
+
         let stream = TcpStream::connect(a).await.unwrap();
         #[cfg(feature = "tlsrust")]
         let mut stream = {
@@ -358,7 +360,7 @@ pub(crate) mod tests {
                 tokio_rustls::rustls::pki_types::ServerName::try_from("example.com").unwrap();
             connector.connect(dnsname, stream).await.unwrap()
         };
-    
+
         stream
             .write_all(b"GET /a/b HTTP/1.1\r\n\r\n")
             .await

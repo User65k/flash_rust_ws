@@ -294,14 +294,14 @@ pub async fn forward(
     if req_vers == Version::HTTP_11 && req.version() == Version::HTTP_2 {
         // we need to downgrade from h2 to h1.1
         change_req_from_h2_to_h11(&mut req);
-    }else if req_vers != req.version() {
+    } else if req_vers != req.version() {
         *req.version_mut() = req_vers;
     }
 
     if req.version() == Version::HTTP_2 {
         let scheme = if config.forward.scheme.as_str() == cfg::HTTP2_PLAINTEXT_KNOWN {
             uri::Scheme::HTTP
-        }else{
+        } else {
             config.forward.scheme.clone()
         };
         // TODO turn upgrade into extended connect if needed (set :protocol)

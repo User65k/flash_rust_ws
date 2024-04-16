@@ -508,7 +508,10 @@ async fn create_tls_cfg() -> (tokio_rustls::TlsAcceptor, crate::dispatch::test::
 
     use crate::dispatch::test::TempFile;
     use rustls_pemfile::{read_one, Item};
-    use tokio_rustls::{rustls::{pki_types::PrivateKeyDer, ServerConfig}, TlsAcceptor};
+    use tokio_rustls::{
+        rustls::{pki_types::PrivateKeyDer, ServerConfig},
+        TlsAcceptor,
+    };
 
     let c = crate::transport::tls::test::CERT;
     let crt_file = TempFile::create("example.com_localhost.pem", c);
@@ -547,7 +550,10 @@ async fn https_simple_fwd() {
     });
     let req = Req::test_on_mount(req);
     let mut proxy = create_conf(|p| {
-        p.forward = "https://127.0.0.1/base_path".to_string().try_into().unwrap();
+        p.forward = "https://127.0.0.1/base_path"
+            .to_string()
+            .try_into()
+            .unwrap();
         p.tls_root = Some(cert.get_path().to_path_buf().try_into().unwrap());
     });
     proxy.forward.addr = ProxySocket::Ip(a);
@@ -564,9 +570,7 @@ async fn https_simple_fwd() {
     let i = s.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf[..i], b"GET /base_path/some/path ");
 
-    s.write_all(b"HTTP/1.0 301 Blah\r\n\r\n")
-        .await
-        .unwrap();
+    s.write_all(b"HTTP/1.0 301 Blah\r\n\r\n").await.unwrap();
 
     let r = t.await.unwrap();
     assert_eq!(r.status(), 301);
