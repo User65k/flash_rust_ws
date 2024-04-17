@@ -285,12 +285,6 @@ pub async fn forward(
         req.headers_mut().remove(header::VIA);
     }
 
-    if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
-        req.headers_mut()
-            .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
-        req.headers_mut().insert(header::UPGRADE, val.clone());
-    }
-
     let req_vers = config
         .client
         .as_ref()
@@ -300,11 +294,19 @@ pub async fn forward(
     if req_vers == Version::HTTP_11 && req.version() == Version::HTTP_2 {
         // we need to downgrade from h2 to h1.1
         change_req_from_h2_to_h11(&mut req);
+    } else if req_vers != req.version() {
+        *req.version_mut() = req_vers;
     }
 
     if req.version() == Version::HTTP_2 {
+        let scheme = if config.forward.scheme.as_str() == cfg::HTTP2_PLAINTEXT_KNOWN {
+            uri::Scheme::HTTP
+        } else {
+            config.forward.scheme.clone()
+        };
+        // TODO turn upgrade into extended connect if needed (set :protocol)
         let new_uri = Uri::builder()
-            .scheme(config.forward.scheme.clone())
+            .scheme(scheme)
             .authority(config.forward.host.as_bytes())
             .path_and_query(new_path)
             .build()
@@ -318,6 +320,12 @@ pub async fn forward(
         //new host header
         req.headers_mut()
             .insert(header::HOST, config.forward.host.clone());
+        // insert upgrad header if needed
+        if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
+            req.headers_mut()
+                .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+            req.headers_mut().insert(header::UPGRADE, val.clone());
+        }
     }
     let mut resp = match config.request(req).await {
         Ok(r) => r,
