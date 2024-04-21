@@ -180,6 +180,8 @@ impl<'de> Deserialize<'de> for StatusCfg {
 pub struct Redirect {
     pub code: Option<StatusCfg>,
     pub redirect: HeaderValueCfg,
+    #[serde(default)]
+    pub add_req_path: bool,
 }
 
 /// Purpose of a single `WwwRoot`
