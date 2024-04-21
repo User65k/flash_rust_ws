@@ -13,6 +13,7 @@ mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 use hyper::body::Body as HttpBody;
+use hyper::header::HeaderValue;
 pub use webpath::{Req, WebPath};
 
 use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
@@ -125,6 +126,36 @@ async fn handle_wwwroot(
 
     let sf = match &wwwr.mount {
         config::UseCase::Redirect(redir) => {
+            let value = if redir.add_req_path {
+                let q = req.query();
+                let mut r_uri = req.path().prefixed_as_abs_url_path(
+                    redir.redirect.0.to_str().unwrap(),
+                    q.map_or(0, |q| q.len() + 1),
+                    false,
+                );
+                if let Some(q) = q {
+                    r_uri.push('?');
+                    r_uri.push_str(q);
+                }
+                HeaderValue::from_str(
+                    if redir
+                        .redirect
+                        .0
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|b| *b == b'/')
+                    {
+                        &r_uri
+                    } else {
+                        //prefixed_as_abs_url_path always adds a / in the front. We don't want that if the config path did not begin with one
+                        &r_uri[1..]
+                    },
+                )
+                .map_err(|e| IoError::new(ErrorKind::InvalidData, e))?
+            } else {
+                redir.redirect.0.clone()
+            };
+
             return Ok(Response::builder()
                 .status(
                     redir
@@ -133,7 +164,7 @@ async fn handle_wwwroot(
                         .map(|c| c.0)
                         .unwrap_or(StatusCode::MOVED_PERMANENTLY),
                 )
-                .header(header::LOCATION, &redir.redirect.0)
+                .header(header::LOCATION, value)
                 .body(BoxBody::empty())
                 .unwrap());
         }
@@ -196,14 +227,8 @@ async fn handle_wwwroot(
             if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
                 //FCGI + check for file
                 if ext_in_list(&fcgi.exec, &full_path) {
-                    return fcgi::fcgi_call(
-                        fcgi,
-                        req,
-                        Some(&full_path),
-                        path_info,
-                        remote_addr,
-                    )
-                    .await;
+                    return fcgi::fcgi_call(fcgi, req, Some(&full_path), path_info, remote_addr)
+                        .await;
                 }
             }
 
