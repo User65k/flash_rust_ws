@@ -240,7 +240,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::config::Utf8PathBuf;
     use crate::dispatch::test::UnitTestUseCase;
-    use config::{HostCfg, VHost};
+    use config::{HostCfg, VHost, WwwRoot};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -251,21 +251,42 @@ pub(crate) mod tests {
         let a = app_listener.local_addr()?;
         Ok((app_listener, a))
     }
+    pub(crate) async fn prep_test_server(
+        l: TcpListener,
+        a: SocketAddr,
+        w: WwwRoot,
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<transport::tls::ParsedTLSConfig>,
+    ) -> JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
+        let mut listening_ifs = HashMap::new();
+        let mut cfg = HostCfg::new(l.into_std().unwrap());
+
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+        {
+            cfg.tls = tls;
+        }
+
+        let mut vh = VHost::new(a);
+        vh.paths.insert(Utf8PathBuf::from("a"), w);
+        cfg.default_host = Some(vh);
+        listening_ifs.insert(a, cfg);
+
+        prepare_hyper_servers(listening_ifs)
+            .await
+            .unwrap()
+            .remove(0)
+    }
     #[tokio::test]
     async fn http_get() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let mut listening_ifs = HashMap::new();
-        let mut cfg = HostCfg::new(l.into_std().unwrap());
-        let mut vh = VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
+        let _s = prep_test_server(
+            l,
+            a,
             UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            None,
+        )
+        .await;
 
         let mut test = TcpStream::connect(a).await.unwrap();
         test.write_all(b"GET /a/b HTTP/1.1\r\n\r\n").await.unwrap();
@@ -277,17 +298,14 @@ pub(crate) mod tests {
     async fn http_connect() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let mut listening_ifs = HashMap::new();
-        let mut cfg = HostCfg::new(l.into_std().unwrap());
-        let mut vh = VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
+        let _s = prep_test_server(
+            l,
+            a,
             UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            None,
+        )
+        .await;
 
         let mut test = TcpStream::connect(a).await.unwrap();
         test.write_all(b"CONNECT host:80 HTTP/1.1\r\n\r\n")
@@ -298,15 +316,24 @@ pub(crate) mod tests {
         assert_eq!(&buf, b"HTTP/1.1 400 Bad Request");
     }
     #[cfg(feature = "tlsrust")]
-    async fn create_tls_cfg() -> (tokio_rustls::rustls::ClientConfig, transport::tls::ParsedTLSConfig) {
+    pub(crate) async fn create_tls_cfg() -> (
+        tokio_rustls::rustls::ClientConfig,
+        transport::tls::ParsedTLSConfig,
+    ) {
         use crate::dispatch::test::TempFile;
+        use rand::{rngs::OsRng, RngCore};
         use rustls_pemfile::{read_one, Item};
         use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-        use rand::{rngs::OsRng, RngCore};
 
         let tls_inst = OsRng.next_u32();
-        let key_file = TempFile::create(&format!("edkey{}.pem", tls_inst), crate::transport::tls::test::ED_KEY);
-        let crt_file = TempFile::create(&format!("example{}.com.pem", tls_inst), crate::transport::tls::test::CERT);
+        let key_file = TempFile::create(
+            &format!("edkey{}.pem", tls_inst),
+            crate::transport::tls::test::ED_KEY,
+        );
+        let crt_file = TempFile::create(
+            &format!("example{}.com.pem", tls_inst),
+            crate::transport::tls::test::CERT,
+        );
 
         let u1: transport::tls::TlsUserConfig = toml::from_str(
             format!(
@@ -337,22 +364,15 @@ pub(crate) mod tests {
     async fn https_get() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let mut listening_ifs = HashMap::new();
-        let mut cfg = HostCfg::new(l.into_std().unwrap());
-
         let (config, tlscfg) = create_tls_cfg().await;
 
-        cfg.tls = Some(tlscfg);
-
-        let mut vh = VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
+        let _s = prep_test_server(
+            l,
+            a,
             UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+            Some(tlscfg),
+        )
+        .await;
 
         let stream = TcpStream::connect(a).await.unwrap();
         #[cfg(feature = "tlsrust")]
@@ -376,22 +396,15 @@ pub(crate) mod tests {
     async fn https_h2_get() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let mut listening_ifs = HashMap::new();
-        let mut cfg = HostCfg::new(l.into_std().unwrap());
-
         let (mut config, tlscfg) = create_tls_cfg().await;
 
-        cfg.tls = Some(tlscfg);
-
-        let mut vh = VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
+        let _s = prep_test_server(
+            l,
+            a,
             UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+            Some(tlscfg),
+        )
+        .await;
 
         let stream = TcpStream::connect(a).await.unwrap();
         #[cfg(feature = "tlsrust")]
@@ -403,50 +416,43 @@ pub(crate) mod tests {
             connector.connect(dnsname, stream).await.unwrap()
         };
 
-        let h = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
-        //                   PREFACE------------------------- Len (0)---  TypFlag ID-------------
+        let h = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
+        //                   PREFACE------------------------- Len 0 TypFl ID-----
 
-        stream
-            .write_all(h)
-            .await
-            .unwrap();
+        stream.write_all(h).await.unwrap();
 
-        let req = b"\x00\x00\x15\x01\x05\x00\x00\x00\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
+        let req = b"\0\0\x15\x01\x05\0\0\0\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
         /*headers = [
             (':method', 'GET'),
             (':path', '/a/b'),
             (':authority', SERVER_NAME),
             (':scheme', 'https'),
         ]*/
-    
-        stream
-            .write_all(req)
-            .await
-            .unwrap();
+
+        stream.write_all(req).await.unwrap();
         let mut buf = [0u8; 180];
         let mut ack = false;
-        loop{
+        loop {
             println!("wait1");
             stream.read_exact(&mut buf[..4]).await.unwrap();
             assert_eq!(buf[0], 0);
             assert_eq!(buf[1], 0);
-            assert_ne!(buf[3], 3);//not reset_stream
-            assert_ne!(buf[3], 7);//not goaway
-            let off = buf[2] as usize +5;
+            assert_ne!(buf[3], 3); //not reset_stream
+            assert_ne!(buf[3], 7); //not goaway
+            let off = buf[2] as usize + 5;
             println!("wait2");
-            stream.read_exact(&mut buf[4..off+4]).await.unwrap();
-            println!("got {:?}", &buf[..off+4]);
-            if !ack && buf[3]==4 && buf[4]==0 {//Settings
+            stream.read_exact(&mut buf[4..off + 4]).await.unwrap();
+            println!("got {:?}", &buf[..off + 4]);
+            if !ack && buf[3] == 4 && buf[4] == 0 {
+                //Settings
                 println!("ack");
-                let req = b"\x00\x00\x00\x04\x01\x00\x00\x00\x00";
-                stream
-                    .write_all(req)
-                    .await
-                    .unwrap();
+                let req = b"\0\0\0\x04\x01\0\0\0\0";
+                stream.write_all(req).await.unwrap();
                 ack = true;
             }
-            if buf[3]==1 && buf[4]==5 {//Header
-                assert_eq!(buf[9], 0x88);//:status = 200
+            if buf[3] == 1 && buf[4] == 5 {
+                //Header + END_STREAM + END_HEADERS
+                assert_eq!(buf[9], 0x88); //:status = 200
                 println!("done");
                 break;
             }
