@@ -416,11 +416,6 @@ pub(crate) mod tests {
             connector.connect(dnsname, stream).await.unwrap()
         };
 
-        let h = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
-        //                   PREFACE------------------------- Len 0 TypFl ID-----
-
-        stream.write_all(h).await.unwrap();
-
         let req = b"\0\0\x15\x01\x05\0\0\0\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
         /*headers = [
             (':method', 'GET'),
@@ -428,33 +423,53 @@ pub(crate) mod tests {
             (':authority', SERVER_NAME),
             (':scheme', 'https'),
         ]*/
-
-        stream.write_all(req).await.unwrap();
+        let (end_stream, header) = h2_client(
+            &mut stream,
+            req,
+            None,
+        ).await.unwrap();
+        assert!(end_stream);
+        assert_eq!(header[0], 0x88);
+    }
+    /// connect to a H2 server, send PREFACE, empty Options and a `req`. Ack settings. Wait for the return headers.
+    /// Return if END_STREAM was set and the last header payload
+    pub(crate) async fn h2_client<RW: tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(
+        stream: &mut RW,
+        req: &[u8],
+        assert_option: Option<&[u8]>,
+    ) -> std::io::Result<(bool, Vec<u8>)> {
+        let h = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
+        //                   PREFACE------------------------- Len 0 TypFl ID-----
+        stream.write_all(h).await?;
+        stream.write_all(req).await?;
         let mut buf = [0u8; 180];
         let mut ack = false;
         loop {
             println!("wait1");
-            stream.read_exact(&mut buf[..4]).await.unwrap();
+            stream.read_exact(&mut buf[..4]).await?;
             assert_eq!(buf[0], 0);
             assert_eq!(buf[1], 0);
             assert_ne!(buf[3], 3); //not reset_stream
             assert_ne!(buf[3], 7); //not goaway
             let off = buf[2] as usize + 5;
             println!("wait2");
-            stream.read_exact(&mut buf[4..off + 4]).await.unwrap();
+            stream.read_exact(&mut buf[4..off + 4]).await?;
             println!("got {:?}", &buf[..off + 4]);
             if !ack && buf[3] == 4 && buf[4] == 0 {
                 //Settings
+                if let Some(opt) = assert_option {
+                    assert!(buf[4 + 5..].chunks(opt.len()).any(|kv| kv == opt));
+                }
+
                 println!("ack");
                 let req = b"\0\0\0\x04\x01\0\0\0\0";
-                stream.write_all(req).await.unwrap();
+                stream.write_all(req).await?;
                 ack = true;
             }
-            if buf[3] == 1 && buf[4] == 5 {
+            if buf[3] == 1 && buf[4]&4 == 4 {
                 //Header + END_STREAM + END_HEADERS
-                assert_eq!(buf[9], 0x88); //:status = 200
-                println!("done");
-                break;
+                println!("headers done");
+                return Ok((buf[4] == 5, buf[9..].to_vec()));
             }
         }
     }

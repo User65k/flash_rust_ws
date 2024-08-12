@@ -439,11 +439,6 @@ mod tests {
             connector.connect(dnsname, stream).await.unwrap()
         };
 
-        let h = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
-        //                   PREFACE------------------------- Len (0)---  TypFlag ID-------------
-
-        stream.write_all(h).await.unwrap();
-
         let req = b"\0\0A\x01\x04\0\0\0\x01B\x87\xbd\xabN\x9c\x17\xb7\xffD\x82`\x7fA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87@\x87\xb9]\x87I\xc8z?\x87\xf0X\xd0ru*\x7f@\x8fAH\xb7\x82\xc6\x83\x93\xa9R\xb7r\xd8\x83\x1e\xaf\x82\x0b?";
         /*headers = [
             (':method', 'CONNECT'),
@@ -453,40 +448,14 @@ mod tests {
             (':protocol','websocket'),
             ('sec-websocket-version','13')
         ]*/
-        stream.write_all(req).await.unwrap();
 
-        //                                        HEADERS + END_HEADERS
-        //                                        :status = 200
-        let mut buf = [0u8; 180];
-        let mut ack = false;
-        loop {
-            println!("wait1");
-            stream.read_exact(&mut buf[..4]).await.unwrap();
-            assert_eq!(buf[0], 0);
-            assert_eq!(buf[1], 0);
-            assert_ne!(buf[3], 3); //not reset_stream
-            assert_ne!(buf[3], 7); //not goaway
-            let off = buf[2] as usize + 5;
-            println!("wait2");
-            stream.read_exact(&mut buf[4..off + 4]).await.unwrap();
-            println!("got {:?}", &buf[..off + 4]);
-            if !ack && buf[3] == 4 && buf[4] == 0 {
-                //Settings
-                //SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
-                assert!(buf[4 + 5..].chunks(6).any(|kv| kv == b"\0\x08\0\0\0\x01"));
-
-                println!("ack");
-                let req = b"\0\0\0\x04\x01\0\0\0\0";
-                stream.write_all(req).await.unwrap();
-                ack = true;
-            }
-            if buf[3] == 1 && buf[4] == 4 {
-                //Header + END_HEADERS
-                assert_eq!(buf[9], 0x88); //:status = 200
-                println!("done");
-                break;
-            }
-        }
+        let (end_stream, header) = crate::tests::h2_client(
+            &mut stream,
+            req,
+            Some(b"\0\x08\0\0\0\x01"),//SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
+        ).await.unwrap();
+        assert!(!end_stream);
+        assert_eq!(header[0], 0x88);
         //DATA
         //WebSocket Data
         //                                        DATA + END_STREAM
@@ -509,6 +478,8 @@ mod tests {
         stream.write_all(b"\0\0\x12\0\0\0\0\0\x01\x81\x8c\xe1\x7e\x8e\xb9\x95\x1b\xfd\xcd\xc1\x13\xeb\xca\x92\x1f\xe9\xdc")
             .await
             .unwrap();
+
+        let mut buf = [0u8; 30];
 
         stream
             .read_exact(&mut buf[..6 + 5 + 4 + 2 + 5 + 4])
