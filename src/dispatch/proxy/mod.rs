@@ -136,7 +136,8 @@ fn check_method(method: &hyper::Method, config: &Proxy) -> bool {
         }
         false
     } else {
-        method != hyper::Method::CONNECT
+        //method != hyper::Method::CONNECT
+        true
     }
 }
 fn filter_header(headers: &mut HeaderMap, filter: &Option<Vec<HeaderNameCfg>>) {
@@ -192,8 +193,13 @@ pub async fn forward(
         })
         .unwrap_or(false);
     let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
-    let request_upgrade =
-        get_upgrade_type(req.headers_mut()).and_then(|u| check_upgrade(u, config));
+    let request_upgrade = if req.version() == Version::HTTP_11 {
+        get_upgrade_type(req.headers_mut()).and_then(|u| check_upgrade(u, config))
+    }else if req.version() == Version::HTTP_2 && req.method() == hyper::Method::CONNECT {
+        req.extensions().get::<hyper::ext::Protocol>().and_then(|p|HeaderValue::from_bytes(p.as_ref()).ok()).and_then(|up| check_upgrade(up, config))
+    }else{
+        None
+    };
 
     remove_connection_headers(req.version(), req.headers_mut());
     remove_hop_by_hop_headers(req.headers_mut());
@@ -285,26 +291,35 @@ pub async fn forward(
         req.headers_mut().remove(header::VIA);
     }
 
-    let req_vers = config
+    let client_vers = req.version();
+    let upstream_vers = config
         .client
         .as_ref()
         .unwrap()
         .get_supported_version()
         .await;
-    if req_vers == Version::HTTP_11 && req.version() == Version::HTTP_2 {
+    if upstream_vers == Version::HTTP_11 && client_vers == Version::HTTP_2 {
         // we need to downgrade from h2 to h1.1
         change_req_from_h2_to_h11(&mut req);
-    } else if req_vers != req.version() {
-        *req.version_mut() = req_vers;
+    } else if upstream_vers != client_vers {
+        //TODO https://github.com/memorysafety/pingora/blob/main/pingora-proxy/src/proxy_h2.rs
+        *req.version_mut() = upstream_vers;
     }
 
-    if req.version() == Version::HTTP_2 {
+    if upstream_vers == Version::HTTP_2 {
         let scheme = if config.forward.scheme.as_str() == cfg::HTTP2_PLAINTEXT_KNOWN {
             uri::Scheme::HTTP
         } else {
             config.forward.scheme.clone()
         };
-        // TODO turn upgrade into extended connect if needed (set :protocol)
+        // turn upgrade into extended connect if needed (set :protocol)
+        if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
+            req.extensions_mut().insert(hyper::ext::Protocol::from(
+                val.to_str().map_err(|_| ErrorKind::InvalidData)?,
+            ));
+            *req.method_mut() = hyper::Method::CONNECT;
+        }
+
         let new_uri = Uri::builder()
             .scheme(scheme)
             .authority(config.forward.host.as_bytes())
@@ -325,6 +340,10 @@ pub async fn forward(
             req.headers_mut()
                 .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
             req.headers_mut().insert(header::UPGRADE, val.clone());
+            if val == "websocket" && client_vers == Version::HTTP_2 {
+                //there was no key in the request, add one
+                req.headers_mut().insert(header::SEC_WEBSOCKET_KEY, HeaderValue::from_static("FIXME"));
+            }
         }
     }
     let mut resp = match config.request(req).await {
@@ -342,7 +361,13 @@ pub async fn forward(
     };
     debug!("response: {:?} {:?}", resp.status(), resp.headers());
 
-    let resp_upgrade = get_upgrade_type(resp.headers_mut());
+    let resp_upgrade = if resp.status() == StatusCode::SWITCHING_PROTOCOLS && resp.version() == Version::HTTP_11 {
+        get_upgrade_type(resp.headers_mut())
+    }else if resp.version() == Version::HTTP_2 && resp.status() == StatusCode::OK {
+        request_upgrade.clone()
+    }else{
+        None
+    };
     remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());
     filter_header(resp.headers_mut(), &config.filter_resp_header);
@@ -359,7 +384,7 @@ pub async fn forward(
             .insert(header::VIA, into_header_value(buf.freeze())?);
     }
 
-    if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+    if resp_upgrade.is_some() {
         if request_upgrade != resp_upgrade {
             error!(
                 "client upgrade {:?} != server upgrade {:?}",
@@ -387,10 +412,25 @@ pub async fn forward(
             };
 
             //was removed by remove_hop_by_hop_headers
-            resp.headers_mut()
-                .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
-            if let Some(u) = resp_upgrade {
-                resp.headers_mut().insert(header::UPGRADE, u);
+            if client_vers == Version::HTTP_11 {
+                {
+                    let h = resp.headers_mut();
+                    h.insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+                    h.insert(header::UPGRADE, resp_upgrade.unwrap());
+                    if upstream_vers == Version::HTTP_2 {
+                        //FIXME SEC_WEBSOCKET_ACCEPT if upstream is h2
+                        h.insert(header::SEC_WEBSOCKET_ACCEPT, HeaderValue::from_static("FIXME"));
+                    }
+                }
+                *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            }else if client_vers == Version::HTTP_2 {
+                {
+                    let h = resp.headers_mut();
+                    h.remove(header::CONNECTION);
+                    h.remove(header::UPGRADE);
+                    h.remove(header::SEC_WEBSOCKET_ACCEPT);
+                }
+                *resp.status_mut() = StatusCode::OK;
             }
 
             tokio::spawn(async move {

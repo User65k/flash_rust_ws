@@ -274,42 +274,65 @@ async fn header_chaining() {
 }
 
 async fn full_server_test(
+    f: impl FnOnce(&mut Proxy),
+    #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+    tls: Option<crate::transport::tls::ParsedTLSConfig>
 ) -> Result<(tokio::net::TcpStream, tokio::net::TcpListener), Box<dyn std::error::Error>> {
     //We can not use a Request Object for the test,
     //as it has no associated connection
     let (server_listener, a) = crate::tests::local_socket_pair().await?;
     let (target_listener, target_add) = crate::tests::local_socket_pair().await.unwrap();
 
-    let mut proxy = create_conf(|p| {
-        p.force_dir = false;
-    });
+    let mut proxy = create_conf(f);
     proxy.forward.addr = ProxySocket::Ip(target_add);
     proxy.setup().await.unwrap();
 
-    let mut listening_ifs = std::collections::HashMap::new();
-    let mut cfg = crate::config::HostCfg::new(server_listener.into_std()?);
-    let mut vh = crate::config::VHost::new(a);
-    vh.paths.insert(
-        Utf8PathBuf::from("a"),
+    let _s = crate::tests::prep_test_server(
+        server_listener,
+        a,
         crate::config::WwwRoot {
             mount: UseCase::Proxy(proxy),
             header: None,
             auth: None,
         },
-    );
-    cfg.default_host = Some(vh);
-    listening_ifs.insert(a, cfg);
-
-    let _s = crate::prepare_hyper_servers(listening_ifs).await?;
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+        tls,
+    )
+    .await;
 
     let client = tokio::net::TcpStream::connect(a).await?;
 
     Ok((client, target_listener))
 }
+#[cfg(feature = "tlsrust")]
+async fn full_tls_server_test(
+    f: impl FnOnce(&mut Proxy),
+    alpn: Option<&[u8]>
+) -> Result<(tokio_rustls::client::TlsStream<tokio::net::TcpStream>, tokio::net::TcpListener), Box<dyn std::error::Error>> {
+    let (mut cc, tls) = crate::tests::create_tls_cfg().await;
+    let (stream,l) = full_server_test(
+        f,
+        Some(tls)
+    ).await?;
+
+    let dnsname =
+        tokio_rustls::rustls::pki_types::ServerName::try_from("example.com").unwrap();
+    if let Some(alpn) = alpn {
+        cc.alpn_protocols.push(alpn.to_vec());
+    }
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cc));
+    let stream = connector.connect(dnsname, stream).await.unwrap();
+    Ok((stream, l))
+}
+
 ///test upgrade
 #[tokio::test]
-async fn upgrade() {
-    let (mut client, target_listener) = full_server_test().await.unwrap();
+async fn upgrade_h11() {
+    let (mut client, target_listener) = full_server_test(
+        |p| {
+            p.force_dir = false;
+        },
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]None).await.unwrap();
 
     let t = tokio::spawn(async move {
         let (mut server, _) = target_listener.accept().await.unwrap();
@@ -369,7 +392,11 @@ fn get_header<'a>(haystack: &'a [u8], param: &'_ str) -> Option<&'a [u8]> {
 
 #[tokio::test]
 async fn h11_keep_alive() {
-    let (mut client, target_listener) = full_server_test().await.unwrap();
+    let (mut client, target_listener) = full_server_test(
+        |p| {
+            p.force_dir = false;
+        },
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]None).await.unwrap();
 
     let t = tokio::spawn(async move {
         let (mut server, _) = target_listener.accept().await.unwrap();
@@ -574,4 +601,243 @@ async fn https_simple_fwd() {
 
     let r = t.await.unwrap();
     assert_eq!(r.status(), 301);
+}
+
+#[tokio::test]
+async fn upgrade_h11_to_h2() {
+    let (mut client, target_listener) = full_server_test(|p| {
+        p.force_dir = false;
+        p.forward = "h2://ignored/base_path".to_string().try_into().unwrap();
+    },
+    None).await.unwrap();
+
+    let _t = tokio::spawn(async move {
+        let (s, _) = target_listener.accept().await.unwrap();
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .enable_connect_protocol()
+            .serve_connection(
+                hyper_util::rt::TokioIo::new(s),
+                hyper::service::service_fn(|req| async move {
+                    assert_eq!(req.uri(), "http://ignored/base_path/");
+                    assert_eq!(req.method(), hyper::Method::CONNECT);
+                    assert_eq!(req.extensions().get::<hyper::ext::Protocol>().unwrap(), &hyper::ext::Protocol::from_static("websocket"));
+                    assert_eq!(req.headers().get(hyper::header::SEC_WEBSOCKET_VERSION).unwrap(), "13");
+                    tokio::task::spawn(async move {
+                        match hyper::upgrade::on(req).await {
+                            Ok(upgraded) => {
+                                let mut upgraded = hyper_util::rt::TokioIo::new(upgraded);
+                                let mut buf = Vec::with_capacity(4096);
+                                upgraded.read_buf(&mut buf).await.unwrap();
+                                assert_eq!(buf, b"\x01\x02\x03\xff");
+                        
+                                upgraded.write_all(b"\xff\xfe\x00").await.unwrap();
+                            }
+                            Err(e) => error!("upgrade error: {}", e),
+                        }
+                    });
+                    hyper::Response::builder()
+                        .body(TestBody::empty())
+                }),
+            ).await
+        }
+    );
+
+    client
+        .write_all(b"GET /a HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = Vec::with_capacity(4096);
+    client.read_buf(&mut buf).await.unwrap();
+    assert_eq!(&buf[..34], b"HTTP/1.1 101 Switching Protocols\r\n");
+    assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
+    assert_eq!(get_header(&buf, "upgrade").unwrap(), b"websocket");
+    let ws_a = get_header(&buf, "sec-websocket-accept").unwrap();
+    assert_eq!(ws_a, b"RIGHT_VALUE");
+
+    client.write_all(b"\x01\x02\x03\xff").await.unwrap();
+    buf.clear();
+    client.read_buf(&mut buf).await.unwrap();
+    assert_eq!(buf, b"\xff\xfe\x00");
+
+    //t.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn upgrade_h2_to_h11() {
+    let (mut client, target_listener) = full_tls_server_test(
+        |p| {
+            p.force_dir = false;
+        },
+        Some(b"h2")).await.unwrap();
+
+    let t = tokio::spawn(async move {
+        let (mut server, _) = target_listener.accept().await.unwrap();
+        let mut buf = Vec::with_capacity(4096);
+        server.read_buf(&mut buf).await.unwrap();
+        assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
+        assert_eq!(get_header(&buf, "upgrade").unwrap(), b"websocket");
+        let ws_key = get_header(&buf, "sec-websocket-key").unwrap();
+        assert_eq!(ws_key.len(), 24);//20 without base64
+
+        server
+            .write_all(b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+            .await
+            .unwrap();
+
+        buf.clear();
+        server.read_buf(&mut buf).await.unwrap();
+        assert_eq!(buf, b"\x01\x02\x03\xff");
+        println!("s recv");
+
+        server.write_all(b"\xff\xfe\x00").await.unwrap();
+        println!("s sent");
+    });
+
+    
+    let req = b"\0\0A\x01\x04\0\0\0\x01B\x87\xbd\xabN\x9c\x17\xb7\xffD\x82`\x7fA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87@\x87\xb9]\x87I\xc8z?\x87\xf0X\xd0ru*\x7f@\x8fAH\xb7\x82\xc6\x83\x93\xa9R\xb7r\xd8\x83\x1e\xaf\x82\x0b?";
+    /*headers = [
+        (':method', 'CONNECT'),
+        (':path', '/a'),
+        (':authority', SERVER_NAME),
+        (':scheme', 'https'),
+        (':protocol','websocket'),
+        ('sec-websocket-version','13')
+    ]*/
+
+
+    let (end_stream, header) = crate::tests::h2_client(
+        &mut client,
+        req,
+        Some(b"\0\x08\0\0\0\x01"),//SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
+    ).await.unwrap();
+    assert!(!end_stream);
+    assert_eq!(header[0], 0x88);
+    //DATA
+    //WebSocket Data
+    //                                        DATA + END_STREAM
+    //                                        WebSocket Data
+    //DATA + END_STREAM
+    //WebSocket Data
+
+    /*H2
+        Len
+        Typ
+        Flags
+        Id
+    WebSocket (but just a dummy here)
+    */
+    client.write_all(b"\0\0\x04\0\0\0\0\0\x01\x01\x02\x03\xff")
+        .await
+        .unwrap();
+    println!("c sent");
+
+    let mut buf = [0u8; 30];
+    client
+        .read_exact(&mut buf[..3 + 5 + 4 + 5 + 4])
+        .await
+        .unwrap();
+    println!("c recv");
+
+    t.await.unwrap();
+    println!("s");
+    /*
+    Last Msg + Close
+     */
+    assert_eq!(
+        &buf[..3 + 5 + 4 + 5 + 4],
+        b"\0\0\x03\0\0\0\0\0\x01\xff\xfe\x00\0\0\0\0\x01\0\0\0\x01"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_h2() {
+    let (mut client, target_listener) = full_tls_server_test(
+        |p| {
+            p.force_dir = false;
+            p.forward = "h2://ignored/base_path".to_string().try_into().unwrap();
+        },
+        Some(b"h2")).await.unwrap();
+
+    let _t = tokio::spawn(async move {
+        let (s, _) = target_listener.accept().await.unwrap();
+        hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .enable_connect_protocol()
+            .serve_connection(
+                hyper_util::rt::TokioIo::new(s),
+                hyper::service::service_fn(|req| async move {
+                    assert_eq!(req.uri(), "http://ignored/base_path/");
+                    assert_eq!(req.method(), hyper::Method::CONNECT);
+                    assert_eq!(req.extensions().get::<hyper::ext::Protocol>().unwrap(), &hyper::ext::Protocol::from_static("websocket"));
+                    assert_eq!(req.headers().get(hyper::header::SEC_WEBSOCKET_VERSION).unwrap(), "13");
+                    tokio::task::spawn(async move {
+                        match hyper::upgrade::on(req).await {
+                            Ok(upgraded) => {
+                                let mut upgraded = hyper_util::rt::TokioIo::new(upgraded);
+                                let mut buf = Vec::with_capacity(4096);
+                                upgraded.read_buf(&mut buf).await.unwrap();
+                                assert_eq!(buf, b"\x01\x02\x03\xff");
+                        
+                                upgraded.write_all(b"\xff\xfe\x00").await.unwrap();
+                            }
+                            Err(e) => println!("upgrade error: {}", e),
+                        }
+                    });
+                    hyper::Response::builder()
+                        .body(TestBody::empty())
+                }),
+            ).await
+        }
+    );
+
+    let req = b"\0\0A\x01\x04\0\0\0\x01B\x87\xbd\xabN\x9c\x17\xb7\xffD\x82`\x7fA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87@\x87\xb9]\x87I\xc8z?\x87\xf0X\xd0ru*\x7f@\x8fAH\xb7\x82\xc6\x83\x93\xa9R\xb7r\xd8\x83\x1e\xaf\x82\x0b?";
+    /*headers = [
+        (':method', 'CONNECT'),
+        (':path', '/a'),
+        (':authority', SERVER_NAME),
+        (':scheme', 'https'),
+        (':protocol','websocket'),
+        ('sec-websocket-version','13')
+    ]*/
+
+
+    let (end_stream, header) = crate::tests::h2_client(
+        &mut client,
+        req,
+        Some(b"\0\x08\0\0\0\x01"),//SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
+    ).await.unwrap();
+    assert!(!end_stream);
+    assert_eq!(header[0], 0x88);
+    //DATA
+    //WebSocket Data
+    //                                        DATA + END_STREAM
+    //                                        WebSocket Data
+    //DATA + END_STREAM
+    //WebSocket Data
+
+    /*H2
+        Len
+        Typ
+        Flags
+        Id
+    WebSocket*/
+    client.write_all(b"\0\0\x04\0\0\0\0\0\x01\x01\x02\x03\xff")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 30];
+    client
+        .read_exact(&mut buf[..3 + 5 + 4 + 5 + 4])
+        .await
+        .unwrap();
+
+    //t.await.unwrap().unwrap();
+    /*
+    Opcode Binary + Opcode Close
+     */
+    assert_eq!(
+        &buf[..3 + 5 + 4 + 5 + 4],
+        b"\0\0\x03\0\0\0\0\0\x01\xff\xfe\x00\0\0\0\0\x01\0\0\0\x01"
+    );
+    println!("all done");
 }
