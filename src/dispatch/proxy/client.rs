@@ -116,6 +116,7 @@ impl Client {
                 .ok_or(IoError::other("No DNS Address could be obtained"))?
             }
         };
+        log::trace!("connecting to {addr}");
         let io = TcpStream::connect(addr).await?;
 
         match cfg.forward.scheme.as_str() {
