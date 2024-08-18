@@ -195,9 +195,12 @@ pub async fn forward(
     let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
     let request_upgrade = if req.version() == Version::HTTP_11 {
         get_upgrade_type(req.headers_mut()).and_then(|u| check_upgrade(u, config))
-    }else if req.version() == Version::HTTP_2 && req.method() == hyper::Method::CONNECT {
-        req.extensions().get::<hyper::ext::Protocol>().and_then(|p|HeaderValue::from_bytes(p.as_ref()).ok()).and_then(|up| check_upgrade(up, config))
-    }else{
+    } else if req.version() == Version::HTTP_2 && req.method() == hyper::Method::CONNECT {
+        req.extensions()
+            .get::<hyper::ext::Protocol>()
+            .and_then(|p| HeaderValue::from_bytes(p.as_ref()).ok())
+            .and_then(|up| check_upgrade(up, config))
+    } else {
         None
     };
 
@@ -306,6 +309,19 @@ pub async fn forward(
         *req.version_mut() = upstream_vers;
     }
 
+    let ws_key = if request_upgraded.is_some()
+        && request_upgrade.is_some()
+        && client_vers == Version::HTTP_11
+        && upstream_vers == Version::HTTP_2
+    {
+        // if we have an upgrade to websocket
+        // and upstream does not calc the accept header
+        // we have to do it
+        req.headers_mut().remove(header::SEC_WEBSOCKET_KEY)
+    } else {
+        None
+    };
+
     if upstream_vers == Version::HTTP_2 {
         let scheme = if config.forward.scheme.as_str() == cfg::HTTP2_PLAINTEXT_KNOWN {
             uri::Scheme::HTTP
@@ -342,7 +358,13 @@ pub async fn forward(
             req.headers_mut().insert(header::UPGRADE, val.clone());
             if val == "websocket" && client_vers == Version::HTTP_2 {
                 //there was no key in the request, add one
-                req.headers_mut().insert(header::SEC_WEBSOCKET_KEY, HeaderValue::from_static("FIXME"));
+                let mut key = [0u8; 16];
+                rand::Rng::fill(&mut rand::thread_rng(), &mut key[..]);
+                let val = base64::encode_config(&key[..], base64::STANDARD);
+                req.headers_mut().insert(
+                    header::SEC_WEBSOCKET_KEY,
+                    HeaderValue::from_str(&val).expect("b64 is always a valid header value"),
+                );
             }
         }
     }
@@ -361,13 +383,14 @@ pub async fn forward(
     };
     debug!("response: {:?} {:?}", resp.status(), resp.headers());
 
-    let resp_upgrade = if resp.status() == StatusCode::SWITCHING_PROTOCOLS && resp.version() == Version::HTTP_11 {
-        get_upgrade_type(resp.headers_mut())
-    }else if resp.version() == Version::HTTP_2 && resp.status() == StatusCode::OK {
-        request_upgrade.clone()
-    }else{
-        None
-    };
+    let resp_upgrade =
+        if resp.status() == StatusCode::SWITCHING_PROTOCOLS && resp.version() == Version::HTTP_11 {
+            get_upgrade_type(resp.headers_mut())
+        } else if resp.version() == Version::HTTP_2 && resp.status() == StatusCode::OK {
+            request_upgrade.clone()
+        } else {
+            None
+        };
     remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());
     filter_header(resp.headers_mut(), &config.filter_resp_header);
@@ -417,13 +440,20 @@ pub async fn forward(
                     let h = resp.headers_mut();
                     h.insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
                     h.insert(header::UPGRADE, resp_upgrade.unwrap());
-                    if upstream_vers == Version::HTTP_2 {
-                        //FIXME SEC_WEBSOCKET_ACCEPT if upstream is h2
-                        h.insert(header::SEC_WEBSOCKET_ACCEPT, HeaderValue::from_static("FIXME"));
+                    if let Some(ws_key) = ws_key {
+                        //ACCEPT header if upstream is h2
+                        let mut s = sha1::Sha1::new();
+                        s.update(ws_key.as_bytes());
+                        s.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                        let val = base64::encode_config(s.digest().bytes(), base64::STANDARD);
+                        h.insert(
+                            header::SEC_WEBSOCKET_ACCEPT,
+                            HeaderValue::from_str(&val).expect("base64 is a valid header value"),
+                        );
                     }
                 }
                 *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-            }else if client_vers == Version::HTTP_2 {
+            } else if client_vers == Version::HTTP_2 {
                 {
                     let h = resp.headers_mut();
                     h.remove(header::CONNECTION);

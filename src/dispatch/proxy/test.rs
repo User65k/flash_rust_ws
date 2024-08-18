@@ -275,8 +275,9 @@ async fn header_chaining() {
 
 async fn full_server_test(
     f: impl FnOnce(&mut Proxy),
-    #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
-    tls: Option<crate::transport::tls::ParsedTLSConfig>
+    #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<
+        crate::transport::tls::ParsedTLSConfig,
+    >,
 ) -> Result<(tokio::net::TcpStream, tokio::net::TcpListener), Box<dyn std::error::Error>> {
     //We can not use a Request Object for the test,
     //as it has no associated connection
@@ -307,16 +308,18 @@ async fn full_server_test(
 #[cfg(feature = "tlsrust")]
 async fn full_tls_server_test(
     f: impl FnOnce(&mut Proxy),
-    alpn: Option<&[u8]>
-) -> Result<(tokio_rustls::client::TlsStream<tokio::net::TcpStream>, tokio::net::TcpListener), Box<dyn std::error::Error>> {
+    alpn: Option<&[u8]>,
+) -> Result<
+    (
+        tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+        tokio::net::TcpListener,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let (mut cc, tls) = crate::tests::create_tls_cfg().await;
-    let (stream,l) = full_server_test(
-        f,
-        Some(tls)
-    ).await?;
+    let (stream, l) = full_server_test(f, Some(tls)).await?;
 
-    let dnsname =
-        tokio_rustls::rustls::pki_types::ServerName::try_from("example.com").unwrap();
+    let dnsname = tokio_rustls::rustls::pki_types::ServerName::try_from("example.com").unwrap();
     if let Some(alpn) = alpn {
         cc.alpn_protocols.push(alpn.to_vec());
     }
@@ -332,7 +335,11 @@ async fn upgrade_h11() {
         |p| {
             p.force_dir = false;
         },
-        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]None).await.unwrap();
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+        None,
+    )
+    .await
+    .unwrap();
 
     let t = tokio::spawn(async move {
         let (mut server, _) = target_listener.accept().await.unwrap();
@@ -396,7 +403,11 @@ async fn h11_keep_alive() {
         |p| {
             p.force_dir = false;
         },
-        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]None).await.unwrap();
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+        None,
+    )
+    .await
+    .unwrap();
 
     let t = tokio::spawn(async move {
         let (mut server, _) = target_listener.accept().await.unwrap();
@@ -605,11 +616,15 @@ async fn https_simple_fwd() {
 
 #[tokio::test]
 async fn upgrade_h11_to_h2() {
-    let (mut client, target_listener) = full_server_test(|p| {
-        p.force_dir = false;
-        p.forward = "h2://ignored/base_path".to_string().try_into().unwrap();
-    },
-    None).await.unwrap();
+    let (mut client, target_listener) = full_server_test(
+        |p| {
+            p.force_dir = false;
+            p.forward = "h2://ignored/base_path".to_string().try_into().unwrap();
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let _t = tokio::spawn(async move {
         let (s, _) = target_listener.accept().await.unwrap();
@@ -620,8 +635,16 @@ async fn upgrade_h11_to_h2() {
                 hyper::service::service_fn(|req| async move {
                     assert_eq!(req.uri(), "http://ignored/base_path/");
                     assert_eq!(req.method(), hyper::Method::CONNECT);
-                    assert_eq!(req.extensions().get::<hyper::ext::Protocol>().unwrap(), &hyper::ext::Protocol::from_static("websocket"));
-                    assert_eq!(req.headers().get(hyper::header::SEC_WEBSOCKET_VERSION).unwrap(), "13");
+                    assert_eq!(
+                        req.extensions().get::<hyper::ext::Protocol>().unwrap(),
+                        &hyper::ext::Protocol::from_static("websocket")
+                    );
+                    assert_eq!(
+                        req.headers()
+                            .get(hyper::header::SEC_WEBSOCKET_VERSION)
+                            .unwrap(),
+                        "13"
+                    );
                     tokio::task::spawn(async move {
                         match hyper::upgrade::on(req).await {
                             Ok(upgraded) => {
@@ -629,18 +652,17 @@ async fn upgrade_h11_to_h2() {
                                 let mut buf = Vec::with_capacity(4096);
                                 upgraded.read_buf(&mut buf).await.unwrap();
                                 assert_eq!(buf, b"\x01\x02\x03\xff");
-                        
+
                                 upgraded.write_all(b"\xff\xfe\x00").await.unwrap();
                             }
                             Err(e) => error!("upgrade error: {}", e),
                         }
                     });
-                    hyper::Response::builder()
-                        .body(TestBody::empty())
+                    hyper::Response::builder().body(TestBody::empty())
                 }),
-            ).await
-        }
-    );
+            )
+            .await
+    });
 
     client
         .write_all(b"GET /a HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==\r\n\r\n")
@@ -653,7 +675,7 @@ async fn upgrade_h11_to_h2() {
     assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
     assert_eq!(get_header(&buf, "upgrade").unwrap(), b"websocket");
     let ws_a = get_header(&buf, "sec-websocket-accept").unwrap();
-    assert_eq!(ws_a, b"RIGHT_VALUE");
+    assert_eq!(ws_a, b"HSmrc0sMlYUkAGmm5OPpG2HaGWk=");
 
     client.write_all(b"\x01\x02\x03\xff").await.unwrap();
     buf.clear();
@@ -669,7 +691,10 @@ async fn upgrade_h2_to_h11() {
         |p| {
             p.force_dir = false;
         },
-        Some(b"h2")).await.unwrap();
+        Some(b"h2"),
+    )
+    .await
+    .unwrap();
 
     let t = tokio::spawn(async move {
         let (mut server, _) = target_listener.accept().await.unwrap();
@@ -678,7 +703,7 @@ async fn upgrade_h2_to_h11() {
         assert_eq!(get_header(&buf, "connection").unwrap(), b"UPGRADE");
         assert_eq!(get_header(&buf, "upgrade").unwrap(), b"websocket");
         let ws_key = get_header(&buf, "sec-websocket-key").unwrap();
-        assert_eq!(ws_key.len(), 24);//20 without base64
+        assert_eq!(ws_key.len(), 24); //20 without base64
 
         server
             .write_all(b"HTTP/1.1 101 SWITCHING_PROTOCOLS\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
@@ -694,7 +719,6 @@ async fn upgrade_h2_to_h11() {
         println!("s sent");
     });
 
-    
     let req = b"\0\0A\x01\x04\0\0\0\x01B\x87\xbd\xabN\x9c\x17\xb7\xffD\x82`\x7fA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87@\x87\xb9]\x87I\xc8z?\x87\xf0X\xd0ru*\x7f@\x8fAH\xb7\x82\xc6\x83\x93\xa9R\xb7r\xd8\x83\x1e\xaf\x82\x0b?";
     /*headers = [
         (':method', 'CONNECT'),
@@ -705,12 +729,13 @@ async fn upgrade_h2_to_h11() {
         ('sec-websocket-version','13')
     ]*/
 
-
     let (end_stream, header) = crate::tests::h2_client(
         &mut client,
         req,
-        Some(b"\0\x08\0\0\0\x01"),//SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
-    ).await.unwrap();
+        Some(b"\0\x08\0\0\0\x01"), //SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
+    )
+    .await
+    .unwrap();
     assert!(!end_stream);
     assert_eq!(header[0], 0x88);
     //DATA
@@ -727,7 +752,8 @@ async fn upgrade_h2_to_h11() {
         Id
     WebSocket (but just a dummy here)
     */
-    client.write_all(b"\0\0\x04\0\0\0\0\0\x01\x01\x02\x03\xff")
+    client
+        .write_all(b"\0\0\x04\0\0\0\0\0\x01\x01\x02\x03\xff")
         .await
         .unwrap();
     println!("c sent");
@@ -757,7 +783,10 @@ async fn upgrade_h2() {
             p.force_dir = false;
             p.forward = "h2://ignored/base_path".to_string().try_into().unwrap();
         },
-        Some(b"h2")).await.unwrap();
+        Some(b"h2"),
+    )
+    .await
+    .unwrap();
 
     let _t = tokio::spawn(async move {
         let (s, _) = target_listener.accept().await.unwrap();
@@ -768,8 +797,16 @@ async fn upgrade_h2() {
                 hyper::service::service_fn(|req| async move {
                     assert_eq!(req.uri(), "http://ignored/base_path/");
                     assert_eq!(req.method(), hyper::Method::CONNECT);
-                    assert_eq!(req.extensions().get::<hyper::ext::Protocol>().unwrap(), &hyper::ext::Protocol::from_static("websocket"));
-                    assert_eq!(req.headers().get(hyper::header::SEC_WEBSOCKET_VERSION).unwrap(), "13");
+                    assert_eq!(
+                        req.extensions().get::<hyper::ext::Protocol>().unwrap(),
+                        &hyper::ext::Protocol::from_static("websocket")
+                    );
+                    assert_eq!(
+                        req.headers()
+                            .get(hyper::header::SEC_WEBSOCKET_VERSION)
+                            .unwrap(),
+                        "13"
+                    );
                     tokio::task::spawn(async move {
                         match hyper::upgrade::on(req).await {
                             Ok(upgraded) => {
@@ -777,18 +814,17 @@ async fn upgrade_h2() {
                                 let mut buf = Vec::with_capacity(4096);
                                 upgraded.read_buf(&mut buf).await.unwrap();
                                 assert_eq!(buf, b"\x01\x02\x03\xff");
-                        
+
                                 upgraded.write_all(b"\xff\xfe\x00").await.unwrap();
                             }
                             Err(e) => println!("upgrade error: {}", e),
                         }
                     });
-                    hyper::Response::builder()
-                        .body(TestBody::empty())
+                    hyper::Response::builder().body(TestBody::empty())
                 }),
-            ).await
-        }
-    );
+            )
+            .await
+    });
 
     let req = b"\0\0A\x01\x04\0\0\0\x01B\x87\xbd\xabN\x9c\x17\xb7\xffD\x82`\x7fA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87@\x87\xb9]\x87I\xc8z?\x87\xf0X\xd0ru*\x7f@\x8fAH\xb7\x82\xc6\x83\x93\xa9R\xb7r\xd8\x83\x1e\xaf\x82\x0b?";
     /*headers = [
@@ -800,12 +836,13 @@ async fn upgrade_h2() {
         ('sec-websocket-version','13')
     ]*/
 
-
     let (end_stream, header) = crate::tests::h2_client(
         &mut client,
         req,
-        Some(b"\0\x08\0\0\0\x01"),//SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
-    ).await.unwrap();
+        Some(b"\0\x08\0\0\0\x01"), //SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
+    )
+    .await
+    .unwrap();
     assert!(!end_stream);
     assert_eq!(header[0], 0x88);
     //DATA
@@ -821,7 +858,8 @@ async fn upgrade_h2() {
         Flags
         Id
     WebSocket*/
-    client.write_all(b"\0\0\x04\0\0\0\0\0\x01\x01\x02\x03\xff")
+    client
+        .write_all(b"\0\0\x04\0\0\0\0\0\x01\x01\x02\x03\xff")
         .await
         .unwrap();
 
