@@ -52,8 +52,8 @@ xml-rs = { version = "0.8", optional = true }
 chrono = { version = "0.4", optional = true }
 #proxy
 deadpool = {version="0.11", features=["unmanaged"], default-features = false, optional = true }
-sha1 = {version="*", optional = true }
-base64 = {version="*", optional = true }
+sha1 = {version="0.6", optional = true } # same as websocket-codec
+base64 = {version="0.13", optional = true } # same as websocket-codec
 
 anyhow = "1.0"
 async-stream-connection = {version="^1.0.1", features=["serde"], optional = true}
