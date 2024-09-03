@@ -140,17 +140,11 @@ impl From<(&str, u16)> for ProxySocket {
 
         // try to parse the host as a regular IP address first
         if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
-            let addr = std::net::SocketAddrV4::new(addr, port);
-            let addr = std::net::SocketAddr::V4(addr);
-
-            return ProxySocket::Ip(addr);
+            return ProxySocket::Ip((addr, port).into());
         }
 
         if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
-            let addr = std::net::SocketAddrV6::new(addr, port, 0, 0);
-            let addr = std::net::SocketAddr::V6(addr);
-
-            return ProxySocket::Ip(addr);
+            return ProxySocket::Ip((addr, port).into());
         }
 
         ProxySocket::Dns((host.to_owned(), port))
