@@ -212,22 +212,28 @@ impl<B> Req<B> {
         }))
     }
     #[cfg(feature = "fcgi")]
+    #[inline]
     pub fn version(&self) -> hyper::Version {
         self.parts.version
     }
     #[cfg(feature = "fcgi")]
+    #[inline]
     pub fn extensions(&self) -> &hyper::http::Extensions {
         &self.parts.extensions
     }
+    #[inline]
     pub fn is_dir_req(&self) -> bool {
         self.parts.uri.path().as_bytes().last() == Some(&b'/')
     }
+    #[inline]
     pub fn query(&self) -> Option<&str> {
         self.parts.uri.query()
     }
+    #[inline]
     pub fn method(&self) -> &hyper::Method {
         &self.parts.method
     }
+    #[inline]
     pub fn headers(&self) -> &hyper::HeaderMap<hyper::header::HeaderValue> {
         &self.parts.headers
     }
