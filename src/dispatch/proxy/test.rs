@@ -48,8 +48,15 @@ fn basic_config() {
         panic!("not proxy");
     }
 }
+#[test]
+fn resolve_dns_later() {
+    use std::net::*;
+    assert!(matches!(ProxySocket::from(("test", 123)), ProxySocket::Dns((s, 123)) if s == "test"));
+    assert!(matches!(ProxySocket::from(("127.0.0.1", 123)), ProxySocket::Ip(SocketAddr::V4(ip4)) if *ip4.ip() == Ipv4Addr::LOCALHOST));
+    assert!(matches!(ProxySocket::from(("::1", 123)), ProxySocket::Ip(SocketAddr::V6(ip6)) if *ip6.ip() == Ipv6Addr::LOCALHOST));
+}
 
-/// send a request to a FCGI mount and return its TcpStream
+/// send a request to a proxy mount and return its TcpStream
 /// (as well as the Task doing the request)
 async fn test_forward(
     mut req: Request<TestBody>,
