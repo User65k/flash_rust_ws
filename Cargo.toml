@@ -1,6 +1,6 @@
 [package]
 name = "flash_rust_ws"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["User65k <15049544+User65k@users.noreply.github.com>"]
 edition = "2021"
 license = "AGPL-3.0"
