@@ -8,7 +8,7 @@ use hyper::{
     header::{self, HeaderName, HeaderValue},
     http::uri,
     upgrade::OnUpgrade,
-    HeaderMap, Request, Response, StatusCode, Uri, Version,
+    HeaderMap, Response, StatusCode, Uri, Version,
 };
 use log::{debug, error, trace};
 use std::io::{Error as IoError, ErrorKind};
@@ -83,11 +83,11 @@ fn get_upgrade_type(headers: &mut HeaderMap) -> Option<HeaderValue> {
     None
 }
 
-fn change_req_from_h2_to_h11(req: &mut Request<IncomingBody>) {
+fn change_req_from_h2_to_h11(req: &mut hyper::http::request::Parts) {
     trace!("downgrading from h2 to h1.1");
     let mut value_buf = BytesMut::with_capacity(512);
     let mut first = false;
-    for v in req.headers().get_all(header::COOKIE) {
+    for v in req.headers.get_all(header::COOKIE) {
         if !first {
             first = true;
         } else {
@@ -97,12 +97,12 @@ fn change_req_from_h2_to_h11(req: &mut Request<IncomingBody>) {
         bytes::BufMut::put_slice(&mut value_buf, v); //copy
     }
     if first {
-        req.headers_mut().insert(
+        req.headers.insert(
             header::COOKIE,
             HeaderValue::from_bytes(value_buf.as_ref()).expect("was a HV before"),
         );
     }
-    *req.version_mut() = hyper::Version::HTTP_11;
+    req.version = hyper::Version::HTTP_11;
 }
 
 fn check_upgrade(up: HeaderValue, config: &Proxy) -> Option<HeaderValue> {
@@ -170,18 +170,11 @@ pub async fn forward(
         new_path.push_str(q);
     }
 
-    let (parts, body) = req.into_parts();
+    let client_vers = req.version();
+    let (mut parts, body) = req.into_parts();
 
-    if !check_method(&parts.method, config) {
-        let mut resp = Response::new(BoxBody::empty());
-        *resp.status_mut() = hyper::StatusCode::METHOD_NOT_ALLOWED;
-        return Ok(resp);
-    }
-
-    let mut req = hyper::Request::from_parts(parts, body);
-
-    let contains_te_trailers_value = req
-        .headers()
+    let contains_te_trailers_value = parts
+        .headers
         .get(header::TE)
         .map(|value| {
             value
@@ -191,17 +184,30 @@ pub async fn forward(
                 .any(|e| e.trim() == TRAILERS)
         })
         .unwrap_or(false);
-    let request_upgraded = req.extensions_mut().remove::<OnUpgrade>();
-    let request_upgrade =
-        get_upgrade_type(req.headers_mut()).and_then(|u| check_upgrade(u, config));
+    let request_upgraded = parts.extensions.remove::<OnUpgrade>();
+    let request_upgrade = if client_vers == Version::HTTP_11 {
+        get_upgrade_type(&mut parts.headers).and_then(|u| check_upgrade(u, config))
+    } else if client_vers == Version::HTTP_2 && parts.method == hyper::Method::CONNECT {
+        parts.extensions
+            .get::<hyper::ext::Protocol>()
+            .and_then(|p| HeaderValue::from_bytes(p.as_ref()).ok())
+            .and_then(|up| check_upgrade(up, config))
+    } else {
+        None
+    };
+    if request_upgrade.is_none() && !check_method(&parts.method, config) {
+        let mut resp = Response::new(BoxBody::empty());
+        *resp.status_mut() = hyper::StatusCode::METHOD_NOT_ALLOWED;
+        return Ok(resp);
+    }
 
-    remove_connection_headers(req.version(), req.headers_mut());
-    remove_hop_by_hop_headers(req.headers_mut());
+    remove_connection_headers(client_vers, &mut parts.headers);
+    remove_hop_by_hop_headers(&mut parts.headers);
     if contains_te_trailers_value {
-        req.headers_mut()
+        parts.headers
             .insert(header::TE, HeaderValue::from_static(TRAILERS));
     }
-    filter_header(req.headers_mut(), &config.filter_req_header);
+    filter_header(&mut parts.headers, &config.filter_req_header);
 
     match config.add_forwarded_header {
         ForwardedHeader::Replace | ForwardedHeader::Extend => {
@@ -210,7 +216,7 @@ pub async fn forward(
 
             if let ForwardedHeader::Extend = config.add_forwarded_header {
                 //add old forwarded-for
-                for hv in req.headers().get_all(header::FORWARDED) {
+                for hv in parts.headers.get_all(header::FORWARDED) {
                     let hv = hv.as_ref();
                     if let Some(pos) = hv.windows(4).position(|window| window == b"for=") {
                         if let Some(pos_end) = hv[pos..].iter().position(|c| *c == b';') {
@@ -231,20 +237,20 @@ pub async fn forward(
 
             buf.extend_from_slice(ip_str.as_bytes());
             //add host header
-            if let Some(host) = req.extensions().get::<uri::Authority>() {
+            if let Some(host) = parts.extensions.get::<uri::Authority>() {
                 buf.extend_from_slice(b"; host=");
                 buf.extend_from_slice(host.as_str().as_bytes());
             }
             //;proto=http;by=203.0.113.43
-            req.headers_mut()
+            parts.headers
                 .insert(header::FORWARDED, into_header_value(buf.freeze())?);
         }
         ForwardedHeader::Remove => {
-            req.headers_mut().remove(header::FORWARDED);
+            parts.headers.remove(header::FORWARDED);
         }
     }
     if config.add_x_forwarded_for_header {
-        match req.headers_mut().entry(&X_FORWARDED_FOR) {
+        match parts.headers.entry(&X_FORWARDED_FOR) {
             hyper::header::Entry::Vacant(entry) => {
                 entry.insert(
                     remote_addr
@@ -269,42 +275,63 @@ pub async fn forward(
             }
         }
     } else {
-        req.headers_mut().remove(&X_FORWARDED_FOR);
+        parts.headers.remove(&X_FORWARDED_FOR);
     }
     if let Some(host) = &config.add_via_header_to_server {
         //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Via
         let mut buf = BytesMut::with_capacity(512);
-        for hv in req.headers().get_all(header::VIA) {
+        for hv in parts.headers.get_all(header::VIA) {
             buf.extend_from_slice(hv.as_ref());
             buf.extend_from_slice(b", ");
         }
-        buf.extend_from_slice(format!("{:?} {}", req.version(), &host).as_bytes());
-        req.headers_mut()
+        buf.extend_from_slice(format!("{:?} {}", client_vers, &host).as_bytes());
+        parts.headers
             .insert(header::VIA, into_header_value(buf.freeze())?);
     } else {
-        req.headers_mut().remove(header::VIA);
+        parts.headers.remove(header::VIA);
     }
 
-    let req_vers = config
+    let upstream_vers = config
         .client
         .as_ref()
         .unwrap()
         .get_supported_version()
         .await;
-    if req_vers == Version::HTTP_11 && req.version() == Version::HTTP_2 {
+    if upstream_vers == Version::HTTP_11 && client_vers == Version::HTTP_2 {
         // we need to downgrade from h2 to h1.1
-        change_req_from_h2_to_h11(&mut req);
-    } else if req_vers != req.version() {
-        *req.version_mut() = req_vers;
+        change_req_from_h2_to_h11(&mut parts);
+    } else if upstream_vers != client_vers {
+        //TODO https://github.com/memorysafety/pingora/blob/main/pingora-proxy/src/proxy_h2.rs
+        parts.version = upstream_vers;
     }
 
-    if req.version() == Version::HTTP_2 {
+    let ws_key = if request_upgraded.is_some()
+        && request_upgrade.is_some()
+        && client_vers == Version::HTTP_11
+        && upstream_vers == Version::HTTP_2
+    {
+        // if we have an upgrade to websocket
+        // and upstream does not calc the accept header
+        // we have to do it
+        parts.headers.remove(header::SEC_WEBSOCKET_KEY)
+    } else {
+        None
+    };
+
+    if upstream_vers == Version::HTTP_2 {
         let scheme = if config.forward.scheme.as_str() == cfg::HTTP2_PLAINTEXT_KNOWN {
             uri::Scheme::HTTP
         } else {
             config.forward.scheme.clone()
         };
-        // TODO turn upgrade into extended connect if needed (set :protocol)
+        // turn upgrade into extended connect if needed (set :protocol)
+        if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
+            parts.extensions.insert(hyper::ext::Protocol::from(
+                val.to_str().map_err(|_| ErrorKind::InvalidData)?,
+            ));
+            parts.method = hyper::Method::CONNECT;
+        }
+
         let new_uri = Uri::builder()
             .scheme(scheme)
             .authority(config.forward.host.as_bytes())
@@ -312,21 +339,32 @@ pub async fn forward(
             .build()
             .unwrap(); //can't happen - all parts set
         trace!("Forward h2 to {}", &new_uri);
-        *req.uri_mut() = new_uri;
+        parts.uri = new_uri;
     } else {
         let new_uri = Uri::builder().path_and_query(new_path).build().unwrap(); //can't happen - only path_and_query set
         trace!("Forward h1 to {}", &new_uri);
-        *req.uri_mut() = new_uri;
+        parts.uri = new_uri;
         //new host header
-        req.headers_mut()
+        parts.headers
             .insert(header::HOST, config.forward.host.clone());
         // insert upgrad header if needed
         if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
-            req.headers_mut()
+            parts.headers
                 .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
-            req.headers_mut().insert(header::UPGRADE, val.clone());
+            parts.headers.insert(header::UPGRADE, val.clone());
+            if val == "websocket" && client_vers == Version::HTTP_2 {
+                //there was no key in the request, add one
+                let mut key = [0u8; 16];
+                rand::Rng::fill(&mut rand::thread_rng(), &mut key[..]);
+                let val = base64::encode_config(&key[..], base64::STANDARD);
+                parts.headers.insert(
+                    header::SEC_WEBSOCKET_KEY,
+                    HeaderValue::from_str(&val).expect("b64 is always a valid header value"),
+                );
+            }
         }
     }
+    let req = hyper::Request::from_parts(parts, body);
     let mut resp = match config.request(req).await {
         Ok(r) => r,
         Err(err) => {
@@ -342,7 +380,14 @@ pub async fn forward(
     };
     debug!("response: {:?} {:?}", resp.status(), resp.headers());
 
-    let resp_upgrade = get_upgrade_type(resp.headers_mut());
+    let resp_upgrade =
+        if resp.status() == StatusCode::SWITCHING_PROTOCOLS && resp.version() == Version::HTTP_11 {
+            get_upgrade_type(resp.headers_mut())
+        } else if resp.version() == Version::HTTP_2 && resp.status() == StatusCode::OK {
+            request_upgrade.clone()
+        } else {
+            None
+        };
     remove_connection_headers(resp.version(), resp.headers_mut());
     remove_hop_by_hop_headers(resp.headers_mut());
     filter_header(resp.headers_mut(), &config.filter_resp_header);
@@ -359,7 +404,7 @@ pub async fn forward(
             .insert(header::VIA, into_header_value(buf.freeze())?);
     }
 
-    if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+    if resp_upgrade.is_some() {
         if request_upgrade != resp_upgrade {
             error!(
                 "client upgrade {:?} != server upgrade {:?}",
@@ -387,10 +432,32 @@ pub async fn forward(
             };
 
             //was removed by remove_hop_by_hop_headers
-            resp.headers_mut()
-                .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
-            if let Some(u) = resp_upgrade {
-                resp.headers_mut().insert(header::UPGRADE, u);
+            if client_vers == Version::HTTP_11 {
+                {
+                    let h = resp.headers_mut();
+                    h.insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
+                    h.insert(header::UPGRADE, resp_upgrade.unwrap());
+                    if let Some(ws_key) = ws_key {
+                        //ACCEPT header if upstream is h2
+                        let mut s = sha1::Sha1::new();
+                        s.update(ws_key.as_bytes());
+                        s.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                        let val = base64::encode_config(s.digest().bytes(), base64::STANDARD);
+                        h.insert(
+                            header::SEC_WEBSOCKET_ACCEPT,
+                            HeaderValue::from_str(&val).expect("base64 is a valid header value"),
+                        );
+                    }
+                }
+                *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            } else if client_vers == Version::HTTP_2 {
+                {
+                    let h = resp.headers_mut();
+                    h.remove(header::CONNECTION);
+                    h.remove(header::UPGRADE);
+                    h.remove(header::SEC_WEBSOCKET_ACCEPT);
+                }
+                *resp.status_mut() = StatusCode::OK;
             }
 
             tokio::spawn(async move {

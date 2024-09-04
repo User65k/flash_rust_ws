@@ -91,6 +91,7 @@ async fn prepare_hyper_servers(
                                         hyper::server::conn::http2::Builder::new(
                                             TokioExecutor::new(),
                                         )
+                                        .enable_connect_protocol()
                                         .serve_connection(TokioIo::new(stream), service)
                                         .await
                                     }
@@ -239,7 +240,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::config::Utf8PathBuf;
     use crate::dispatch::test::UnitTestUseCase;
-    use config::{HostCfg, VHost};
+    use config::{HostCfg, VHost, WwwRoot};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -250,21 +251,42 @@ pub(crate) mod tests {
         let a = app_listener.local_addr()?;
         Ok((app_listener, a))
     }
+    pub(crate) async fn prep_test_server(
+        l: TcpListener,
+        a: SocketAddr,
+        w: WwwRoot,
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<transport::tls::ParsedTLSConfig>,
+    ) -> JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
+        let mut listening_ifs = HashMap::new();
+        let mut cfg = HostCfg::new(l.into_std().unwrap());
+
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+        {
+            cfg.tls = tls;
+        }
+
+        let mut vh = VHost::new(a);
+        vh.paths.insert(Utf8PathBuf::from("a"), w);
+        cfg.default_host = Some(vh);
+        listening_ifs.insert(a, cfg);
+
+        prepare_hyper_servers(listening_ifs)
+            .await
+            .unwrap()
+            .remove(0)
+    }
     #[tokio::test]
     async fn http_get() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let mut listening_ifs = HashMap::new();
-        let mut cfg = HostCfg::new(l.into_std().unwrap());
-        let mut vh = VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
+        let _s = prep_test_server(
+            l,
+            a,
             UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            None,
+        )
+        .await;
 
         let mut test = TcpStream::connect(a).await.unwrap();
         test.write_all(b"GET /a/b HTTP/1.1\r\n\r\n").await.unwrap();
@@ -276,17 +298,14 @@ pub(crate) mod tests {
     async fn http_connect() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let mut listening_ifs = HashMap::new();
-        let mut cfg = HostCfg::new(l.into_std().unwrap());
-        let mut vh = VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
+        let _s = prep_test_server(
+            l,
+            a,
             UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+            #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+            None,
+        )
+        .await;
 
         let mut test = TcpStream::connect(a).await.unwrap();
         test.write_all(b"CONNECT host:80 HTTP/1.1\r\n\r\n")
@@ -297,14 +316,24 @@ pub(crate) mod tests {
         assert_eq!(&buf, b"HTTP/1.1 400 Bad Request");
     }
     #[cfg(feature = "tlsrust")]
-    async fn create_tls_cfg() -> (tokio_rustls::TlsConnector, transport::tls::ParsedTLSConfig) {
+    pub(crate) async fn create_tls_cfg() -> (
+        tokio_rustls::rustls::ClientConfig,
+        transport::tls::ParsedTLSConfig,
+    ) {
         use crate::dispatch::test::TempFile;
+        use rand::{rngs::OsRng, RngCore};
         use rustls_pemfile::{read_one, Item};
         use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-        use tokio_rustls::TlsConnector;
 
-        let key_file = TempFile::create("edkey.pem", crate::transport::tls::test::ED_KEY);
-        let crt_file = TempFile::create("example.com.pem", crate::transport::tls::test::CERT);
+        let tls_inst = OsRng.next_u32();
+        let key_file = TempFile::create(
+            &format!("edkey{}.pem", tls_inst),
+            crate::transport::tls::test::ED_KEY,
+        );
+        let crt_file = TempFile::create(
+            &format!("example{}.com.pem", tls_inst),
+            crate::transport::tls::test::CERT,
+        );
 
         let u1: transport::tls::TlsUserConfig = toml::from_str(
             format!(
@@ -328,36 +357,29 @@ pub(crate) mod tests {
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
 
-        let connector = TlsConnector::from(Arc::new(config));
-        (connector, cfg)
+        (config, cfg)
     }
     #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
     #[tokio::test]
     async fn https_get() {
         let (l, a) = local_socket_pair().await.unwrap();
 
-        let mut listening_ifs = HashMap::new();
-        let mut cfg = HostCfg::new(l.into_std().unwrap());
+        let (config, tlscfg) = create_tls_cfg().await;
 
-        let (connector, tlscfg) = create_tls_cfg().await;
-
-        cfg.tls = Some(tlscfg);
-
-        let mut vh = VHost::new(a);
-        vh.paths.insert(
-            Utf8PathBuf::from("a"),
+        let _s = prep_test_server(
+            l,
+            a,
             UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
-        );
-        cfg.default_host = Some(vh);
-        listening_ifs.insert(a, cfg);
-
-        let _s = prepare_hyper_servers(listening_ifs).await.unwrap();
+            Some(tlscfg),
+        )
+        .await;
 
         let stream = TcpStream::connect(a).await.unwrap();
         #[cfg(feature = "tlsrust")]
         let mut stream = {
             let dnsname =
                 tokio_rustls::rustls::pki_types::ServerName::try_from("example.com").unwrap();
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
             connector.connect(dnsname, stream).await.unwrap()
         };
 
@@ -368,5 +390,87 @@ pub(crate) mod tests {
         let mut buf = [0u8; 15];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf[..15], b"HTTP/1.1 200 OK");
+    }
+    #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+    #[tokio::test]
+    async fn https_h2_get() {
+        let (l, a) = local_socket_pair().await.unwrap();
+
+        let (mut config, tlscfg) = create_tls_cfg().await;
+
+        let _s = prep_test_server(
+            l,
+            a,
+            UnitTestUseCase::create_wwwroot(Some("b"), Some("a"), None),
+            Some(tlscfg),
+        )
+        .await;
+
+        let stream = TcpStream::connect(a).await.unwrap();
+        #[cfg(feature = "tlsrust")]
+        let mut stream = {
+            let dnsname =
+                tokio_rustls::rustls::pki_types::ServerName::try_from("example.com").unwrap();
+            config.alpn_protocols.push(b"h2".to_vec());
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+            connector.connect(dnsname, stream).await.unwrap()
+        };
+
+        let req = b"\0\0\x15\x01\x05\0\0\0\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
+        /*headers = [
+            (':method', 'GET'),
+            (':path', '/a/b'),
+            (':authority', SERVER_NAME),
+            (':scheme', 'https'),
+        ]*/
+        let (end_stream, header) = h2_client(
+            &mut stream,
+            req,
+            None,
+        ).await.unwrap();
+        assert!(end_stream);
+        assert_eq!(header[0], 0x88);
+    }
+    /// connect to a H2 server, send PREFACE, empty Options and a `req`. Ack settings. Wait for the return headers.
+    /// Return if END_STREAM was set and the last header payload
+    pub(crate) async fn h2_client<RW: tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(
+        stream: &mut RW,
+        req: &[u8],
+        assert_option: Option<&[u8]>,
+    ) -> std::io::Result<(bool, Vec<u8>)> {
+        let h = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
+        //                   PREFACE------------------------- Len 0 TypFl ID-----
+        stream.write_all(h).await?;
+        stream.write_all(req).await?;
+        let mut buf = [0u8; 180];
+        let mut ack = false;
+        loop {
+            println!("wait1");
+            stream.read_exact(&mut buf[..4]).await?;
+            assert_eq!(buf[0], 0);
+            assert_eq!(buf[1], 0);
+            assert_ne!(buf[3], 3); //not reset_stream
+            assert_ne!(buf[3], 7); //not goaway
+            let off = buf[2] as usize + 5;
+            println!("wait2");
+            stream.read_exact(&mut buf[4..off + 4]).await?;
+            println!("got {:?}", &buf[..off + 4]);
+            if !ack && buf[3] == 4 && buf[4] == 0 {
+                //Settings
+                if let Some(opt) = assert_option {
+                    assert!(buf[4 + 5..].chunks(opt.len()).any(|kv| kv == opt));
+                }
+
+                println!("ack");
+                let req = b"\0\0\0\x04\x01\0\0\0\0";
+                stream.write_all(req).await?;
+                ack = true;
+            }
+            if buf[3] == 1 && buf[4]&4 == 4 {
+                //Header + END_STREAM + END_HEADERS
+                println!("headers done");
+                return Ok((buf[4] == 5, buf[9..].to_vec()));
+            }
+        }
     }
 }
