@@ -52,8 +52,12 @@ fn basic_config() {
 fn resolve_dns_later() {
     use std::net::*;
     assert!(matches!(ProxySocket::from(("test", 123)), ProxySocket::Dns((s, 123)) if s == "test"));
-    assert!(matches!(ProxySocket::from(("127.0.0.1", 123)), ProxySocket::Ip(SocketAddr::V4(ip4)) if *ip4.ip() == Ipv4Addr::LOCALHOST));
-    assert!(matches!(ProxySocket::from(("::1", 123)), ProxySocket::Ip(SocketAddr::V6(ip6)) if *ip6.ip() == Ipv6Addr::LOCALHOST));
+    assert!(
+        matches!(ProxySocket::from(("127.0.0.1", 123)), ProxySocket::Ip(SocketAddr::V4(ip4)) if *ip4.ip() == Ipv4Addr::LOCALHOST)
+    );
+    assert!(
+        matches!(ProxySocket::from(("::1", 123)), ProxySocket::Ip(SocketAddr::V6(ip6)) if *ip6.ip() == Ipv6Addr::LOCALHOST)
+    );
 }
 
 /// send a request to a proxy mount and return its TcpStream
@@ -885,4 +889,86 @@ async fn upgrade_h2() {
         b"\0\0\x03\0\0\0\0\0\x01\xff\xfe\x00\0\0\0\0\x01\0\0\0\x01"
     );
     println!("all done");
+}
+
+#[tokio::test]
+async fn filter_method() {
+    let req = Request::get("/mount/some/path")
+        .header(header::CONNECTION, "Upgrade")
+        .header(header::UPGRADE, "websocket")
+        .version(Version::HTTP_11)
+        .body(TestBody::empty())
+        .unwrap();
+    let (mut s, t) = test_forward(
+        req,
+        create_conf(|p| {
+            p.forward = "http://ignored/base_path".to_string().try_into().unwrap();
+            p.allowed_methods = Some(vec!["put".to_string()]);
+        }),
+    )
+    .await;
+
+    let mut buf = [0u8; 25];
+    let i = s.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf[..i], b"GET /base_path/some/path ");
+
+    s.write_all(b"HTTP/1.0 404 Not so OK\r\n\r\n")
+        .await
+        .unwrap();
+    let r = t.await.unwrap();
+    assert_eq!(r.status(), 404);
+
+    let req = Request::get("/mount/some/path")
+        .body(TestBody::empty())
+        .unwrap();
+    let (_s, t) = test_forward(
+        req,
+        create_conf(|p| {
+            p.forward = "http://ignored/base_path".to_string().try_into().unwrap();
+            p.allowed_methods = Some(vec!["put".to_string()]);
+        }),
+    )
+    .await;
+
+    let r = t.await.unwrap();
+    assert_eq!(r.status(), 405);
+}
+
+#[tokio::test]
+async fn dont_upgrade_h11() {
+    let (mut client, target_listener) = full_server_test(
+        |p| {
+            p.force_dir = false;
+            p.allowed_upgrades = Some(vec![]);
+        },
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+        None,
+    )
+    .await
+    .unwrap();
+
+    let t = tokio::spawn(async move {
+        let (mut server, _) = target_listener.accept().await.unwrap();
+        let mut buf = Vec::with_capacity(4096);
+        server.read_buf(&mut buf).await.unwrap();
+
+        assert!(
+            get_header(&buf, "connection").map_or(true, |h| !h.windows(7).any(|s| s == b"upgrade"))
+        );
+        assert_eq!(get_header(&buf, "upgrade"), None);
+        server.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+    });
+
+    client
+        .write_all(b"GET /a HTTP/1.1\r\nUpgrade: something\r\nConnection: Upgrade\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = Vec::with_capacity(4096);
+    client.read_buf(&mut buf).await.unwrap();
+    assert_eq!(&buf[..17], b"HTTP/1.1 200 OK\r\n"); //HTTP/1.1 502 Bad
+    assert_eq!(get_header(&buf, "connection"), None);
+    assert_eq!(get_header(&buf, "upgrade"), None);
+
+    t.await.unwrap();
 }
