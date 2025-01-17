@@ -183,21 +183,7 @@ fn load_private_key(filename: &Path) -> Result<PrivateKey, io::Error> {
     let keyfile = fs::File::open(filename)?;
     let mut reader = io::BufReader::new(keyfile);
 
-    loop {
-        match rustls_pemfile::read_one(&mut reader).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "cannot parse private key .pem file",
-            )
-        })? {
-            Some(rustls_pemfile::Item::Pkcs1Key(key)) => return Ok(PrivateKey::Pkcs1(key)),
-            Some(rustls_pemfile::Item::Pkcs8Key(key)) => return Ok(PrivateKey::Pkcs8(key)),
-            Some(rustls_pemfile::Item::Sec1Key(key)) => return Ok(PrivateKey::Sec1(key)),
-            None => break,
-            _ => {}
-        }
-    }
-    Err(io::Error::new(
+    rustls_pemfile::private_key(&mut reader)?.ok_or(io::Error::new(
         io::ErrorKind::InvalidData,
         "expected a single private key",
     ))
