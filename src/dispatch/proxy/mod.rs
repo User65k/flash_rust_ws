@@ -145,7 +145,7 @@ fn filter_header(headers: &mut HeaderMap, filter: &Option<Vec<HeaderNameCfg>>) {
         let mut last = true;
         headers.extend(old.into_iter().filter(|(h, _v)| {
             if let Some(h) = h {
-                last = allowed.iter().any(|a| a.0 == *h);
+                last = [header::CONTENT_LENGTH, header::CONTENT_TYPE].iter().any(|a| a == h) || allowed.iter().any(|a| a.0 == *h);
             }
             last
         }));
