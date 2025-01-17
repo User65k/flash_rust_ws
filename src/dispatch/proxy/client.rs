@@ -29,15 +29,17 @@ impl super::Proxy {
             if let Some(pool) = client.h1.write().await.as_mut() {
                 let stat = pool.status();
                 match if stat.size == stat.max_size {
-                    pool.get().await
+                    pool.get().await //can't timeout
                 } else {
-                    pool.try_get()
+                    pool.try_get() //get,forget permit
                 } {
                     Ok(mut h1) => {
                         match h1.ready().await {
                             Err(_e) => {
                                 //only error here is is_closed
                                 let _ = Object::take(h1);
+                                //try again without connecting
+                                continue;
                             }
                             Ok(()) => {
                                 //persist connection, if its not an upgrade
@@ -50,12 +52,14 @@ impl super::Proxy {
                                 }
                                 let res = h1.send_request(req).await;
                                 //is_ready / is_closed
-                                tokio::spawn(delay_drop(h1));
+                                if !h1.is_ready() {
+                                    tokio::spawn(delay_drop(h1));
+                                }
                                 return res.map_err(IoError::other);
                             }
                         }
                     }
-                    Err(PoolError::Timeout) => {} //connect a new IO
+                    Err(PoolError::Timeout) => {} //semaphore:NoPermits && size < max_size -> connect a new IO
                     Err(PoolError::Closed) => unreachable!("pool should not close"),
                     Err(PoolError::NoRuntimeSpecified) => unreachable!("pool not using timeout"),
                 }
