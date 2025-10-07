@@ -378,7 +378,18 @@ pub async fn forward(
             return Ok(resp);
         }
     };
-    debug!("response: {:?} {:?}", resp.status(), resp.headers());
+    if log::log_enabled!(log::Level::Debug) {
+        let mut resp_gist = String::with_capacity(128);
+        for h in [header::DATE, header::CONTENT_LENGTH, header::CONTENT_TYPE, header::LOCATION] {
+            if let Some(v) = resp.headers().get(&h) {
+                resp_gist.push(' ');
+                resp_gist.push_str(h.as_str());
+                resp_gist.push_str(": ");
+                resp_gist.push_str(v.to_str().unwrap_or_default());
+            }
+        }
+        debug!("response: {:?}{}", resp.status(), resp_gist);
+    }
 
     let resp_upgrade =
         if resp.status() == StatusCode::SWITCHING_PROTOCOLS && resp.version() == Version::HTTP_11 {
