@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use log::{info, trace};
 use md5::Context;
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::TryRngCore;
 use std::io::{Error as IoError, ErrorKind};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,7 +18,7 @@ use log::{log_enabled, Level::Trace};
 
 lazy_static! {
     static ref NONCESTARTHASH: Context = {
-        let rnd = OsRng.next_u64();
+        let rnd = OsRng.try_next_u64().unwrap();
 
         let mut h = Context::new();
         h.consume(rnd.to_be_bytes());

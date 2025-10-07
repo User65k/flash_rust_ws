@@ -255,7 +255,9 @@ pub(crate) mod tests {
         l: TcpListener,
         a: SocketAddr,
         w: WwwRoot,
-        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<transport::tls::ParsedTLSConfig>,
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<
+            transport::tls::ParsedTLSConfig,
+        >,
     ) -> JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
         let mut listening_ifs = HashMap::new();
         let mut cfg = HostCfg::new(l.into_std().unwrap());
@@ -321,11 +323,11 @@ pub(crate) mod tests {
         transport::tls::ParsedTLSConfig,
     ) {
         use crate::dispatch::test::TempFile;
-        use rand::{rngs::OsRng, RngCore};
+        use rand::{rngs::OsRng, TryRngCore};
         use rustls_pemfile::{read_one, Item};
         use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
-        let tls_inst = OsRng.next_u32();
+        let tls_inst = OsRng.try_next_u32().unwrap();
         let key_file = TempFile::create(
             &format!("edkey{}.pem", tls_inst),
             crate::transport::tls::test::ED_KEY,
@@ -416,24 +418,21 @@ pub(crate) mod tests {
             connector.connect(dnsname, stream).await.unwrap()
         };
 
-        let req = b"\0\0\x15\x01\x05\0\0\0\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
+        let req =
+            b"\0\0\x15\x01\x05\0\0\0\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
         /*headers = [
             (':method', 'GET'),
             (':path', '/a/b'),
             (':authority', SERVER_NAME),
             (':scheme', 'https'),
         ]*/
-        let (end_stream, header) = h2_client(
-            &mut stream,
-            req,
-            None,
-        ).await.unwrap();
+        let (end_stream, header) = h2_client(&mut stream, req, None).await.unwrap();
         assert!(end_stream);
         assert_eq!(header[0], 0x88);
     }
     /// connect to a H2 server, send PREFACE, empty Options and a `req`. Ack settings. Wait for the return headers.
     /// Return if END_STREAM was set and the last header payload
-    pub(crate) async fn h2_client<RW: tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(
+    pub(crate) async fn h2_client<RW: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         stream: &mut RW,
         req: &[u8],
         assert_option: Option<&[u8]>,
@@ -466,7 +465,7 @@ pub(crate) mod tests {
                 stream.write_all(req).await?;
                 ack = true;
             }
-            if buf[3] == 1 && buf[4]&4 == 4 {
+            if buf[3] == 1 && buf[4] & 4 == 4 {
                 //Header + END_STREAM + END_HEADERS
                 println!("headers done");
                 return Ok((buf[4] == 5, buf[9..].to_vec()));

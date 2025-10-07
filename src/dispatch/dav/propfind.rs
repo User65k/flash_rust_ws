@@ -94,13 +94,10 @@ async fn get_props_wanted(body: IncomingBody) -> Result<Vec<OwnedName>, IoError>
             .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
             .reader();
 
-        let xml = EventReader::new_with_config(
-            read,
-            ParserConfig {
-                trim_whitespace: true,
-                ..Default::default()
-            },
-        );
+        let xml = ParserConfig::new()
+            .trim_whitespace(true)
+            .allow_multiple_root_elements(false)
+            .create_reader(read);
         let mut props = Vec::new();
         parse_propfind(xml, |prop| {
             props.push(prop);
