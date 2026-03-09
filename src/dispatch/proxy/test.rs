@@ -35,11 +35,12 @@ fn create_conf(f: impl FnOnce(&mut Proxy)) -> Proxy {
 
 #[test]
 fn basic_config() {
-    if let Ok(UseCase::Proxy(p)) = toml::from_str(
+    let r = toml::from_str(
         r#"
         forward = "http://remote/path"
     "#,
-    ) {
+    );
+    if let UseCase::Proxy(p) = r.unwrap() {
         assert_eq!(p.forward.host, "remote");
         assert_eq!(p.forward.scheme, uri::Scheme::HTTP);
         assert_eq!(p.forward.path, Utf8PathBuf::from("/path"));

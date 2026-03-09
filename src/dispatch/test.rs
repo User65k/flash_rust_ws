@@ -91,7 +91,7 @@ mod mount {
         let cfg = config::VHost::new(sa);
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
-        assert_eq!(res.reason, "not a mount path");
+        assert_eq!(res.reason, "not a mount path: WebPath(\"\")");
     }
     #[tokio::test]
     async fn full_folder_names_as_mounts() {
@@ -161,7 +161,7 @@ mod mount {
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
         assert_eq!(res.code, StatusCode::FORBIDDEN);
-        assert_eq!(res.reason, "not a mount path");
+        assert_eq!(res.reason, "not a mount path: WebPath(\"b\")");
     }
     #[tokio::test]
     async fn path_trav_outside_webroot() {
@@ -363,7 +363,7 @@ mod vhost {
 
         let res = dispatch_to_vhost(req, cfg, sa).await;
         let res = res.unwrap_err();
-        assert_eq!(res.reason, "not a mount path");
+        assert_eq!(res.reason, "not a mount path: WebPath(\"\")");
     }
     #[tokio::test]
     async fn default_vhost() {
@@ -374,7 +374,7 @@ mod vhost {
 
         let res = dispatch_to_vhost(req, cfg, sa).await;
         let res = res.unwrap_err();
-        assert_eq!(res.reason, "not a mount path");
+        assert_eq!(res.reason, "not a mount path: WebPath(\"\")");
     }
 }
 

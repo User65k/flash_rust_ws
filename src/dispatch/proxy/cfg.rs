@@ -50,8 +50,10 @@ pub struct Proxy {
     pub(super) filter_req_header: Option<Vec<HeaderNameCfg>>,
     pub(super) filter_resp_header: Option<Vec<HeaderNameCfg>>,
     ///path adjustment in localtion headers
+    #[serde(default)]
     pub(super) location_jail: RewriteUrls,
     ///path adjustment in the body
+    #[serde(default)]
     pub(super) rewrite_urls: RewriteUrls,
     #[serde(skip)]
     pub(super) client: Option<Client>,
