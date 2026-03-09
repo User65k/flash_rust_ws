@@ -75,7 +75,7 @@ async fn prepare_hyper_servers(
                                         //this was an ACME challenge. Don't print an error
                                         continue;
                                     }
-                                    error!("{:?}", e);
+                                    error!("TLS Handshake {:?}", e);//TODO Os { code: 113, kind: HostUnreachable, message: "No route to host" }
                                     continue;
                                 }
                             };

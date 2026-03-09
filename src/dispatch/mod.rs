@@ -269,7 +269,7 @@ async fn handle_vhost(
 
     Err(IoError::new(
         ErrorKind::PermissionDenied,
-        "not a mount path",
+        format!("not a mount path: {:?}", req.path()),
     ))
 }
 
@@ -331,7 +331,7 @@ pub(crate) async fn handle_request(
     dispatch_to_vhost(req, cfg, remote_addr)
         .await
         .or_else(|err| {
-            error!("{}", err);
+            error!("handle_request {}", err);
             if let Some(cause) = err.get_ref() {
                 let mut e: &dyn Error = cause;
                 loop {
