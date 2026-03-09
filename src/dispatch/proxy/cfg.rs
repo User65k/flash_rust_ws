@@ -40,6 +40,7 @@ pub struct Proxy {
     #[serde(default = "pool_size")]
     pub(super) h1_pool_size: usize,
     #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
+    /// cert to expect from the upstream server
     pub(super) tls_root: Option<super::client::tls::RootCert>,
     //timeout: u8,
     //max_req_body_size: u32,
@@ -48,6 +49,10 @@ pub struct Proxy {
     //header_policy: u8,
     pub(super) filter_req_header: Option<Vec<HeaderNameCfg>>,
     pub(super) filter_resp_header: Option<Vec<HeaderNameCfg>>,
+    ///path adjustment in localtion headers
+    pub(super) location_jail: RewriteUrls,
+    ///path adjustment in the body
+    pub(super) rewrite_urls: RewriteUrls,
     #[serde(skip)]
     pub(super) client: Option<Client>,
 }
@@ -56,6 +61,28 @@ fn yes() -> bool {
 }
 fn pool_size() -> usize {
     10
+}
+
+#[derive(Deserialize, Debug, Default)]
+#[serde(try_from = "String")]
+pub enum RewriteUrls {
+    #[default]
+    DontRewrite,
+    ForceWebmount,
+    /// remove String and the force webmount
+    StripPath(String),
+    //advanced option: regex?
+}
+impl TryFrom<String> for RewriteUrls {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "on" | "yes" | "true" => Ok(RewriteUrls::ForceWebmount),
+            path if path.starts_with('/') => Ok(RewriteUrls::StripPath(value)),
+            _ => anyhow::bail!("true or absolute uri"),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]

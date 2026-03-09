@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut, BytesMut};
 use chrono::{DateTime, Utc};
+use exn::ResultExt;
 use hyper::{body::Body as _, Response, StatusCode};
 use std::{
     fs::Metadata,
@@ -16,7 +17,10 @@ use xml::{
     EmitterConfig, ParserConfig,
 };
 
-use crate::config::AbsPathBuf;
+use crate::{
+    body::{FRWSErr, StatusResult},
+    config::AbsPathBuf,
+};
 use crate::{
     body::{FRWSResult, IncomingBody, IncomingBodyTrait},
     dispatch::Req,
@@ -41,7 +45,9 @@ pub async fn handle_propfind(
 
     //log::debug!("Propfind {:?} {:?}", path, props);
 
-    let meta = metadata(&path).await?;
+    let meta = metadata(&path)
+        .await
+        .map_err(|io| FRWSErr::from_io(io, "could not get metadata from file"))?;
 
     let mut buf = BytesMut::new().writer();
     let mut xmlwriter = EventWriter::new_with_config(
@@ -51,28 +57,29 @@ pub async fn handle_propfind(
             ..Default::default()
         },
     );
+    let xml_err = || FRWSErr::new(StatusCode::INTERNAL_SERVER_ERROR, "xml writer failed");
     xmlwriter
         .write(XmlWEvent::StartDocument {
             version: XmlVersion::Version10,
             encoding: Some("utf-8"),
             standalone: None,
         })
-        .map_err(|se| IoError::new(ErrorKind::Other, se))?;
+        .or_raise(xml_err)?;
     xmlwriter
         .write(XmlWEvent::start_element("D:multistatus").ns("D", "DAV:"))
-        .map_err(|se| IoError::new(ErrorKind::Other, se))?;
+        .or_raise(xml_err)?;
 
     handle_propfind_path(&mut xmlwriter, &path, root, &web_mount, &meta, &props)
-        .map_err(|se| IoError::new(ErrorKind::Other, se))?;
+        .or_raise(xml_err)?;
     if meta.is_dir() && depth > 0 {
         handle_propfind_path_recursive(&path, root, &web_mount, depth, &mut xmlwriter, &props)
             .await
-            .map_err(|se| IoError::new(ErrorKind::Other, se))?;
+            .or_raise(xml_err)?;
     }
 
     xmlwriter
         .write(XmlWEvent::end_element())
-        .map_err(|se| IoError::new(ErrorKind::Other, se))?;
+        .or_raise(xml_err)?;
 
     let mut res = Response::new(buf.into());
 
@@ -80,7 +87,7 @@ pub async fn handle_propfind(
     Ok(res)
 }
 
-async fn get_props_wanted(body: IncomingBody) -> Result<Vec<OwnedName>, IoError> {
+async fn get_props_wanted(body: IncomingBody) -> StatusResult<Vec<OwnedName>> {
     if let Some(0) = body.size_hint().exact() {
         //Windows explorer does not send a body
         Ok(vec![
@@ -88,11 +95,7 @@ async fn get_props_wanted(body: IncomingBody) -> Result<Vec<OwnedName>, IoError>
             OwnedName::qualified("getcontentlength", "DAV", Option::<String>::None),
         ])
     } else {
-        let read = body
-            .buffer(9 * 1024)
-            .await
-            .map_err(|se| IoError::new(ErrorKind::InvalidData, se))?
-            .reader();
+        let read = body.buffer(9 * 1024).await?.reader();
 
         let xml = ParserConfig::new()
             .trim_whitespace(true)
@@ -102,7 +105,7 @@ async fn get_props_wanted(body: IncomingBody) -> Result<Vec<OwnedName>, IoError>
         parse_propfind(xml, |prop| {
             props.push(prop);
         })
-        .map_err(|_| IoError::new(ErrorKind::InvalidData, "xml parse error"))?;
+        .or_raise(|| FRWSErr::new(StatusCode::BAD_REQUEST, "xml parse error"))?;
         Ok(props)
     }
 }

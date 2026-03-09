@@ -1,16 +1,21 @@
+use exn::{bail, Exn};
 use hyper::Uri;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
+use crate::body::FRWSErr;
 use crate::config::AbsPathBuf;
 
 impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
-    type Error = IoError;
+    type Error = Exn<FRWSErr>;
     fn try_from(uri: &'a Uri) -> Result<Self, Self::Error> {
         if !uri.path().starts_with('/') {
-            return Err(IoError::new(ErrorKind::InvalidData, "path does not start with /"));
+            bail!(FRWSErr::new(
+                hyper::StatusCode::BAD_REQUEST,
+                "path does not start with /"
+            ));
         }
 
         let path = percent_encoding::percent_decode_str(&uri.path()[1..]).decode_utf8_lossy();
@@ -19,7 +24,7 @@ impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
 
         #[cfg(windows)]
         if path.contains('\\') {
-            return Err(IoError::new(ErrorKind::InvalidData, "win dir sep"));
+            bail!(FRWSErr::new(hyper::StatusCode::BAD_REQUEST, "win dir sep"));
         }
 
         let mut parts = Vec::new();
@@ -41,7 +46,7 @@ impl<'a> TryFrom<&'a Uri> for WebPath<'a> {
                 }
                 ".." => {
                     if parts.pop().is_none() {
-                        return Err(IoError::new(ErrorKind::PermissionDenied, "path traversal"));
+                        bail!(FRWSErr::new(hyper::StatusCode::FORBIDDEN, "path traversal"));
                     }
                     skip += 3;
                 }
@@ -127,12 +132,7 @@ impl<'a> WebPath<'a> {
         Ok(WebPath(Cow::from(&self.0[offset..])))
     }
     /// Create "/{pre}/{WebPath}" and leave extra_cap of free space at the end
-    pub fn prefixed_as_abs_url_path(
-        &self,
-        pre: &str,
-        extra_cap: usize,
-        encode: bool,
-    ) -> String {
+    pub fn prefixed_as_abs_url_path(&self, pre: &str, extra_cap: usize, encode: bool) -> String {
         //https://docs.rs/hyper-staticfile/latest/src/hyper_staticfile/response_builder.rs.html#75-123
         let s = self.0.as_ref();
         let capa = pre.len() + s.len() + extra_cap + 2;
@@ -179,7 +179,7 @@ pub struct Req<B> {
     body: B,
 }
 impl<B> Req<B> {
-    pub fn from_req(req: hyper::Request<B>) -> Result<Req<B>, IoError> {
+    pub fn from_req(req: hyper::Request<B>) -> Result<Req<B>, Exn<FRWSErr>> {
         let (parts, body) = req.into_parts();
         let req_path = WebPath::try_from(&parts.uri)?;
         let path = match req_path.0 {
@@ -247,7 +247,7 @@ impl<B> Req<B> {
             WebPathSelfRef::Borrowed(b) => &self.parts.uri.path()[*b..*b + self.prefix_len],
         };
         if m.ends_with('/') {
-            return &m[..self.prefix_len-1];
+            return &m[..self.prefix_len - 1];
         }
         m
     }
@@ -308,8 +308,8 @@ mod tests {
         assert_eq!(
             WebPath::try_from(&"/../../".parse().unwrap())
                 .unwrap_err()
-                .kind(),
-            ErrorKind::PermissionDenied
+                .code,
+            hyper::StatusCode::FORBIDDEN
         );
         assert_eq!(
             WebPath::try_from(&"/a/c:/b".parse().unwrap()).unwrap().0,
@@ -391,8 +391,8 @@ mod tests {
         assert_eq!(
             WebPath::try_from(&"//./j/../a/.././../".parse().unwrap())
                 .unwrap_err()
-                .kind(),
-            ErrorKind::PermissionDenied
+                .code,
+            hyper::StatusCode::FORBIDDEN
         );
         assert_eq!(
             WebPath::try_from(&"//./j/../a/./k".parse().unwrap())
@@ -476,9 +476,7 @@ mod tests {
     #[test]
     fn misc() {
         assert!(matches!(
-            WebPath::try_from(&"/test/c/".parse().unwrap())
-                .unwrap()
-                .0,
+            WebPath::try_from(&"/test/c/".parse().unwrap()).unwrap().0,
             Cow::Borrowed("test/c/")
         ));
     }

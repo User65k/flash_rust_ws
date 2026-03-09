@@ -1,7 +1,8 @@
 use bytes::BytesMut;
+use exn::bail;
 use hyper::{header, HeaderMap, Response, StatusCode};
 use log::error;
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::net::SocketAddr;
 use tokio_util::codec::{Decoder, Framed};
 use websocket_codec::{ClientRequest, Message, MessageCodec, Opcode};
@@ -11,6 +12,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::body::FRWSErr;
 use crate::{
     body::{BoxBody, FRWSResult, IncomingBody},
     dispatch::{upgrades::MyUpgraded, webpath::Req},
@@ -59,7 +61,7 @@ pub async fn upgrade(
             }) {
                 req.ws_accept()
             } else {
-                return Err(IoError::new(ErrorKind::InvalidData, "wrong WS update"));
+                bail!(FRWSErr::new(StatusCode::BAD_REQUEST, "wrong WS update"));
             };
 
             let headers = res.headers_mut();
@@ -92,7 +94,7 @@ pub async fn upgrade(
                 }
             }
             if !check_h2_ws(&parts) {
-                return Err(IoError::new(ErrorKind::InvalidData, "wrong WS update"));
+                bail!(FRWSErr::new(StatusCode::BAD_REQUEST, "wrong WS update"));
             }
             *res.status_mut() = StatusCode::OK;
         }
@@ -452,8 +454,10 @@ mod tests {
         let (end_stream, header) = crate::tests::h2_client(
             &mut stream,
             req,
-            Some(b"\0\x08\0\0\0\x01"),//SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
-        ).await.unwrap();
+            Some(b"\0\x08\0\0\0\x01"), //SETTINGS_ENABLE_CONNECT_PROTOCOL (8) = 1
+        )
+        .await
+        .unwrap();
         assert!(!end_stream);
         assert_eq!(header[0], 0x88);
         //DATA

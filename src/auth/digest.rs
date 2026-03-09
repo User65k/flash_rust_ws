@@ -1,13 +1,13 @@
-use crate::auth::{get_map_from_header, strip_prefix};
-use crate::body::{BoxBody, FRWSResp};
+use crate::auth::{get_map_from_header, strip_prefix, AuthResult};
+use crate::body::{BoxBody, FRWSErr, FRWSResp};
 use crate::dispatch::Req;
+use exn::{bail, ResultExt};
 use hyper::{body::Body, header, Response, StatusCode};
 use lazy_static::lazy_static;
 use log::{info, trace};
 use md5::Context;
 use rand::rngs::OsRng;
 use rand::TryRngCore;
-use std::io::{Error as IoError, ErrorKind};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
@@ -94,11 +94,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool, ()> {
     Err(())
 }
 
-pub async fn check_digest<B: Body>(
-    auth_file: &Path,
-    req: &Req<B>,
-    realm: &str,
-) -> Result<Option<FRWSResp>, IoError> {
+pub async fn check_digest<B: Body>(auth_file: &Path, req: &Req<B>, realm: &str) -> AuthResult {
     match req
         .headers()
         .get(header::AUTHORIZATION)
@@ -131,18 +127,29 @@ pub async fn check_digest<B: Body>(
                         Ok(true) => {}                                                     // good
                         Ok(false) => return Ok(Some(create_resp_needs_auth(realm, true))), // old
                         Err(()) => {
-                            return Err(IoError::new(ErrorKind::PermissionDenied, "Invalid Nonce"))
+                            bail!(FRWSErr::new(StatusCode::FORBIDDEN, "Invalid Nonce"))
                         } // strange
                     }
 
-                    let file = File::open(auth_file).await?;
+                    let file = File::open(auth_file).await.or_raise(|| {
+                        FRWSErr::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "cant read user auth file",
+                        )
+                    })?;
                     let mut file = BufReader::new(file);
 
                     //read HA1 from file
                     //HA1 = make_md5(username+":"+realm+":"+password)
                     let mut ha1 = loop {
                         let mut buf = String::new();
-                        if file.read_line(&mut buf).await? < 1 {
+                        if file.read_line(&mut buf).await.or_raise(|| {
+                            FRWSErr::new(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "cant read user auth file",
+                            )
+                        })? < 1
+                        {
                             //user not found
                             info!("user not found");
                             //don't return to avaid timing attacks
@@ -233,7 +240,7 @@ pub async fn check_digest<B: Body>(
                 }
             }
             //there is an auth header, but its garbage - at least to us
-            Err(IoError::new(ErrorKind::InvalidData, "auth failed"))
+            bail!(FRWSErr::new(StatusCode::BAD_REQUEST, "auth failed"))
         }
     }
 }
@@ -368,13 +375,13 @@ mod tests {
         let e = check_digest(&path, &h, &String::from("abc"))
             .await
             .unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData);
+        assert_eq!(e.code, StatusCode::BAD_REQUEST);
 
         let h = create_req(Some("Digest ===,,"));
         let e = check_digest(&path, &h, &String::from("abc"))
             .await
             .unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData);
+        assert_eq!(e.code, StatusCode::BAD_REQUEST);
     }
     #[test]
     fn nonce() {

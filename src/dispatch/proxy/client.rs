@@ -61,7 +61,9 @@ impl super::Proxy {
                             }
                         }
                     }
-                    Err(PoolError::Timeout) => {log::trace!("pool could use another con");} //semaphore:NoPermits && size < max_size -> connect a new IO
+                    Err(PoolError::Timeout) => {
+                        log::trace!("pool could use another con");
+                    } //semaphore:NoPermits && size < max_size -> connect a new IO
                     Err(PoolError::Closed) => unreachable!("pool should not close"),
                     Err(PoolError::NoRuntimeSpecified) => unreachable!("pool not using timeout"),
                 }
@@ -107,9 +109,9 @@ impl Client {
     async fn add_to_h1_pool(&self, s: http1::SendRequest<IncomingBody>, max_size: usize) {
         let mut lock = self.h1.write().await;
         let pool = lock.get_or_insert(Pool::new(max_size)); //semaphore:0permits, size_semaphore:max
-        //pool.try_add(s).expect("pool should never close");
+                                                            //pool.try_add(s).expect("pool should never close");
         match pool.try_add(s) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err((s, PoolError::Timeout)) => {
                 log::warn!("pool add {:?}", pool.status());
                 pool.add(s).await.expect("wtf"); //FIXME size max
@@ -117,7 +119,6 @@ impl Client {
             Err((_, PoolError::Closed)) => unreachable!("pool should never close"),
             Err((_, PoolError::NoRuntimeSpecified)) => unreachable!("pool not using timeout"),
         }
-
     }
     async fn connect(&self, cfg: &super::Proxy) -> Result<(), IoError> {
         let addr = match &cfg.forward.addr {

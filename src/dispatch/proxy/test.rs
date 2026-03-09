@@ -26,6 +26,8 @@ fn create_conf(f: impl FnOnce(&mut Proxy)) -> Proxy {
         filter_resp_header: None,
         h1_pool_size: 2,
         tls_root: None,
+        location_jail: cfg::RewriteUrls::DontRewrite,
+        rewrite_urls: cfg::RewriteUrls::DontRewrite,
     };
     f(&mut p);
     p

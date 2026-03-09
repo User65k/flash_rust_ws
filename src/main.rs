@@ -66,16 +66,13 @@ async fn prepare_hyper_servers(
                                 Ok(s) => s,
                                 Err(e) => {
                                     #[cfg(feature = "tlsrust_acme")]
-                                    if e.get_ref()
-                                        .and_then(|b| {
-                                            b.downcast_ref::<transport::tls::ACMEdone>().map(|_| ())
-                                        })
-                                        .is_some()
+                                    if let Some(transport::tls::TlsErr::ACMEdone) =
+                                        e.frame().error().downcast_ref::<transport::tls::TlsErr>()
                                     {
                                         //this was an ACME challenge. Don't print an error
                                         continue;
                                     }
-                                    error!("TLS Handshake {:?}", e);//TODO Os { code: 113, kind: HostUnreachable, message: "No route to host" }
+                                    error!("TLS Handshake {:?}", e); //FIXME Os { code: 113, kind: HostUnreachable, message: "No route to host" }
                                     continue;
                                 }
                             };

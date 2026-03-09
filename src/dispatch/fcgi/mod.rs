@@ -4,6 +4,8 @@ pub(crate) mod test;
 pub use cfg::*;
 
 use bytes::{Bytes, BytesMut};
+use exn::{bail, Exn, Frame};
+use hyper::StatusCode;
 use hyper::{body::Body as _, Request, Response};
 use log::{debug, error, trace};
 use std::collections::HashMap;
@@ -15,6 +17,7 @@ use std::{
 };
 use tokio::time::timeout;
 
+use crate::body::{FRWSErr, StatusResult};
 use crate::{
     body::{BoxBody, BufferedBody, FRWSResult, IncomingBody, IncomingBodyTrait as _},
     config::StaticFiles,
@@ -46,19 +49,13 @@ pub async fn fcgi_call(
         app
     } else {
         error!("FCGI app not set");
-        return Err(IoError::new(
-            ErrorKind::NotConnected,
+        bail!(FRWSErr::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
             "FCGI app not available",
         ));
     };
 
-    let params = create_params(
-        fcgi_cfg,
-        &req,
-        fs_full_path,
-        path_info_offset,
-        remote_addr,
-    );
+    let params = create_params(fcgi_cfg, &req, fs_full_path, path_info_offset, remote_addr);
     trace!("to FCGI: {:?}", &params);
 
     let (req, body) = req.into_parts();
@@ -75,17 +72,7 @@ pub async fn fcgi_call(
                 //...but no len indicator
                 if let Some(max_size) = fcgi_cfg.buffer_request {
                     //read everything to memory
-                    match body.buffer(max_size).await {
-                        Ok(b) => b,
-                        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-                            //body is more than max_size -> abort
-                            return Ok(Response::builder()
-                                .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
-                                .body(BoxBody::empty())
-                                .expect("unable to build response"));
-                        }
-                        Err(e) => return Err(e),
-                    }
+                    body.buffer(max_size).await?
                 } else {
                     //reject it
                     return Ok(Response::builder()
@@ -104,14 +91,15 @@ pub async fn fcgi_call(
         0 => app.forward(req, params).await,
         secs => match timeout(Duration::from_secs(secs), app.forward(req, params)).await {
             Err(_) => {
-                return Err(IoError::new(
-                    ErrorKind::TimedOut,
+                bail!(FRWSErr::new(
+                    StatusCode::GATEWAY_TIMEOUT,
                     "FCGI app did not respond",
                 ))
             }
             Ok(resp) => resp,
         },
-    }?;
+    }
+    .map_err(|io| FRWSErr::from_io(io, "could not open file"))?;
     debug!("FCGI response: {:?} {:?}", resp.status(), resp.headers());
     //return types:
     resp.headers_mut().remove("Status");
@@ -176,10 +164,11 @@ fn create_params(
                 if add_index {
                     let index_file_name = full_path.file_name().and_then(|o| o.to_str());
                     if let Some(f) = index_file_name {
-                        abs_name = req
-                            .path()
-                            .prefixed_as_abs_url_path(req.mount(), f.len()+1, false);
-                        if !abs_name.ends_with('/') { // same as !req.path().is_empty()
+                        abs_name =
+                            req.path()
+                                .prefixed_as_abs_url_path(req.mount(), f.len() + 1, false);
+                        if !abs_name.ends_with('/') {
+                            // same as !req.path().is_empty()
                             abs_name.push('/');
                         }
                         abs_name.push_str(f);
@@ -213,9 +202,7 @@ fn create_params(
             Bytes::from(abs_web_mount),
         );
         //... so everything inside it is PATH_INFO
-        let abs_path = req
-            .path()
-            .prefixed_as_abs_url_path("", 0, false);
+        let abs_path = req.path().prefixed_as_abs_url_path("", 0, false);
         params.insert(
             // opt CGI/1.1   4.1.5
             Bytes::from(PATH_INFO),
@@ -262,7 +249,9 @@ fn create_params(
     );
     if fcgi_cfg.set_request_uri {
         let q = req.query();
-        let mut r_uri = req.path().prefixed_as_abs_url_path(req.mount(), q.map_or(0, |q| q.len() + 1), false);
+        let mut r_uri =
+            req.path()
+                .prefixed_as_abs_url_path(req.mount(), q.map_or(0, |q| q.len() + 1), false);
 
         if let Some(q) = q {
             r_uri.push('?');
@@ -283,10 +272,7 @@ fn create_params(
                 path_to_bytes(full_path)
             } else {
                 // I am guessing here
-                Bytes::from(
-                    req.path()
-                        .prefixed_as_abs_url_path("", 0, false),
-                )
+                Bytes::from(req.path().prefixed_as_abs_url_path("", 0, false))
             },
         );
     }
@@ -311,17 +297,30 @@ fn path_to_bytes<P: AsRef<Path>>(path: P) -> Bytes {
     // but end up with u16
     BytesMut::from(path.as_ref().to_string_lossy().to_string().as_bytes()).freeze()
 }
+
+fn find_error<T: std::error::Error + Send + Sync + 'static>(
+    exn: &Exn<impl std::error::Error + Send + Sync>,
+) -> Option<&T> {
+    fn walk<T: std::error::Error + Send + Sync + 'static>(frame: &Frame) -> Option<&T> {
+        if let Some(e) = frame.error().downcast_ref::<T>() {
+            return Some(e);
+        }
+        frame.children().iter().find_map(walk)
+    }
+    walk(exn.frame())
+}
+
 /// just like `staticf::resolve_path` but if a NotADirectory error would occur, it tries to split the request into file and PATH_INFO
 pub async fn resolve_path<'a>(
     full_path: PathBuf,
     is_dir_request: bool,
     sf: &StaticFiles,
     req: &'a Req<IncomingBody>,
-) -> Result<(PathBuf, staticf::ResolveResult, Option<usize>), IoError> {
+) -> StatusResult<(PathBuf, staticf::ResolveResult, Option<usize>)> {
     match staticf::resolve_path(&full_path, is_dir_request, &sf.index).await {
         Ok((p, r)) => Ok((p, r, None)),
         Err(err) => {
-            if error_indicates_path_info(&err) {
+            if find_error(&err).is_some_and(error_indicates_path_info) {
                 debug!("{:?} might have a PATH_INFO", &full_path);
                 /*
                 pop the last path component until we hit a file
@@ -347,7 +346,10 @@ pub async fn resolve_path<'a>(
                             if error_indicates_path_info(&e) {
                                 //keep going up
                             } else {
-                                return Err(e);
+                                bail!(FRWSErr::new(
+                                    StatusCode::NOT_FOUND,
+                                    "error while trying to split path_info"
+                                ));
                             }
                         }
                     }

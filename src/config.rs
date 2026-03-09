@@ -10,7 +10,7 @@ use crate::dispatch::test::UnitTestUseCase;
 use crate::dispatch::websocket::Websocket;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 use crate::transport::tls::{ParsedTLSConfig, TLSBuilderTrait, TlsUserConfig};
-use anyhow::{Context, Result};
+use exn::ResultExt as _;
 use hyper::header::HeaderName;
 use hyper::http::HeaderValue;
 use hyper::StatusCode;
@@ -354,8 +354,7 @@ pub struct Configuration {
     pub hosts: HashMap<String, VHost>,
 }
 
-#[derive(Debug)]
-struct CFGError {
+pub struct CFGError {
     errors: Vec<String>,
 }
 impl CFGError {
@@ -368,6 +367,9 @@ impl CFGError {
     fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
+    fn one(s: String) -> CFGError {
+        CFGError { errors: vec![s] }
+    }
 }
 impl fmt::Display for CFGError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -377,10 +379,15 @@ impl fmt::Display for CFGError {
         Ok(())
     }
 }
+impl fmt::Debug for CFGError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self, f)
+    }
+}
 impl std::error::Error for CFGError {}
 
 /// load and verify configuration options
-pub fn load_config() -> anyhow::Result<Configuration> {
+pub fn load_config() -> exn::Result<Configuration, CFGError> {
     #[cfg(not(test))]
     let path = {
         let mut path = None;
@@ -393,23 +400,18 @@ pub fn load_config() -> anyhow::Result<Configuration> {
         }
         match path {
             Some(p) => p,
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "No config file found!",
-                )
-                .into())
-            }
+            None => return Err(CFGError::one("No config file found!".into()).into()),
         }
     };
     #[cfg(test)]
     let path = "./test_cfg.toml";
 
     // read the whole file
-    let buffer =
-        read_to_string(&path).with_context(|| format!("Failed to open config from {:?}", path))?;
+    let buffer = read_to_string(&path)
+        .or_raise(|| CFGError::one(format!("Failed to open config from {:?}", path)))?;
 
-    let mut cfg = toml::from_str::<Configuration>(&buffer)?;
+    let mut cfg = toml::from_str::<Configuration>(&buffer)
+        .or_raise(|| CFGError::one("failed to parse config".into()))?;
     if log::log_enabled!(log::Level::Info) {
         for (host_name, vhost) in cfg.hosts.iter_mut() {
             info!("host: {} @ {}", host_name, vhost.ip);
@@ -451,7 +453,9 @@ impl fmt::Debug for HostCfg {
 /// - binds on the `SocketAddr`s,
 /// - executes and connects to FCGI servers
 /// - setup TLS config
-pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<SocketAddr, HostCfg>> {
+pub async fn group_config(
+    cfg: &mut Configuration,
+) -> exn::Result<HashMap<SocketAddr, HostCfg>, CFGError> {
     let mut listening_ifs = HashMap::new();
     let mut errors = CFGError::new();
     #[cfg(unix)]
@@ -492,11 +496,11 @@ pub async fn group_config(cfg: &mut Configuration) -> anyhow::Result<HashMap<Soc
                         .remove(&addr)
                         .ok_or(())
                         .or_else(|_| TcpListener::bind(addr))
-                        .with_context(|| format!("Failed to bind to {}", addr))?
+                        .or_raise(|| CFGError::one(format!("Failed to bind to {}", addr)))?
                 };
                 #[cfg(not(unix))]
                 let listener = TcpListener::bind(addr)
-                    .with_context(|| format!("Failed to bind to {}", addr))?;
+                    .or_raise(|| CFGError::one(format!("Failed to bind to {}", addr)))?;
                 let mut hcfg = HostCfg::new(listener);
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if let Some(tlscfg) = params.tls.as_ref() {

@@ -56,6 +56,7 @@ sha1 = {version="0.6", optional = true } # same as websocket-codec
 base64 = {version="0.13", optional = true } # same as websocket-codec
 
 anyhow = "1.0"
+exn = "0.3.0"
 async-stream-connection = {version="^1.0.1", features=["serde"], optional = true}
 
 [target.'cfg(unix)'.dependencies]

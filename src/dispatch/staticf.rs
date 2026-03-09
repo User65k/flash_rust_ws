@@ -1,10 +1,11 @@
-use hyper::{Method, Response};
+use exn::{bail, Exn, ResultExt as _};
+use hyper::{Method, Response, StatusCode};
 use hyper_staticfile::util::FileResponseBuilder;
 use hyper_staticfile::ResolvedFile;
 use log::debug;
 use mime_guess::{Mime, MimeGuess};
 use std::fs::{Metadata, OpenOptions as StdOpenOptions};
-use std::io::{Error as IoError, ErrorKind as IoErrorKind};
+use std::io::Error as IoError;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::fs::{File, OpenOptions};
@@ -12,7 +13,7 @@ use tokio::fs::{File, OpenOptions};
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
-use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
+use crate::body::{BoxBody, FRWSErr, FRWSResp, FRWSResult, IncomingBody, StatusResult};
 use crate::config::Utf8PathBuf;
 
 use super::webpath::Req;
@@ -111,14 +112,16 @@ pub async fn resolve_path(
     full_path: &Path,
     is_dir_request: bool,
     index_files: &Option<Vec<Utf8PathBuf>>,
-) -> Result<(PathBuf, ResolveResult), IoError> {
-    let (file, metadata) = open_with_metadata(&full_path).await?;
+) -> StatusResult<(PathBuf, ResolveResult)> {
+    let (file, metadata) = open_with_metadata(&full_path)
+        .await
+        .map_err(|io| FRWSErr::from_io(io, "could not open file"))?;
     debug!("have {:?}", metadata);
 
     // The resolved `full_path` doesn't contain the trailing slash anymore, so we may
     // have opened a file for a directory request, which we treat as 'not found'.
     if is_dir_request && !metadata.is_dir() {
-        return Err(IoError::new(IoErrorKind::NotFound, ""));
+        bail!(FRWSErr::new(StatusCode::NOT_FOUND, "file is opened as dir"));
     }
 
     // We may have opened a directory for a file request, in which case we redirect.
@@ -141,7 +144,7 @@ pub async fn resolve_path(
             if let Ok((file, metadata)) = open_with_metadata(&full_path_index).await {
                 // The directory index cannot itself be a directory.
                 if metadata.is_dir() {
-                    return Err(IoError::new(IoErrorKind::NotFound, ""));
+                    bail!(FRWSErr::new(StatusCode::NOT_FOUND, "index is dir"));
                 }
 
                 // Serve this file.
@@ -150,10 +153,7 @@ pub async fn resolve_path(
             }
         }
     }
-    Err(IoError::new(
-        IoErrorKind::PermissionDenied,
-        "dir w/o index file",
-    ))
+    bail!(FRWSErr::new(StatusCode::FORBIDDEN, "dir w/o index file",))
 }
 
 #[cfg(test)]
@@ -169,7 +169,7 @@ mod tests {
             webpath::Req,
         },
     };
-    use hyper::{header, Request};
+    use hyper::{header, Request, StatusCode};
     use std::path::Path;
     //use crate::dispatch::test::
 
@@ -248,8 +248,8 @@ mod tests {
         let req = Request::get("/mount/").body(TestBody::empty()).unwrap();
         let res = handle_wwwroot(req, sf).await;
         let res = res.unwrap_err();
-        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
-        assert_eq!(res.into_inner().unwrap().to_string(), "dir w/o index file");
+        assert_eq!(res.code, StatusCode::FORBIDDEN);
+        assert_eq!(res.reason, "dir w/o index file");
     }
     #[tokio::test]
     async fn allowlist_blocks() {
@@ -267,8 +267,8 @@ mod tests {
             .unwrap();
         let res = handle_wwwroot(req, sf).await;
         let res = res.unwrap_err();
-        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
-        assert_eq!(res.into_inner().unwrap().to_string(), "bad file extension");
+        assert_eq!(res.code, StatusCode::FORBIDDEN);
+        assert_eq!(res.reason, "bad file extension");
     }
     #[tokio::test]
     async fn allowlist_allows() {
@@ -335,7 +335,7 @@ mod tests {
 
         let res = handle_wwwroot(req, sf).await;
         let res = res.unwrap_err();
-        assert_eq!(res.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(res.code, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -395,7 +395,7 @@ mod tests {
             .body(TestBody::empty())
             .unwrap();
         let res = handle_wwwroot(req, sf).await.unwrap_err();
-        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(res.code, StatusCode::FORBIDDEN);
 
         let sf = StaticFiles {
             dir: AbsPathBuf::from(mount),
@@ -441,7 +441,7 @@ mod tests {
         };
         let req = Request::get("/mount/lnk").body(TestBody::empty()).unwrap();
         let res = handle_wwwroot(req, sf).await.unwrap_err();
-        assert_eq!(res.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(res.code, StatusCode::FORBIDDEN);
 
         let sf = StaticFiles {
             dir: AbsPathBuf::from(mount),

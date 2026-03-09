@@ -1,11 +1,12 @@
 use crate::{
-    body::{BoxBody, FRWSResult, IncomingBody},
+    body::{BoxBody, FRWSErr, FRWSResult, IncomingBody},
     config::HeaderNameCfg,
-    dispatch::{upgrades::MyUpgraded, webpath::Req},
+    dispatch::{proxy::cfg::RewriteUrls, upgrades::MyUpgraded, webpath::Req},
 };
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
+use exn::{bail, ResultExt};
 use hyper::{
-    header::{self, HeaderName, HeaderValue},
+    header::{self, HeaderName, HeaderValue, InvalidHeaderValue},
     http::uri,
     upgrade::OnUpgrade,
     HeaderMap, Response, StatusCode, Uri, Version,
@@ -145,7 +146,10 @@ fn filter_header(headers: &mut HeaderMap, filter: &Option<Vec<HeaderNameCfg>>) {
         let mut last = true;
         headers.extend(old.into_iter().filter(|(h, _v)| {
             if let Some(h) = h {
-                last = [header::CONTENT_LENGTH, header::CONTENT_TYPE].iter().any(|a| a == h) || allowed.iter().any(|a| a.0 == *h);
+                last = [header::CONTENT_LENGTH, header::CONTENT_TYPE]
+                    .iter()
+                    .any(|a| a == h)
+                    || allowed.iter().any(|a| a.0 == *h);
             }
             last
         }));
@@ -170,6 +174,17 @@ pub async fn forward(
         new_path.push_str(q);
     }
 
+    // we need the mount for rewrite shenanigans
+    let mount = if let RewriteUrls::DontRewrite = config.location_jail {
+        if let RewriteUrls::DontRewrite = config.rewrite_urls {
+            None
+        } else {
+            Some(req.mount().to_string())
+        }
+    } else {
+        Some(req.mount().to_string())
+    };
+
     let client_vers = req.version();
     let (mut parts, body) = req.into_parts();
 
@@ -188,7 +203,8 @@ pub async fn forward(
     let request_upgrade = if client_vers == Version::HTTP_11 {
         get_upgrade_type(&mut parts.headers).and_then(|u| check_upgrade(u, config))
     } else if client_vers == Version::HTTP_2 && parts.method == hyper::Method::CONNECT {
-        parts.extensions
+        parts
+            .extensions
             .get::<hyper::ext::Protocol>()
             .and_then(|p| HeaderValue::from_bytes(p.as_ref()).ok())
             .and_then(|up| check_upgrade(up, config))
@@ -204,7 +220,8 @@ pub async fn forward(
     remove_connection_headers(client_vers, &mut parts.headers);
     remove_hop_by_hop_headers(&mut parts.headers);
     if contains_te_trailers_value {
-        parts.headers
+        parts
+            .headers
             .insert(header::TE, HeaderValue::from_static(TRAILERS));
     }
     filter_header(&mut parts.headers, &config.filter_req_header);
@@ -242,8 +259,11 @@ pub async fn forward(
                 buf.extend_from_slice(host.as_str().as_bytes());
             }
             //;proto=http;by=203.0.113.43
-            parts.headers
-                .insert(header::FORWARDED, into_header_value(buf.freeze())?);
+            parts.headers.insert(
+                header::FORWARDED,
+                into_header_value(buf.freeze())
+                    .or_raise(|| FRWSErr::new(StatusCode::BAD_REQUEST, "invalid header"))?,
+            );
         }
         ForwardedHeader::Remove => {
             parts.headers.remove(header::FORWARDED);
@@ -271,7 +291,10 @@ pub async fn forward(
                     addr.extend_from_slice(b", ");
                 }
                 addr.extend_from_slice(client_ip_str.as_bytes());
-                entry.insert(into_header_value(addr.freeze())?);
+                entry.insert(
+                    into_header_value(addr.freeze())
+                        .or_raise(|| FRWSErr::new(StatusCode::BAD_REQUEST, "invalid header"))?,
+                );
             }
         }
     } else {
@@ -285,8 +308,11 @@ pub async fn forward(
             buf.extend_from_slice(b", ");
         }
         buf.extend_from_slice(format!("{:?} {}", client_vers, &host).as_bytes());
-        parts.headers
-            .insert(header::VIA, into_header_value(buf.freeze())?);
+        parts.headers.insert(
+            header::VIA,
+            into_header_value(buf.freeze())
+                .or_raise(|| FRWSErr::new(StatusCode::BAD_REQUEST, "invalid header"))?,
+        );
     } else {
         parts.headers.remove(header::VIA);
     }
@@ -326,9 +352,11 @@ pub async fn forward(
         };
         // turn upgrade into extended connect if needed (set :protocol)
         if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
-            parts.extensions.insert(hyper::ext::Protocol::from(
-                val.to_str().map_err(|_| ErrorKind::InvalidData)?,
-            ));
+            parts
+                .extensions
+                .insert(hyper::ext::Protocol::from(val.to_str().or_raise(|| {
+                    FRWSErr::new(StatusCode::BAD_REQUEST, "bad upgrade")
+                })?));
             parts.method = hyper::Method::CONNECT;
         }
 
@@ -345,11 +373,13 @@ pub async fn forward(
         trace!("Forward h1 to {}", &new_uri);
         parts.uri = new_uri;
         //new host header
-        parts.headers
+        parts
+            .headers
             .insert(header::HOST, config.forward.host.clone());
         // insert upgrad header if needed
         if let (Some(_), Some(val)) = (request_upgraded.as_ref(), request_upgrade.as_ref()) {
-            parts.headers
+            parts
+                .headers
                 .insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
             parts.headers.insert(header::UPGRADE, val.clone());
             if val == "websocket" && client_vers == Version::HTTP_2 {
@@ -380,7 +410,12 @@ pub async fn forward(
     };
     if log::log_enabled!(log::Level::Debug) {
         let mut resp_gist = String::with_capacity(128);
-        for h in [header::DATE, header::CONTENT_LENGTH, header::CONTENT_TYPE, header::LOCATION] {
+        for h in [
+            header::DATE,
+            header::CONTENT_LENGTH,
+            header::CONTENT_TYPE,
+            header::LOCATION,
+        ] {
             if let Some(v) = resp.headers().get(&h) {
                 resp_gist.push(' ');
                 resp_gist.push_str(h.as_str());
@@ -403,6 +438,39 @@ pub async fn forward(
     remove_hop_by_hop_headers(resp.headers_mut());
     filter_header(resp.headers_mut(), &config.filter_resp_header);
 
+    match config.location_jail {
+        cfg::RewriteUrls::DontRewrite => {}
+        cfg::RewriteUrls::ForceWebmount | cfg::RewriteUrls::StripPath(_) => {
+            if let Some(location_header) = resp.headers_mut().get_mut(header::LOCATION) {
+                let prefix = if let cfg::RewriteUrls::StripPath(p) = &config.location_jail {
+                    //replace a specific prefix ..
+                    p
+                } else {
+                    //.. or a absolute URI without authority
+                    "/"
+                };
+                if let Some(url) = location_header.as_bytes().strip_prefix(prefix.as_bytes()) {
+                    let mp = mount.expect("mount has a value");
+                    let mp = mp.as_bytes();
+                    let mut new_uri = Vec::with_capacity(mp.len() + 2 + url.len());
+                    new_uri.push(b'/');
+                    new_uri.put_slice(mp);
+                    new_uri.push(b'/');
+                    new_uri.put_slice(url);
+                    *location_header = new_uri.try_into().unwrap(); //can't happen was a HV before
+                }
+            }
+        }
+    }
+    //href= src=
+    // script ?
+    // css ?
+    match config.rewrite_urls {
+        cfg::RewriteUrls::DontRewrite => {}
+        cfg::RewriteUrls::ForceWebmount => todo!(),
+        cfg::RewriteUrls::StripPath(_) => todo!(),
+    }
+
     if let Some(host) = &config.add_via_header_to_client {
         //https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Via
         let mut buf = BytesMut::with_capacity(512);
@@ -411,17 +479,23 @@ pub async fn forward(
             buf.extend_from_slice(b", ");
         }
         buf.extend_from_slice(format!("{:?} {}", resp.version(), &host).as_bytes());
-        resp.headers_mut()
-            .insert(header::VIA, into_header_value(buf.freeze())?);
+        resp.headers_mut().insert(
+            header::VIA,
+            into_header_value(buf.freeze())
+                .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "invalid header"))?,
+        );
     }
 
-    if resp_upgrade.is_some() {
-        if request_upgrade != resp_upgrade {
+    if let Some(resp_upgrade_hdr) = resp_upgrade {
+        if request_upgrade
+            .as_ref()
+            .is_none_or(|u| u != resp_upgrade_hdr)
+        {
             error!(
                 "client upgrade {:?} != server upgrade {:?}",
-                request_upgrade, resp_upgrade
+                request_upgrade, resp_upgrade_hdr
             );
-            return Err(ErrorKind::InvalidInput.into());
+            bail!(FRWSErr::new(StatusCode::BAD_REQUEST, "upgrade missmatch"));
         }
         if let Some(request_upgraded) = request_upgraded {
             let response_upgraded = resp
@@ -447,7 +521,7 @@ pub async fn forward(
                 {
                     let h = resp.headers_mut();
                     h.insert(header::CONNECTION, HeaderValue::from_static("UPGRADE"));
-                    h.insert(header::UPGRADE, resp_upgrade.unwrap());
+                    h.insert(header::UPGRADE, resp_upgrade_hdr);
                     if let Some(ws_key) = ws_key {
                         //ACCEPT header if upstream is h2
                         let mut s = sha1::Sha1::new();
@@ -485,11 +559,6 @@ pub async fn forward(
     Ok(resp.map(BoxBody::Proxy))
 }
 #[inline]
-fn into_header_value(src: Bytes) -> Result<HeaderValue, IoError> {
-    HeaderValue::from_maybe_shared(src.clone()).map_err(|_e| {
-        IoError::new(
-            ErrorKind::InvalidData,
-            format!("Invalid Header Value for {:?}", &src),
-        )
-    })
+fn into_header_value(src: Bytes) -> Result<HeaderValue, InvalidHeaderValue> {
+    HeaderValue::from_maybe_shared(src.clone())
 }
