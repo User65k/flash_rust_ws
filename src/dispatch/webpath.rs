@@ -2,7 +2,6 @@ use exn::{bail, Exn};
 use hyper::Uri;
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
-use std::io::{Error as IoError, ErrorKind};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
 use crate::body::FRWSErr;
@@ -407,8 +406,8 @@ mod tests {
         assert_eq!(
             WebPath::try_from(&"/a\\..\\..\\..\\..\\..\\".parse().unwrap())
                 .unwrap_err()
-                .kind(),
-            ErrorKind::InvalidData
+                .code,
+            hyper::StatusCode::BAD_REQUEST
         );
     }
     #[test]

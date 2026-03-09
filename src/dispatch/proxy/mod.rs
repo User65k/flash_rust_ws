@@ -12,7 +12,7 @@ use hyper::{
     HeaderMap, Response, StatusCode, Uri, Version,
 };
 use log::{debug, error, trace};
-use std::io::{Error as IoError, ErrorKind};
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio::io::copy_bidirectional;
 

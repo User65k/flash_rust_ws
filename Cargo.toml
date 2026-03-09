@@ -19,7 +19,7 @@ log = "0.4"
 log4rs = { version = "1", default-features = false, features = ["all_components", "config_parsing"] }
 
 #config:
-toml = "0.9"        # config files in toml
+toml = "1.0"        # config files in toml
 serde = { version = "1.0", features = ["derive"] }
 
 #main:
@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", features=["codec"], optional = true }
 xml-rs = { version = "1.0", optional = true }
 chrono = { version = "0.4", optional = true }
 #proxy
-deadpool = {version="0.12", features=["unmanaged"], default-features = false, optional = true }
+deadpool = {version="0.13", features=["unmanaged"], default-features = false, optional = true }
 sha1 = {version="0.6", optional = true } # same as websocket-codec
 base64 = {version="0.13", optional = true } # same as websocket-codec
 

@@ -1,4 +1,4 @@
-use exn::{bail, Exn, ResultExt as _};
+use exn::bail;
 use hyper::{Method, Response, StatusCode};
 use hyper_staticfile::util::FileResponseBuilder;
 use hyper_staticfile::ResolvedFile;

@@ -179,7 +179,7 @@ fn load_certs(filename: &Path) -> Result<Vec<Certificate<'static>>, io::Error> {
 }
 
 // Load private key from file.
-fn load_private_key(filename: &Path) -> Result<PrivateKey, io::Error> {
+fn load_private_key(filename: &Path) -> Result<PrivateKey<'_>, io::Error> {
     let keyfile = fs::File::open(filename)?;
     let mut reader = io::BufReader::new(keyfile);
 
