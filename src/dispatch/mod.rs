@@ -329,7 +329,11 @@ pub(crate) async fn handle_request(
     dispatch_to_vhost(req, cfg, remote_addr)
         .await
         .or_else(|err| {
-            error!("handle_request {}", err);
+            if log::log_enabled!(log::Level::Debug) {
+                error!("handle_request {:?}", err);
+            }else{
+                error!("{}", err);
+            }
             Response::builder().status(err.code).body(BoxBody::empty())
         })
 }

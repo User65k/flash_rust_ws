@@ -13,8 +13,9 @@ use hyper::{body::Incoming, Request};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::error::Error;
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
@@ -40,13 +41,13 @@ use transport::PlainIncoming;
 /// If its config has TLS wrap the `PlainIncoming` into an `TlsAcceptor`
 async fn prepare_hyper_servers(
     mut listening_ifs: HashMap<SocketAddr, config::HostCfg>,
-) -> Result<Vec<JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>>, Box<dyn Error>> {
+) -> Result<Vec<JoinHandle<Result<(), Infallible>>>, IoError> {
     let mut handles = vec![];
     for (addr, mut cfg) in listening_ifs.drain() {
         let l = match cfg.listener.take() {
             Some(l) => l,
             None => {
-                return Err(Box::new(IoError::new(ErrorKind::Other, "could not listen")));
+                return Err(IoError::other("could not listen"));
             }
         };
         let server = match PlainIncoming::from_std(l) {
@@ -100,7 +101,7 @@ async fn prepare_hyper_servers(
                                     }
                                     _ => unreachable!("neither h1 nor h2"),
                                 } {
-                                    error!("{} -> {}: {}", remote_addr, addr, err);
+                                    print_hyper_error(remote_addr, addr, err);
                                 }
                             });
                         }
@@ -113,7 +114,7 @@ async fn prepare_hyper_servers(
             }
             Err(err) => {
                 error!("{}: {}", addr, err);
-                return Err(Box::new(err));
+                return Err(err);
             }
         };
         handles.push(server);
@@ -121,12 +122,25 @@ async fn prepare_hyper_servers(
     Ok(handles)
 }
 
+fn print_hyper_error(rem: SocketAddr, here: SocketAddr, err: hyper::Error) {
+    if !log::log_enabled!(log::Level::Debug) {
+        error!("{} -> {}: {}", rem, here, err);
+        return;
+    }
+    error!("{} -> {}: {:?}", rem, here, err);
+    let mut s = err.source();
+    while let Some(e) = s {
+        error!("   | {:?}", e);
+        s = e.source();
+    }
+}
+
 #[inline]
 async fn run_http11_server(
     incoming: PlainIncoming,
     addr: SocketAddr,
     hcfg: Arc<HostCfg>,
-) -> Result<(), hyper::Error> {
+) -> Result<(), Infallible> {
     let builder = hyper::server::conn::http1::Builder::new();
     loop {
         let (stream, remote_addr) = match incoming.accept().await {
@@ -151,7 +165,7 @@ async fn run_http11_server(
                 .with_upgrades()
                 .await
             {
-                error!("{} -> {}: {}", remote_addr, addr, err);
+                print_hyper_error(remote_addr, addr, err);
             }
         });
     }
@@ -255,7 +269,7 @@ pub(crate) mod tests {
         #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<
             transport::tls::ParsedTLSConfig,
         >,
-    ) -> JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
+    ) -> JoinHandle<Result<(), Infallible>> {
         let mut listening_ifs = HashMap::new();
         let mut cfg = HostCfg::new(l.into_std().unwrap());
 
