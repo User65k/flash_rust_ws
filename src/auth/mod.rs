@@ -2,6 +2,11 @@ use crate::body::{FRWSResp, IncomingBody, StatusResult};
 use crate::config::Authenticatoin;
 use crate::dispatch::Req;
 use std::collections::HashMap;
+
+/// can be:
+/// - an Error (with HTTP status)
+/// - `Ok(None)` aka Auth is ok, proceed
+/// - `Ok(HTTPResponse)` aka do stuff in oder to auth
 pub type AuthResult = StatusResult<Option<FRWSResp>>;
 
 mod digest;

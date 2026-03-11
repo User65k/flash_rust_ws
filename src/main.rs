@@ -13,7 +13,6 @@ use hyper::{body::Incoming, Request};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::error::Error;
 use std::io::Error as IoError;
 use std::net::SocketAddr;
@@ -41,7 +40,7 @@ use transport::PlainIncoming;
 /// If its config has TLS wrap the `PlainIncoming` into an `TlsAcceptor`
 async fn prepare_hyper_servers(
     mut listening_ifs: HashMap<SocketAddr, config::HostCfg>,
-) -> Result<Vec<JoinHandle<Result<(), Infallible>>>, IoError> {
+) -> Result<Vec<JoinHandle<()>>, IoError> {
     let mut handles = vec![];
     for (addr, mut cfg) in listening_ifs.drain() {
         let l = match cfg.listener.take() {
@@ -107,10 +106,7 @@ async fn prepare_hyper_servers(
                         }
                     });
                 }
-                tokio::spawn(async move {
-                    run_http11_server(incoming, addr, hcfg).await?;
-                    Ok(())
-                })
+                tokio::spawn(run_http11_server(incoming, addr, hcfg))
             }
             Err(err) => {
                 error!("{}: {}", addr, err);
@@ -130,7 +126,7 @@ fn print_hyper_error(rem: SocketAddr, here: SocketAddr, err: hyper::Error) {
     error!("{} -> {}: {:?}", rem, here, err);
     let mut s = err.source();
     while let Some(e) = s {
-        error!("   | {:?}", e);
+        error!(" |-> {:?}", e);
         s = e.source();
     }
 }
@@ -140,7 +136,7 @@ async fn run_http11_server(
     incoming: PlainIncoming,
     addr: SocketAddr,
     hcfg: Arc<HostCfg>,
-) -> Result<(), Infallible> {
+) {
     let builder = hyper::server::conn::http1::Builder::new();
     loop {
         let (stream, remote_addr) = match incoming.accept().await {
@@ -269,7 +265,7 @@ pub(crate) mod tests {
         #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<
             transport::tls::ParsedTLSConfig,
         >,
-    ) -> JoinHandle<Result<(), Infallible>> {
+    ) -> JoinHandle<()> {
         let mut listening_ifs = HashMap::new();
         let mut cfg = HostCfg::new(l.into_std().unwrap());
 

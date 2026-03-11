@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["webserver", "fcgi"]
 
 [dependencies]
-hyper = { version = "1.5", default-features = false, features = ["http1", "http2", "server"]}      # HTTP
+hyper = { version = "1.8", default-features = false, features = ["http1", "http2", "server"]}      # HTTP
 hyper-util = {version = "0.1", features = ["tokio"]}
 pin-project-lite = "0.2"
 bytes = "1"

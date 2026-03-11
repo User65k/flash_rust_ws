@@ -314,11 +314,12 @@ pub(crate) async fn handle_request(
     req: Request<Incoming>,
     cfg: Arc<config::HostCfg>,
     remote_addr: SocketAddr,
-) -> Result<FRWSResp, HTTPError> {
+) -> Result<FRWSResp, std::convert::Infallible> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
 
     #[cfg(test)]
     let req = {
+        //turn the `Incomming` into a `IncomingBody` aka `TestBody`
         let (parts, body) = req.into_parts();
         Request::from_parts(
             parts,
@@ -334,6 +335,6 @@ pub(crate) async fn handle_request(
             }else{
                 error!("{}", err);
             }
-            Response::builder().status(err.code).body(BoxBody::empty())
+            Ok(Response::builder().status(err.code).body(BoxBody::empty()).expect("only status cant fail"))
         })
 }

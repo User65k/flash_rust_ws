@@ -17,6 +17,7 @@ use bytes::Bytes;
 use log::{log_enabled, Level::Trace};
 
 lazy_static! {
+    /// hash of `random U64 | ProcId`
     static ref NONCESTARTHASH: Context = {
         let rnd = OsRng.try_next_u64().unwrap();
 
@@ -59,7 +60,7 @@ fn create_nonce() -> String {
     let mut h = NONCESTARTHASH.clone();
     h.consume(secs.to_be_bytes());
 
-    let n = format!("{:08x}{:032x}", secs, h.compute());
+    let n = format!("{:08x}{:032x}", secs, h.finalize());
     n[..34].to_string()
 }
 
@@ -83,7 +84,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool, ()> {
                 //check hash
                 let mut h = NONCESTARTHASH.clone();
                 h.consume(secs_nonce.to_be_bytes());
-                let h = format!("{:x}", h.compute());
+                let h = format!("{:x}", h.finalize());
                 if h[..26] == n[8..34] {
                     return Ok(dur < 300); // from the last 5min
                                           //Authentication-Info ?
@@ -169,7 +170,7 @@ pub async fn check_digest<B: Body>(auth_file: &Path, req: &Req<B>, realm: &str) 
                     if let Some(uri) = user_vals.get(b"uri".as_ref()) {
                         ha2.consume(uri);
                     }
-                    let ha2 = format!("{:x}", ha2.compute());
+                    let ha2 = format!("{:x}", ha2.finalize());
 
                     let mut correct_response = None;
                     if let Some(qop) = user_vals.get(b"qop".as_ref()) {
@@ -185,7 +186,7 @@ pub async fn check_digest<B: Body>(auth_file: &Path, req: &Req<B>, realm: &str) 
                                     if let Some(cnonce) = user_vals.get(b"cnonce".as_ref()) {
                                         c.consume(cnonce);
                                     }
-                                    format!("{:x}", c.compute())
+                                    format!("{:x}", c.finalize())
                                 };
                             }
                         }
@@ -208,7 +209,7 @@ pub async fn check_digest<B: Body>(auth_file: &Path, req: &Req<B>, realm: &str) 
                                 c.consume(qop);
                                 c.consume(b":");
                                 c.consume(&*ha2);
-                                format!("{:x}", c.compute())
+                                format!("{:x}", c.finalize())
                             });
                         }
                     }
@@ -221,7 +222,7 @@ pub async fn check_digest<B: Body>(auth_file: &Path, req: &Req<B>, realm: &str) 
                             c.consume(nonce);
                             c.consume(b":");
                             c.consume(&*ha2);
-                            format!("{:x}", c.compute())
+                            format!("{:x}", c.finalize())
                         }
                     };
                     return if correct_response.as_bytes() == *user_response {
@@ -392,7 +393,7 @@ mod tests {
         let mut h = NONCESTARTHASH.clone();
         h.consume(secs.to_be_bytes());
 
-        let n = format!("{:08x}{:032x}", secs, h.compute());
+        let n = format!("{:08x}{:032x}", secs, h.finalize());
         let n = n[..34].as_bytes();
         assert!(!validate_nonce(n).unwrap());
         //garbage not
