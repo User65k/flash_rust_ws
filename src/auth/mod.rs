@@ -1,15 +1,17 @@
-use crate::body::{FRWSResp, IncomingBody};
+use crate::body::{FRWSResp, IncomingBody, StatusResult};
 use crate::config::Authenticatoin;
 use crate::dispatch::Req;
 use std::collections::HashMap;
-use std::io::Error as IoError;
+
+/// can be:
+/// - an Error (with HTTP status)
+/// - `Ok(None)` aka Auth is ok, proceed
+/// - `Ok(HTTPResponse)` aka do stuff in oder to auth
+pub type AuthResult = StatusResult<Option<FRWSResp>>;
 
 mod digest;
 
-pub async fn check_is_authorized(
-    auth: &Authenticatoin,
-    req: &Req<IncomingBody>,
-) -> Result<Option<FRWSResp>, IoError> {
+pub async fn check_is_authorized(auth: &Authenticatoin, req: &Req<IncomingBody>) -> AuthResult {
     match auth {
         Authenticatoin::Digest { userfile, realm } => {
             digest::check_digest(userfile, req, realm).await

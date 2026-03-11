@@ -90,8 +90,8 @@ mod mount {
 
         let cfg = config::VHost::new(sa);
         let res = handle_vhost(req, &cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
+        let res = res.unwrap_err();
+        assert_eq!(res.reason, "not a mount path: WebPath(\"\")");
     }
     #[tokio::test]
     async fn full_folder_names_as_mounts() {
@@ -160,8 +160,8 @@ mod mount {
         );
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
-        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
+        assert_eq!(res.code, StatusCode::FORBIDDEN);
+        assert_eq!(res.reason, "not a mount path: WebPath(\"b\")");
     }
     #[tokio::test]
     async fn path_trav_outside_webroot() {
@@ -175,8 +175,8 @@ mod mount {
         );
         let res = handle_vhost(req, &cfg, sa).await;
         let res = res.unwrap_err();
-        assert_eq!(res.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(res.into_inner().unwrap().to_string(), "path traversal");
+        assert_eq!(res.code, StatusCode::FORBIDDEN);
+        assert_eq!(res.reason, "path traversal");
     }
     #[tokio::test]
     async fn rustsec_2022_0072_part1() {
@@ -348,8 +348,8 @@ mod vhost {
 
         let cfg = make_host_cfg(None, Some(("1".to_string(), config::VHost::new(sa))));
         let res = dispatch_to_vhost(req, cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "no vHost found");
+        let res = res.unwrap_err();
+        assert_eq!(res.reason, "no vHost found");
     }
     #[tokio::test]
     async fn specific_vhost() {
@@ -362,8 +362,8 @@ mod vhost {
         let cfg = make_host_cfg(None, Some(("1".to_string(), config::VHost::new(sa))));
 
         let res = dispatch_to_vhost(req, cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
+        let res = res.unwrap_err();
+        assert_eq!(res.reason, "not a mount path: WebPath(\"\")");
     }
     #[tokio::test]
     async fn default_vhost() {
@@ -373,8 +373,8 @@ mod vhost {
         let cfg = make_host_cfg(Some(config::VHost::new(sa)), None);
 
         let res = dispatch_to_vhost(req, cfg, sa).await;
-        let res: IoError = res.unwrap_err();
-        assert_eq!(res.into_inner().unwrap().to_string(), "not a mount path");
+        let res = res.unwrap_err();
+        assert_eq!(res.reason, "not a mount path: WebPath(\"\")");
     }
 }
 

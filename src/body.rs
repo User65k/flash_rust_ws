@@ -1,6 +1,7 @@
 #[cfg(any(feature = "fcgi", feature = "webdav"))]
 use bytes::Buf;
 use bytes::Bytes;
+use exn::Exn;
 use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
 use pin_project_lite::pin_project;
 #[cfg(any(feature = "fcgi", feature = "webdav"))]
@@ -9,8 +10,47 @@ use std::io::Error as IoError;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+pub type StatusResult<T> = exn::Result<T, FRWSErr>;
 pub type FRWSResp = hyper::Response<BoxBody>;
-pub type FRWSResult = Result<hyper::Response<BoxBody>, IoError>;
+pub type FRWSResult = StatusResult<FRWSResp>;
+
+#[derive(Debug)]
+pub struct FRWSErr {
+    pub reason: String,
+    pub code: hyper::StatusCode,
+}
+impl FRWSErr {
+    pub fn new<S: Into<String>>(code: hyper::StatusCode, reason: S) -> FRWSErr {
+        FRWSErr {
+            reason: reason.into(),
+            code,
+        }
+    }
+    #[track_caller]
+    pub fn from_io(io: std::io::Error, reason: &str) -> Exn<FRWSErr> {
+        let code = match io.kind() {
+            std::io::ErrorKind::NotFound => hyper::StatusCode::NOT_FOUND,
+            std::io::ErrorKind::PermissionDenied => hyper::StatusCode::FORBIDDEN,
+            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                hyper::StatusCode::BAD_REQUEST
+            }
+            std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset => hyper::StatusCode::BAD_GATEWAY,
+            std::io::ErrorKind::TimedOut => hyper::StatusCode::GATEWAY_TIMEOUT,
+            _ => hyper::StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Exn::new(io).raise(FRWSErr::new(code, reason))
+    }
+}
+impl core::fmt::Display for FRWSErr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{} error: {}", self.code, self.reason)
+    }
+}
+impl core::error::Error for FRWSErr {}
 
 #[cfg(any(feature = "fcgi", feature = "webdav"))]
 /// Request Body
@@ -219,7 +259,7 @@ pin_project! {
 impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> futures_util::Future
     for BufferBody<B>
 {
-    type Output = Result<BufferedBody<B, Bytes>, IoError>;
+    type Output = StatusResult<BufferedBody<B, Bytes>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
@@ -232,10 +272,10 @@ impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> futures_util::Futu
                             this.buf.as_mut().unwrap().push_back(chunk);
 
                             if this.len > this.max_size {
-                                return Poll::Ready(Err(IoError::new(
-                                    std::io::ErrorKind::PermissionDenied,
+                                return Poll::Ready(Err(Exn::new(FRWSErr::new(
+                                    hyper::StatusCode::PAYLOAD_TOO_LARGE,
                                     "body too big",
-                                )));
+                                ))));
                             }
                         }
                     }
@@ -248,9 +288,10 @@ impl<B: HttpBody<Data = Bytes, Error = hyper::Error> + Unpin> futures_util::Futu
                         len: *this.len,
                     }))
                 }
-                Poll::Ready(Some(Err(e))) => {
-                    Poll::Ready(Err(IoError::new(std::io::ErrorKind::Other, e.to_string())))
-                }
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Err(Exn::new(FRWSErr::new(
+                    hyper::StatusCode::UNPROCESSABLE_ENTITY,
+                    e.to_string(),
+                )))),
                 Poll::Pending => Poll::Pending,
             };
         }

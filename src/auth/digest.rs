@@ -1,13 +1,13 @@
-use crate::auth::{get_map_from_header, strip_prefix};
-use crate::body::{BoxBody, FRWSResp};
+use crate::auth::{get_map_from_header, strip_prefix, AuthResult};
+use crate::body::{BoxBody, FRWSErr, FRWSResp};
 use crate::dispatch::Req;
+use exn::{bail, ResultExt};
 use hyper::{body::Body, header, Response, StatusCode};
 use lazy_static::lazy_static;
 use log::{info, trace};
 use md5::Context;
 use rand::rngs::OsRng;
-use rand::RngCore;
-use std::io::{Error as IoError, ErrorKind};
+use rand::TryRngCore;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
@@ -17,8 +17,9 @@ use bytes::Bytes;
 use log::{log_enabled, Level::Trace};
 
 lazy_static! {
+    /// hash of `random U64 | ProcId`
     static ref NONCESTARTHASH: Context = {
-        let rnd = OsRng.next_u64();
+        let rnd = OsRng.try_next_u64().unwrap();
 
         let mut h = Context::new();
         h.consume(rnd.to_be_bytes());
@@ -59,7 +60,7 @@ fn create_nonce() -> String {
     let mut h = NONCESTARTHASH.clone();
     h.consume(secs.to_be_bytes());
 
-    let n = format!("{:08x}{:032x}", secs, h.compute());
+    let n = format!("{:08x}{:032x}", secs, h.finalize());
     n[..34].to_string()
 }
 
@@ -83,7 +84,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool, ()> {
                 //check hash
                 let mut h = NONCESTARTHASH.clone();
                 h.consume(secs_nonce.to_be_bytes());
-                let h = format!("{:x}", h.compute());
+                let h = format!("{:x}", h.finalize());
                 if h[..26] == n[8..34] {
                     return Ok(dur < 300); // from the last 5min
                                           //Authentication-Info ?
@@ -94,11 +95,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool, ()> {
     Err(())
 }
 
-pub async fn check_digest<B: Body>(
-    auth_file: &Path,
-    req: &Req<B>,
-    realm: &str,
-) -> Result<Option<FRWSResp>, IoError> {
+pub async fn check_digest<B: Body>(auth_file: &Path, req: &Req<B>, realm: &str) -> AuthResult {
     match req
         .headers()
         .get(header::AUTHORIZATION)
@@ -131,18 +128,29 @@ pub async fn check_digest<B: Body>(
                         Ok(true) => {}                                                     // good
                         Ok(false) => return Ok(Some(create_resp_needs_auth(realm, true))), // old
                         Err(()) => {
-                            return Err(IoError::new(ErrorKind::PermissionDenied, "Invalid Nonce"))
+                            bail!(FRWSErr::new(StatusCode::FORBIDDEN, "Invalid Nonce"))
                         } // strange
                     }
 
-                    let file = File::open(auth_file).await?;
+                    let file = File::open(auth_file).await.or_raise(|| {
+                        FRWSErr::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "cant read user auth file",
+                        )
+                    })?;
                     let mut file = BufReader::new(file);
 
                     //read HA1 from file
                     //HA1 = make_md5(username+":"+realm+":"+password)
                     let mut ha1 = loop {
                         let mut buf = String::new();
-                        if file.read_line(&mut buf).await? < 1 {
+                        if file.read_line(&mut buf).await.or_raise(|| {
+                            FRWSErr::new(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "cant read user auth file",
+                            )
+                        })? < 1
+                        {
                             //user not found
                             info!("user not found");
                             //don't return to avaid timing attacks
@@ -162,7 +170,7 @@ pub async fn check_digest<B: Body>(
                     if let Some(uri) = user_vals.get(b"uri".as_ref()) {
                         ha2.consume(uri);
                     }
-                    let ha2 = format!("{:x}", ha2.compute());
+                    let ha2 = format!("{:x}", ha2.finalize());
 
                     let mut correct_response = None;
                     if let Some(qop) = user_vals.get(b"qop".as_ref()) {
@@ -178,7 +186,7 @@ pub async fn check_digest<B: Body>(
                                     if let Some(cnonce) = user_vals.get(b"cnonce".as_ref()) {
                                         c.consume(cnonce);
                                     }
-                                    format!("{:x}", c.compute())
+                                    format!("{:x}", c.finalize())
                                 };
                             }
                         }
@@ -201,7 +209,7 @@ pub async fn check_digest<B: Body>(
                                 c.consume(qop);
                                 c.consume(b":");
                                 c.consume(&*ha2);
-                                format!("{:x}", c.compute())
+                                format!("{:x}", c.finalize())
                             });
                         }
                     }
@@ -214,7 +222,7 @@ pub async fn check_digest<B: Body>(
                             c.consume(nonce);
                             c.consume(b":");
                             c.consume(&*ha2);
-                            format!("{:x}", c.compute())
+                            format!("{:x}", c.finalize())
                         }
                     };
                     return if correct_response.as_bytes() == *user_response {
@@ -233,7 +241,7 @@ pub async fn check_digest<B: Body>(
                 }
             }
             //there is an auth header, but its garbage - at least to us
-            Err(IoError::new(ErrorKind::InvalidData, "auth failed"))
+            bail!(FRWSErr::new(StatusCode::BAD_REQUEST, "auth failed"))
         }
     }
 }
@@ -368,13 +376,13 @@ mod tests {
         let e = check_digest(&path, &h, &String::from("abc"))
             .await
             .unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData);
+        assert_eq!(e.code, StatusCode::BAD_REQUEST);
 
         let h = create_req(Some("Digest ===,,"));
         let e = check_digest(&path, &h, &String::from("abc"))
             .await
             .unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData);
+        assert_eq!(e.code, StatusCode::BAD_REQUEST);
     }
     #[test]
     fn nonce() {
@@ -385,7 +393,7 @@ mod tests {
         let mut h = NONCESTARTHASH.clone();
         h.consume(secs.to_be_bytes());
 
-        let n = format!("{:08x}{:032x}", secs, h.compute());
+        let n = format!("{:08x}{:032x}", secs, h.finalize());
         let n = n[..34].as_bytes();
         assert!(!validate_nonce(n).unwrap());
         //garbage not

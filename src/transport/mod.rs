@@ -30,8 +30,8 @@ use std::time::Duration;
 use hyper::Version;
 use tokio::net::TcpListener;
 
-pub use tokio::net::TcpStream as PlainStream;
 use log::{debug, error, trace};
+pub use tokio::net::TcpStream as PlainStream;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -84,7 +84,7 @@ impl PlainIncoming {
         self.sleep_on_errors = val;
     }
 
-    pub(crate) async fn accept(&self) -> io::Result<(PlainStream, SocketAddr)> {
+    pub(crate) async fn accept(&self) -> exn::Result<(PlainStream, SocketAddr), io::Error> {
         loop {
             match self.listener.accept().await {
                 Ok((socket, remote)) => {
@@ -107,7 +107,7 @@ impl PlainIncoming {
                         // Sleep 1s.
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     } else {
-                        return Err(e);
+                        return Err(exn::Exn::new(e));
                     }
                 }
             }

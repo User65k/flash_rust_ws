@@ -1,8 +1,9 @@
-use crate::body::{BoxBody, FRWSResult, IncomingBody};
-use crate::config::AbsPathBuf;
 use super::staticf::{self, resolve_path, return_file, ResolveResult};
 use super::Req;
+use crate::body::{BoxBody, FRWSErr, FRWSResult, IncomingBody, StatusResult};
+use crate::config::AbsPathBuf;
 use bytes::{BufMut, Bytes, BytesMut};
+use exn::{bail, OptionExt, ResultExt};
 use hyper::body::Body as _;
 use hyper::{header, http::HeaderValue, HeaderMap, Method, Response, StatusCode};
 use serde::Deserialize;
@@ -61,8 +62,8 @@ pub async fn do_dav(
             "MOVE" => DavMethod::MOVE,
             "MKCOL" => DavMethod::MKCOL,
             "PROPPATCH" => {
-                return Err(IoError::new(
-                    ErrorKind::PermissionDenied,
+                bail!(FRWSErr::new(
+                    StatusCode::FORBIDDEN,
                     "properties are read only",
                 ))
             }
@@ -84,7 +85,7 @@ pub async fn do_dav(
                 | DavMethod::MKCOL
         )
     {
-        return Err(IoError::new(ErrorKind::PermissionDenied, "read only mount"));
+        bail!(FRWSErr::new(StatusCode::FORBIDDEN, "read only mount"));
     }
     let full_path = req.path().prefix_with(&config.dav);
 
@@ -93,8 +94,8 @@ pub async fn do_dav(
             //Path will be created -> check dad:
             match full_path.parent() {
                 None => {
-                    return Err(IoError::new(
-                        ErrorKind::Other, //should not be reachable
+                    bail!(FRWSErr::new(
+                        StatusCode::INTERNAL_SERVER_ERROR, //should not be reachable
                         "No Parent",
                     ));
                 }
@@ -105,25 +106,25 @@ pub async fn do_dav(
                         *res.status_mut() = StatusCode::CONFLICT;
                         return Ok(res);
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => bail!(FRWSErr::from_io(e, "unable to canonicalize")),
                 },
             }
         } else {
-            full_path.canonicalize()?
+            full_path
+                .canonicalize()
+                .map_err(|e| FRWSErr::from_io(e, "unable to canonicalize"))?
         };
         //check if the canonicalized version is still inside of the (abs) root path
         if !fp.starts_with(&config.dav) {
-            return Err(IoError::new(
-                ErrorKind::PermissionDenied,
+            bail!(FRWSErr::new(
+                StatusCode::FORBIDDEN,
                 "Symlinks are not allowed",
             ));
         }
     }
 
     match m {
-        DavMethod::PROPFIND => {
-            propfind::handle_propfind(req, full_path, &config.dav).await
-        }
+        DavMethod::PROPFIND => propfind::handle_propfind(req, full_path, &config.dav).await,
         DavMethod::GET => handle_get(req, &full_path).await,
         DavMethod::PUT => handle_put(req, &full_path, config.dont_overwrite).await,
         DavMethod::MKCOL => handle_mkdir(&full_path).await,
@@ -148,17 +149,24 @@ pub async fn do_dav(
             .await
         }
         DavMethod::DELETE if !config.dont_overwrite => handle_delete(&full_path).await,
-        DavMethod::DELETE => Err(IoError::new(
-            ErrorKind::PermissionDenied,
+        DavMethod::DELETE => bail!(FRWSErr::new(
+            StatusCode::FORBIDDEN,
             "dont_overwrite forbids delete",
         )),
     }
 }
 async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
-    let mut dir = tokio::fs::read_dir(full_path).await?;
+    let mut dir = tokio::fs::read_dir(full_path)
+        .await
+        .map_err(|e| FRWSErr::from_io(e, "unable to read_dir"))?;
     let mut buf = BytesMut::new().writer();
-    buf.write_all(b"<html><body>")?;
-    while let Some(f) = dir.next_entry().await? {
+    let xml_err = || FRWSErr::new(StatusCode::INTERNAL_SERVER_ERROR, "xml writer failed");
+    buf.write_all(b"<html><body>").or_raise(xml_err)?;
+    while let Some(f) = dir
+        .next_entry()
+        .await
+        .map_err(|e| FRWSErr::from_io(e, "unable to get next entry"))?
+    {
         let path = f.path();
         let meta = match f.metadata().await {
             Ok(meta) => meta,
@@ -177,7 +185,8 @@ async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
                     f.file_name().to_string_lossy()
                 )
                 .as_bytes(),
-            )?;
+            )
+            .or_raise(xml_err)?;
         } else {
             buf.write_all(
                 format!(
@@ -187,10 +196,11 @@ async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
                     meta.len()
                 )
                 .as_bytes(),
-            )?;
+            )
+            .or_raise(xml_err)?;
         }
     }
-    buf.write_all(b"</body></html>")?;
+    buf.write_all(b"</body></html>").or_raise(xml_err)?;
     let res = Response::builder()
         .header(header::CONTENT_TYPE, &b"text/html; charset=UTF-8"[..])
         .body(buf.into())
@@ -198,10 +208,7 @@ async fn list_dir(full_path: &Path, url_path: String) -> FRWSResult {
     Ok(res)
 }
 
-async fn handle_get(
-    req: Req<IncomingBody>,
-    full_path: &Path,
-) -> FRWSResult {
+async fn handle_get(req: Req<IncomingBody>, full_path: &Path) -> FRWSResult {
     //we could serve dir listings as well. with a litte webdav client :-D
     let (_, file_lookup) = resolve_path(full_path, false, &None).await?;
 
@@ -224,26 +231,29 @@ async fn handle_get(
 async fn handle_delete(full_path: &Path) -> FRWSResult {
     let res = Response::new(BoxBody::empty());
 
-    let meta = metadata(full_path).await?;
+    let meta = metadata(full_path)
+        .await
+        .map_err(|e| FRWSErr::from_io(e, "unable to open"))?;
     if meta.is_dir() {
-        remove_dir_all(full_path).await?;
+        remove_dir_all(full_path)
+            .await
+            .map_err(|e| FRWSErr::from_io(e, "unable to remove_dir_all"))?;
     } else {
-        remove_file(full_path).await?;
+        remove_file(full_path)
+            .await
+            .map_err(|e| FRWSErr::from_io(e, "unable to remove_file"))?;
     }
     log::info!("Deleted {:?}", full_path);
     //HTTP NO_CONTENT ?
     Ok(res)
 }
-async fn parent_exists(path: &Path) -> Result<bool, IoError> {
+async fn parent_exists(path: &Path) -> StatusResult<bool> {
     match path.parent() {
-        None => Err(IoError::new(
-            std::io::ErrorKind::PermissionDenied,
-            "No parent",
-        )),
+        None => bail!(FRWSErr::new(StatusCode::FORBIDDEN, "No parent",)),
         Some(p) => match metadata(p).await {
             Ok(m) => Ok(m.is_dir()),
             Err(ref e) if e.kind() == ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
+            Err(e) => bail!(FRWSErr::from_io(e, "could not open")),
         },
     }
 }
@@ -259,7 +269,9 @@ async fn handle_mkdir(full_path: &Path) -> FRWSResult {
         *res.status_mut() = StatusCode::CONFLICT;
         return Ok(res);
     }
-    create_dir(full_path).await?;
+    create_dir(full_path)
+        .await
+        .map_err(|e| FRWSErr::from_io(e, "unable to create dir"))?;
     *res.status_mut() = StatusCode::CREATED;
     log::info!("Created {:?}", full_path);
     /*
@@ -307,8 +319,8 @@ impl AsyncRead for BodyW {
 async fn handle_put(req: Req<IncomingBody>, full_path: &Path, dont_overwrite: bool) -> FRWSResult {
     // Check if file exists before proceeding
     if dont_overwrite && metadata(full_path).await.is_ok() {
-        return Err(IoError::new(
-            ErrorKind::AlreadyExists,
+        bail!(FRWSErr::new(
+            StatusCode::FORBIDDEN,
             "file overwriting is disabled",
         ));
     }
@@ -319,10 +331,14 @@ async fn handle_put(req: Req<IncomingBody>, full_path: &Path, dont_overwrite: bo
         return Ok(res);
     }
     log::info!("about to store {:?}", full_path);
-    let mut f = File::create(full_path).await?;
+    let mut f = File::create(full_path)
+        .await
+        .map_err(|e| FRWSErr::from_io(e, "unable to create"))?;
     let (_, s) = req.into_parts();
     let mut b = BodyW { s, b: None };
-    redirect(&mut b, &mut f).await?;
+    redirect(&mut b, &mut f)
+        .await
+        .or_raise(|| FRWSErr::new(StatusCode::INTERNAL_SERVER_ERROR, "writing failed"))?;
     let res = Response::new(BoxBody::empty());
     //MAY 405 if file is a folder
     Ok(res)
@@ -332,21 +348,18 @@ fn get_dst(
     header: &HeaderMap<HeaderValue>,
     root: &AbsPathBuf,
     web_mount: &str,
-) -> Result<PathBuf, IoError> {
+) -> StatusResult<PathBuf> {
     // Get the destination
     let dst = header
         .get("Destination")
         .map(|hv| hv.as_bytes())
         .and_then(|s| hyper::Uri::try_from(s).ok())
-        .ok_or_else(|| IoError::new(ErrorKind::InvalidData, "no valid destination path"))?;
+        .ok_or_raise(|| FRWSErr::new(StatusCode::BAD_REQUEST, "no valid destination path"))?;
 
     let request_path = super::WebPath::try_from(&dst)?;
-    let path = request_path.strip_prefix(Path::new(web_mount)).map_err(|_| {
-        IoError::new(
-            ErrorKind::PermissionDenied,
-            "destination path outside of mount",
-        )
-    })?;
+    let path = request_path
+        .strip_prefix(Path::new(web_mount))
+        .map_err(|_| FRWSErr::new(StatusCode::FORBIDDEN, "destination path outside of mount"))?;
     let req_path = path.prefix_with(root);
     Ok(req_path)
 }
@@ -373,7 +386,9 @@ async fn handle_copy(
         *res.status_mut() = StatusCode::PRECONDITION_FAILED;
         return Ok(res);
     }
-    copy(src_path, dst_path).await?;
+    copy(src_path, dst_path)
+        .await
+        .map_err(|e| FRWSErr::from_io(e, "unable to copy"))?;
     //resulted in the creation of a new resource.
     *res.status_mut() = StatusCode::CREATED;
     /*
@@ -426,7 +441,9 @@ async fn handle_move(
         *res.status_mut() = StatusCode::PRECONDITION_FAILED;
         return Ok(res);
     }
-    rename(src_path, dst_path).await?;
+    rename(src_path, dst_path)
+        .await
+        .map_err(|e| FRWSErr::from_io(e, "unable to rename"))?;
     //a new URL mapping was created at the destination.
     *res.status_mut() = StatusCode::CREATED;
     /*

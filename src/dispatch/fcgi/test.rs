@@ -269,13 +269,7 @@ fn params_flup_example() {
         .insert(hyper::http::uri::Authority::from_static("localhost"));
     let req = Req::test_on_mount(req);
 
-    let params = create_params(
-        &fcgi_cfg,
-        &req,
-        None,
-        None,
-        "[::1]:1337".parse().unwrap(),
-    );
+    let params = create_params(&fcgi_cfg, &req, None, None, "[::1]:1337".parse().unwrap());
 
     assert_eq!(
         params.get(&Bytes::from(GATEWAY_INTERFACE)),
@@ -385,7 +379,7 @@ async fn dont_resolve_file() {
         .unwrap();
     let res = handle_wwwroot(req, mount).await;
     let res = res.unwrap_err();
-    assert_eq!(res.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(res.code, StatusCode::BAD_REQUEST);
 }
 /*#[tokio::test]
 async fn body_no_len() {
@@ -743,7 +737,7 @@ async fn test_resolve_path() {
     assert_eq!(req.path(), "a/b/c/d");
 
     let e = resolve_path(full_path, false, &sf, &req).await.unwrap_err();
-    assert_eq!(e.kind(), ErrorKind::NotFound);
+    assert_eq!(e.code, StatusCode::NOT_FOUND);
 }
 #[test]
 /// https://www.nginx.com/resources/wiki/start/topics/examples/phpfcgi/
@@ -792,7 +786,7 @@ fn params_nginx_example() {
         params.get(&Bytes::from(PATH_INFO)),
         Some(&"/foo/bar.php".into())
     );
-/*
-  'DOCUMENT_URI' => '/test.php/foo/bar.php',
-*/
+    /*
+      'DOCUMENT_URI' => '/test.php/foo/bar.php',
+    */
 }

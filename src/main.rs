@@ -14,7 +14,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
@@ -40,13 +40,13 @@ use transport::PlainIncoming;
 /// If its config has TLS wrap the `PlainIncoming` into an `TlsAcceptor`
 async fn prepare_hyper_servers(
     mut listening_ifs: HashMap<SocketAddr, config::HostCfg>,
-) -> Result<Vec<JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>>, Box<dyn Error>> {
+) -> Result<Vec<JoinHandle<()>>, IoError> {
     let mut handles = vec![];
     for (addr, mut cfg) in listening_ifs.drain() {
         let l = match cfg.listener.take() {
             Some(l) => l,
             None => {
-                return Err(Box::new(IoError::new(ErrorKind::Other, "could not listen")));
+                return Err(IoError::other("could not listen"));
             }
         };
         let server = match PlainIncoming::from_std(l) {
@@ -66,16 +66,13 @@ async fn prepare_hyper_servers(
                                 Ok(s) => s,
                                 Err(e) => {
                                     #[cfg(feature = "tlsrust_acme")]
-                                    if e.get_ref()
-                                        .and_then(|b| {
-                                            b.downcast_ref::<transport::tls::ACMEdone>().map(|_| ())
-                                        })
-                                        .is_some()
+                                    if let Some(transport::tls::TlsErr::ACMEdone) =
+                                        e.frame().error().downcast_ref::<transport::tls::TlsErr>()
                                     {
                                         //this was an ACME challenge. Don't print an error
                                         continue;
                                     }
-                                    error!("{:?}", e);
+                                    error!("TLS Handshake {:?}", e); //FIXME Os { code: 113, kind: HostUnreachable, message: "No route to host" }
                                     continue;
                                 }
                             };
@@ -103,20 +100,17 @@ async fn prepare_hyper_servers(
                                     }
                                     _ => unreachable!("neither h1 nor h2"),
                                 } {
-                                    error!("{} -> {}: {}", remote_addr, addr, err);
+                                    print_hyper_error(remote_addr, addr, err);
                                 }
                             });
                         }
                     });
                 }
-                tokio::spawn(async move {
-                    run_http11_server(incoming, addr, hcfg).await?;
-                    Ok(())
-                })
+                tokio::spawn(run_http11_server(incoming, addr, hcfg))
             }
             Err(err) => {
                 error!("{}: {}", addr, err);
-                return Err(Box::new(err));
+                return Err(err);
             }
         };
         handles.push(server);
@@ -124,12 +118,25 @@ async fn prepare_hyper_servers(
     Ok(handles)
 }
 
+fn print_hyper_error(rem: SocketAddr, here: SocketAddr, err: hyper::Error) {
+    if !log::log_enabled!(log::Level::Debug) {
+        error!("{} -> {}: {}", rem, here, err);
+        return;
+    }
+    error!("{} -> {}: {:?}", rem, here, err);
+    let mut s = err.source();
+    while let Some(e) = s {
+        error!(" |-> {:?}", e);
+        s = e.source();
+    }
+}
+
 #[inline]
 async fn run_http11_server(
     incoming: PlainIncoming,
     addr: SocketAddr,
     hcfg: Arc<HostCfg>,
-) -> Result<(), hyper::Error> {
+) {
     let builder = hyper::server::conn::http1::Builder::new();
     loop {
         let (stream, remote_addr) = match incoming.accept().await {
@@ -154,7 +161,7 @@ async fn run_http11_server(
                 .with_upgrades()
                 .await
             {
-                error!("{} -> {}: {}", remote_addr, addr, err);
+                print_hyper_error(remote_addr, addr, err);
             }
         });
     }
@@ -255,8 +262,10 @@ pub(crate) mod tests {
         l: TcpListener,
         a: SocketAddr,
         w: WwwRoot,
-        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<transport::tls::ParsedTLSConfig>,
-    ) -> JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> {
+        #[cfg(any(feature = "tlsrust", feature = "tlsnative"))] tls: Option<
+            transport::tls::ParsedTLSConfig,
+        >,
+    ) -> JoinHandle<()> {
         let mut listening_ifs = HashMap::new();
         let mut cfg = HostCfg::new(l.into_std().unwrap());
 
@@ -321,11 +330,11 @@ pub(crate) mod tests {
         transport::tls::ParsedTLSConfig,
     ) {
         use crate::dispatch::test::TempFile;
-        use rand::{rngs::OsRng, RngCore};
+        use rand::{rngs::OsRng, TryRngCore};
         use rustls_pemfile::{read_one, Item};
         use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
-        let tls_inst = OsRng.next_u32();
+        let tls_inst = OsRng.try_next_u32().unwrap();
         let key_file = TempFile::create(
             &format!("edkey{}.pem", tls_inst),
             crate::transport::tls::test::ED_KEY,
@@ -416,24 +425,21 @@ pub(crate) mod tests {
             connector.connect(dnsname, stream).await.unwrap()
         };
 
-        let req = b"\0\0\x15\x01\x05\0\0\0\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
+        let req =
+            b"\0\0\x15\x01\x05\0\0\0\x01\x82D\x83`lGA\x8c\x9d)\xacK\xccz\x07T\xcb\x9e\xc9\xbf\x87";
         /*headers = [
             (':method', 'GET'),
             (':path', '/a/b'),
             (':authority', SERVER_NAME),
             (':scheme', 'https'),
         ]*/
-        let (end_stream, header) = h2_client(
-            &mut stream,
-            req,
-            None,
-        ).await.unwrap();
+        let (end_stream, header) = h2_client(&mut stream, req, None).await.unwrap();
         assert!(end_stream);
         assert_eq!(header[0], 0x88);
     }
     /// connect to a H2 server, send PREFACE, empty Options and a `req`. Ack settings. Wait for the return headers.
     /// Return if END_STREAM was set and the last header payload
-    pub(crate) async fn h2_client<RW: tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(
+    pub(crate) async fn h2_client<RW: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         stream: &mut RW,
         req: &[u8],
         assert_option: Option<&[u8]>,
@@ -466,7 +472,7 @@ pub(crate) mod tests {
                 stream.write_all(req).await?;
                 ack = true;
             }
-            if buf[3] == 1 && buf[4]&4 == 4 {
+            if buf[3] == 1 && buf[4] & 4 == 4 {
                 //Header + END_STREAM + END_HEADERS
                 println!("headers done");
                 return Ok((buf[4] == 5, buf[9..].to_vec()));

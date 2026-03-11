@@ -26,18 +26,21 @@ impl super::Proxy {
     ) -> Result<Response<Incoming>, IoError> {
         let client = self.client.as_ref().unwrap();
         loop {
-            if let Some(pool) = client.h1.write().await.as_mut() {
+            if let Some(pool) = client.h1.read().await.as_ref() {
                 let stat = pool.status();
                 match if stat.size == stat.max_size {
-                    pool.get().await
+                    pool.get().await //can't timeout
                 } else {
-                    pool.try_get()
+                    pool.try_get() //get,forget permit
                 } {
                     Ok(mut h1) => {
                         match h1.ready().await {
                             Err(_e) => {
                                 //only error here is is_closed
                                 let _ = Object::take(h1);
+                                log::trace!("con dead");
+                                //try again without connecting
+                                continue;
                             }
                             Ok(()) => {
                                 //persist connection, if its not an upgrade
@@ -50,12 +53,17 @@ impl super::Proxy {
                                 }
                                 let res = h1.send_request(req).await;
                                 //is_ready / is_closed
-                                tokio::spawn(delay_drop(h1));
+                                if !h1.is_ready() {
+                                    log::trace!("w8 4 con");
+                                    tokio::spawn(delay_drop(h1));
+                                }
                                 return res.map_err(IoError::other);
                             }
                         }
                     }
-                    Err(PoolError::Timeout) => {} //connect a new IO
+                    Err(PoolError::Timeout) => {
+                        log::trace!("pool could use another con");
+                    } //semaphore:NoPermits && size < max_size -> connect a new IO
                     Err(PoolError::Closed) => unreachable!("pool should not close"),
                     Err(PoolError::NoRuntimeSpecified) => unreachable!("pool not using timeout"),
                 }
@@ -78,6 +86,7 @@ impl super::Proxy {
 async fn delay_drop(mut h1: Object<http1::SendRequest<IncomingBody>>) {
     if let Err(_e) = h1.ready().await {
         //only error here is is_closed
+        log::trace!("con done");
         let _ = Object::take(h1);
     }
 }
@@ -99,8 +108,17 @@ impl Client {
     }
     async fn add_to_h1_pool(&self, s: http1::SendRequest<IncomingBody>, max_size: usize) {
         let mut lock = self.h1.write().await;
-        let pool = lock.get_or_insert(Pool::new(max_size));
-        pool.try_add(s).expect("pool should never close");
+        let pool = lock.get_or_insert(Pool::new(max_size)); //semaphore:0permits, size_semaphore:max
+                                                            //pool.try_add(s).expect("pool should never close");
+        match pool.try_add(s) {
+            Ok(()) => {}
+            Err((s, PoolError::Timeout)) => {
+                log::warn!("pool add {:?}", pool.status());
+                pool.add(s).await.expect("wtf"); //FIXME size max
+            }
+            Err((_, PoolError::Closed)) => unreachable!("pool should never close"),
+            Err((_, PoolError::NoRuntimeSpecified)) => unreachable!("pool not using timeout"),
+        }
     }
     async fn connect(&self, cfg: &super::Proxy) -> Result<(), IoError> {
         let addr = match &cfg.forward.addr {

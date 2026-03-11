@@ -7,8 +7,8 @@ pub use self::rustls::{ParsedTLSConfig, TlsUserConfig};
 use self::rustls::{TLSConfig, UnderlyingAccept, UnderlyingTLSStream};
 
 use super::{Connection, PlainIncoming, PlainStream};
+use exn::ResultExt;
 use hyper::Version;
-use std::io;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
@@ -63,31 +63,46 @@ impl TlsAcceptor {
             incoming,
         }
     }
-    pub(crate) async fn accept(&self) -> io::Result<(TlsStream, SocketAddr)> {
-        let (stream, remote) = self.incoming.accept().await?;
-        let mut stream = ParsedTLSConfig::get_accept_feature(self, stream).await?;
+    pub(crate) async fn accept(&self) -> exn::Result<(TlsStream, SocketAddr), TlsErr> {
+        let (stream, remote) = self
+            .incoming
+            .accept()
+            .await
+            .or_raise(|| TlsErr::IoDuringAccept)?;
+        let mut stream = ParsedTLSConfig::get_accept_feature(self, stream)
+            .await
+            .or_raise(|| TlsErr::IoDuringHandshake)?;
+        log::trace!(
+            "Alpn offered by client: {:?}",
+            stream.get_ref().1.alpn_protocol()
+        );
 
         #[cfg(feature = "tlsrust_acme")]
         if stream.get_ref().1.alpn_protocol() == Some(ACME_TLS_ALPN_NAME) {
             log::debug!("completed acme-tls/1 handshake");
-            stream.shutdown().await?;
-            return Err(io::Error::other(ACMEdone()));
+            stream
+                .shutdown()
+                .await
+                .or_raise(|| TlsErr::IoDuringShutdown)?;
+            return Err(exn::Exn::new(TlsErr::ACMEdone));
         }
 
         Ok((stream, remote))
     }
 }
 
-pub struct ACMEdone();
-impl std::error::Error for ACMEdone {}
-impl std::fmt::Display for ACMEdone {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ACMEdone").finish()
-    }
+#[derive(Debug)]
+pub enum TlsErr {
+    ///not actually an error
+    ACMEdone,
+    IoDuringAccept,
+    IoDuringHandshake,
+    IoDuringShutdown,
 }
-impl std::fmt::Debug for ACMEdone {
+impl std::error::Error for TlsErr {}
+impl std::fmt::Display for TlsErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ACMEdone").finish()
+        std::fmt::Debug::fmt(&self, f)
     }
 }
 #[cfg(test)]

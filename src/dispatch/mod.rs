@@ -12,11 +12,12 @@ mod upgrades;
 mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
+use exn::{bail, ResultExt as _};
 use hyper::body::Body as HttpBody;
 use hyper::header::HeaderValue;
 pub use webpath::{Req, WebPath};
 
-use crate::body::{BoxBody, FRWSResp, FRWSResult, IncomingBody};
+use crate::body::{BoxBody, FRWSErr, FRWSResp, FRWSResult, IncomingBody};
 use crate::config::{self, Utf8PathBuf};
 use hyper::http::uri::Authority;
 use hyper::{
@@ -25,8 +26,6 @@ use hyper::{
 use log::{debug, error, info, trace};
 use staticf::ResolveResult;
 use std::collections::HashMap;
-use std::error::Error;
-use std::io::{Error as IoError, ErrorKind};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -151,7 +150,7 @@ async fn handle_wwwroot(
                         &r_uri[1..]
                     },
                 )
-                .map_err(|e| IoError::new(ErrorKind::InvalidData, e))?
+                .or_raise(|| FRWSErr::new(StatusCode::BAD_REQUEST, "bad header value"))?
             } else {
                 redir.redirect.0.clone()
             };
@@ -177,7 +176,7 @@ async fn handle_wwwroot(
             }
             match static_files {
                 Some(sf) => sf,
-                None => return Err(IoError::new(ErrorKind::PermissionDenied, "no dir to serve")),
+                None => bail!(FRWSErr::new(StatusCode::FORBIDDEN, "no dir to serve")),
             }
         }
         #[cfg(feature = "websocket")]
@@ -208,10 +207,12 @@ async fn handle_wwwroot(
 
     if !sf.follow_symlinks {
         //check if the canonicalized version is still inside of the (abs) root path
-        let fp = full_path.canonicalize()?;
+        let fp = full_path
+            .canonicalize()
+            .map_err(|io| FRWSErr::from_io(io, "could not canonicalize"))?;
         if !fp.starts_with(&sf.dir) {
-            return Err(IoError::new(
-                ErrorKind::PermissionDenied,
+            bail!(FRWSErr::new(
+                StatusCode::FORBIDDEN,
                 "Symlinks are not allowed",
             ));
         }
@@ -235,10 +236,7 @@ async fn handle_wwwroot(
             if ext_in_list(&sf.serve, &full_path) {
                 staticf::return_file(req, file, metadata, mime).await
             } else {
-                Err(IoError::new(
-                    ErrorKind::PermissionDenied,
-                    "bad file extension",
-                ))
+                bail!(FRWSErr::new(StatusCode::FORBIDDEN, "bad file extension",))
             }
         }
     }
@@ -267,9 +265,9 @@ async fn handle_vhost(
         }
     }
 
-    Err(IoError::new(
-        ErrorKind::PermissionDenied,
-        "not a mount path",
+    bail!(FRWSErr::new(
+        StatusCode::FORBIDDEN,
+        format!("not a mount path: {:?}", req.path()),
     ))
 }
 
@@ -307,7 +305,7 @@ async fn dispatch_to_vhost(
     if let Some(hcfg) = &cfg.default_host {
         return handle_vhost(req, hcfg, remote_addr).await;
     }
-    Err(IoError::new(ErrorKind::PermissionDenied, "no vHost found"))
+    bail!(FRWSErr::new(StatusCode::FORBIDDEN, "no vHost found"))
 }
 
 /// new request on a `SocketAddr`.
@@ -316,11 +314,12 @@ pub(crate) async fn handle_request(
     req: Request<Incoming>,
     cfg: Arc<config::HostCfg>,
     remote_addr: SocketAddr,
-) -> Result<FRWSResp, HTTPError> {
+) -> Result<FRWSResp, std::convert::Infallible> {
     info!("{} {} {}", remote_addr, req.method(), req.uri());
 
     #[cfg(test)]
     let req = {
+        //turn the `Incomming` into a `IncomingBody` aka `TestBody`
         let (parts, body) = req.into_parts();
         Request::from_parts(
             parts,
@@ -331,43 +330,11 @@ pub(crate) async fn handle_request(
     dispatch_to_vhost(req, cfg, remote_addr)
         .await
         .or_else(|err| {
-            error!("{}", err);
-            if let Some(cause) = err.get_ref() {
-                let mut e: &dyn Error = cause;
-                loop {
-                    error!("{}", e);
-                    e = match e.source() {
-                        Some(e) => {
-                            error!("caused by:");
-                            e
-                        }
-                        None => break,
-                    }
-                }
+            if log::log_enabled!(log::Level::Debug) {
+                error!("handle_request {:?}", err);
+            }else{
+                error!("{}", err);
             }
-            match err.kind() {
-                ErrorKind::NotFound => Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(BoxBody::empty()),
-                ErrorKind::PermissionDenied => Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .body(BoxBody::empty()),
-                ErrorKind::InvalidInput | ErrorKind::InvalidData => Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(BoxBody::empty()),
-                ErrorKind::BrokenPipe
-                | ErrorKind::UnexpectedEof
-                | ErrorKind::ConnectionAborted
-                | ErrorKind::ConnectionRefused
-                | ErrorKind::ConnectionReset => Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(BoxBody::empty()),
-                ErrorKind::TimedOut => Response::builder()
-                    .status(StatusCode::GATEWAY_TIMEOUT)
-                    .body(BoxBody::empty()),
-                _ => Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(BoxBody::empty()),
-            }
+            Ok(Response::builder().status(err.code).body(BoxBody::empty()).expect("only status cant fail"))
         })
 }
