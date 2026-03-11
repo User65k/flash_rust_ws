@@ -1,7 +1,8 @@
 #[cfg(any(feature = "fcgi", feature = "webdav"))]
 use bytes::Buf;
 use bytes::Bytes;
-use exn::Exn;
+use exn::{Exn, ResultExt};
+use hyper::StatusCode;
 use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
 use pin_project_lite::pin_project;
 #[cfg(any(feature = "fcgi", feature = "webdav"))]
@@ -122,7 +123,7 @@ pub mod test {
     ///read whole body
     ///
     ///only for tests. like the old `hyper::body::to_bytes`
-    pub fn to_bytes<T: HttpBody<Data = Bytes, Error = E>, E: std::error::Error>(
+    pub fn to_bytes<T: HttpBody<Data = Bytes, Error = E>, E: std::fmt::Debug>(
         body: T,
     ) -> Aggregator<T> {
         Aggregator {
@@ -130,7 +131,7 @@ pub mod test {
             buf: Some(bytes::BytesMut::with_capacity(1024)),
         }
     }
-    impl<T: HttpBody<Data = Bytes, Error = E> + Unpin, E: std::error::Error> std::future::Future
+    impl<T: HttpBody<Data = Bytes, Error = E> + Unpin, E: std::fmt::Debug> std::future::Future
         for Aggregator<T>
     {
         type Output = Bytes;
@@ -341,7 +342,7 @@ impl std::fmt::Debug for BoxBody {
 }
 impl HttpBody for BoxBody {
     type Data = Bytes;
-    type Error = IoError;
+    type Error = Exn<FRWSErr>;
 
     fn poll_frame(
         self: Pin<&mut Self>,
@@ -351,12 +352,12 @@ impl HttpBody for BoxBody {
             BoxBody::Empty => Poll::Ready(None),
             BoxBody::File(f) => {
                 let pin = std::pin::pin!(f);
-                pin.poll_frame(cx)
+                pin.poll_frame(cx).map(|op|op.map(|res|res.or_raise(||FRWSErr::new(StatusCode::INTERNAL_SERVER_ERROR, "error reading file"))))
             }
             #[cfg(feature = "fcgi")]
             BoxBody::FCGI(f) => {
                 let pin = std::pin::pin!(f);
-                pin.poll_frame(cx)
+                pin.poll_frame(cx).map(|op|op.map(|res|res.or_raise(||FRWSErr::new(StatusCode::BAD_GATEWAY, "error forwarding response body"))))
             }
             #[cfg(feature = "proxy")]
             BoxBody::Proxy(i) => {
@@ -364,7 +365,7 @@ impl HttpBody for BoxBody {
                 match pin.poll_frame(cx) {
                     Poll::Ready(Some(Ok(f))) => Poll::Ready(Some(Ok(f))),
                     Poll::Ready(Some(Err(e))) => {
-                        Poll::Ready(Some(Err(IoError::new(std::io::ErrorKind::Other, e))))
+                        Poll::Ready(Some(Err(Exn::new(e).raise(FRWSErr::new(StatusCode::BAD_GATEWAY, "error forwarding response body")))))
                     }
                     Poll::Ready(None) => Poll::Ready(None),
                     Poll::Pending => Poll::Pending,

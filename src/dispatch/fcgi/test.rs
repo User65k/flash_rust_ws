@@ -15,11 +15,11 @@ use crate::body::{
 use crate::config::{group_config, AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf};
 
 trait OldBodyApi: Body {
-    fn data(&mut self) -> OldApiFut;
+    fn data(&'_ mut self) -> OldApiFut<'_>;
 }
 struct OldApiFut<'a>(&'a mut FRWSResp);
 impl Future for OldApiFut<'_> {
-    type Output = Option<Result<Bytes, std::io::Error>>;
+    type Output = Option<Result<Bytes, Exn<FRWSErr>>>;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -36,7 +36,7 @@ impl Future for OldApiFut<'_> {
     }
 }
 impl OldBodyApi for FRWSResp {
-    fn data(&mut self) -> OldApiFut {
+    fn data(&mut self) -> OldApiFut<'_> {
         OldApiFut(self)
     }
 }
