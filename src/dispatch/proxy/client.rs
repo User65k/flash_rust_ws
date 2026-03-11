@@ -1,13 +1,13 @@
 use super::cfg::ProxySocket;
-use crate::body::IncomingBody;
+use crate::body::{FRWSErr, IncomingBody};
 use deadpool::unmanaged::{Object, Pool, PoolError};
+use exn::{Exn, OptionExt as _, ResultExt};
 use hyper::{
     body::Incoming,
     client::conn::{http1, http2},
-    Request, Response, Version,
+    Request, Response, StatusCode, Version,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use std::io::Error as IoError;
 use tokio::{net::TcpStream, sync::RwLock};
 
 impl super::Proxy {
@@ -23,7 +23,7 @@ impl super::Proxy {
     pub async fn request(
         &self,
         mut req: Request<IncomingBody>,
-    ) -> Result<Response<Incoming>, IoError> {
+    ) -> Result<Response<Incoming>, Exn<FRWSErr>> {
         let client = self.client.as_ref().unwrap();
         loop {
             if let Some(pool) = client.h1.read().await.as_ref() {
@@ -57,7 +57,12 @@ impl super::Proxy {
                                     log::trace!("w8 4 con");
                                     tokio::spawn(delay_drop(h1));
                                 }
-                                return res.map_err(IoError::other);
+                                return res.or_raise(|| {
+                                    FRWSErr::new(
+                                        StatusCode::BAD_GATEWAY,
+                                        "error forwarding request",
+                                    )
+                                });
                             }
                         }
                     }
@@ -74,7 +79,11 @@ impl super::Proxy {
                         //only error here is is_closed
                         //connect a new IO
                     }
-                    Ok(()) => return h2.send_request(req).await.map_err(IoError::other),
+                    Ok(()) => {
+                        return h2.send_request(req).await.or_raise(|| {
+                            FRWSErr::new(StatusCode::BAD_GATEWAY, "error forwarding request")
+                        })
+                    }
                 }
             }
             client.connect(self).await?;
@@ -120,7 +129,7 @@ impl Client {
             Err((_, PoolError::NoRuntimeSpecified)) => unreachable!("pool not using timeout"),
         }
     }
-    async fn connect(&self, cfg: &super::Proxy) -> Result<(), IoError> {
+    async fn connect(&self, cfg: &super::Proxy) -> Result<(), Exn<FRWSErr>> {
         let addr = match &cfg.forward.addr {
             ProxySocket::Ip(addr) => *addr,
             ProxySocket::Dns((host, port)) => {
@@ -129,26 +138,32 @@ impl Client {
                 tokio::task::spawn_blocking(move || {
                     std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
                 })
-                .await??
+                .await
+                .or_raise(|| FRWSErr::new(StatusCode::INTERNAL_SERVER_ERROR, "DNS task failed"))?
+                .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "DNS failed"))?
                 .next()
-                .ok_or(IoError::other("No DNS Address could be obtained"))?
+                .ok_or_raise(|| {
+                    FRWSErr::new(StatusCode::BAD_GATEWAY, "No DNS Address could be obtained")
+                })?
             }
         };
         log::trace!("connecting to {addr}");
-        let io = TcpStream::connect(addr).await?;
+        let io = TcpStream::connect(addr)
+            .await
+            .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "connect failed"))?;
 
         match cfg.forward.scheme.as_str() {
             "http" => {
                 let (s, r) = http1::handshake(TokioIo::new(io))
                     .await
-                    .map_err(IoError::other)?;
+                    .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "http1 failed"))?;
                 tokio::spawn(r.with_upgrades());
                 self.add_to_h1_pool(s, cfg.h1_pool_size).await;
             }
             super::cfg::HTTP2_PLAINTEXT_KNOWN => {
                 let (s, r) = http2::handshake(TokioExecutor::new(), TokioIo::new(io))
                     .await
-                    .map_err(IoError::other)?;
+                    .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "http2 failed"))?;
                 tokio::spawn(r);
                 *self.h2.write().await = Some(s);
             }
@@ -156,22 +171,26 @@ impl Client {
             "https" => {
                 //version depends on ALPN
 
-                let roots = cfg
-                    .tls_root
-                    .as_ref()
-                    .ok_or(IoError::other("No TLS root cert configured"))?;
+                let roots = cfg.tls_root.as_ref().ok_or_raise(|| {
+                    FRWSErr::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "No TLS root cert configured",
+                    )
+                })?;
 
-                let (io, is_h2) = Self::wrap_tls(io, &cfg.forward.addr, roots).await?;
+                let (io, is_h2) = Self::wrap_tls(io, &cfg.forward.addr, roots)
+                    .await
+                    .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "tls failed"))?;
                 if is_h2 {
                     let (s, r) = http2::handshake(TokioExecutor::new(), TokioIo::new(io))
                         .await
-                        .map_err(IoError::other)?;
+                        .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "http2 (tls) failed"))?;
                     tokio::spawn(r);
                     *self.h2.write().await = Some(s);
                 } else {
                     let (s, r) = http1::handshake(TokioIo::new(io))
                         .await
-                        .map_err(IoError::other)?;
+                        .or_raise(|| FRWSErr::new(StatusCode::BAD_GATEWAY, "http1 (tls) failed"))?;
                     tokio::spawn(r);
                     self.add_to_h1_pool(s, cfg.h1_pool_size).await;
                 }

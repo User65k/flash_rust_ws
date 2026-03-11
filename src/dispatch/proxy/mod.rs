@@ -12,7 +12,6 @@ use hyper::{
     HeaderMap, Response, StatusCode, Uri, Version,
 };
 use log::{debug, error, trace};
-use std::io::ErrorKind;
 use std::net::SocketAddr;
 use tokio::io::copy_bidirectional;
 
@@ -395,19 +394,7 @@ pub async fn forward(
         }
     }
     let req = hyper::Request::from_parts(parts, body);
-    let mut resp = match config.request(req).await {
-        Ok(r) => r,
-        Err(err) => {
-            error!("Bad Gateway: {}", err);
-            let mut resp = Response::new(BoxBody::empty());
-            *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
-
-            if err.kind() == ErrorKind::TimedOut {
-                *resp.status_mut() = hyper::StatusCode::GATEWAY_TIMEOUT;
-            }
-            return Ok(resp);
-        }
-    };
+    let mut resp = config.request(req).await?;
     if log::log_enabled!(log::Level::Debug) {
         let mut resp_gist = String::with_capacity(128);
         for h in [

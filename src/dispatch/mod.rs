@@ -332,9 +332,11 @@ pub(crate) async fn handle_request(
         .or_else(|err| {
             if log::log_enabled!(log::Level::Debug) {
                 error!("handle_request {:?}", err);
-            }else{
+            } else {
                 error!("{}", err);
             }
-            Ok(Response::builder().status(err.code).body(BoxBody::empty()).expect("only status cant fail"))
+            let mut resp = Response::new(BoxBody::empty());
+            *resp.status_mut() = err.code;
+            Ok(resp)
         })
 }
