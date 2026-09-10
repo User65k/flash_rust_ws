@@ -1,5 +1,5 @@
 use crate::config::{HeaderNameCfg, Utf8PathBuf};
-use hyper::{header::HeaderValue, http::uri, Uri};
+use hyper::{Uri, header::HeaderValue, http::uri};
 
 use serde::Deserialize;
 use std::convert::TryFrom;
@@ -66,7 +66,7 @@ fn pool_size() -> usize {
 }
 
 #[derive(Deserialize, Debug, Default)]
-#[serde(try_from = "String")]
+#[serde(try_from = "toml::Value")]
 pub enum RewriteUrls {
     #[default]
     DontRewrite,
@@ -75,13 +75,15 @@ pub enum RewriteUrls {
     StripPath(String),
     //advanced option: regex?
 }
-impl TryFrom<String> for RewriteUrls {
+impl TryFrom<toml::Value> for RewriteUrls {
     type Error = anyhow::Error;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.as_str() {
-            "on" | "yes" | "true" => Ok(RewriteUrls::ForceWebmount),
-            path if path.starts_with('/') => Ok(RewriteUrls::StripPath(value)),
+    fn try_from(value: toml::Value) -> Result<Self, Self::Error> {
+        match value {
+            toml::Value::String(path) if path.starts_with('/') => Ok(RewriteUrls::StripPath(path)),
+            toml::Value::String(o) if o == "on" || o == "yes" => Ok(RewriteUrls::ForceWebmount),
+            toml::Value::Boolean(true) => Ok(RewriteUrls::ForceWebmount),
+            toml::Value::Boolean(false) => Ok(RewriteUrls::DontRewrite),
             _ => anyhow::bail!("true or absolute uri"),
         }
     }
@@ -149,7 +151,9 @@ impl TryFrom<String> for ProxyAdress {
 
         let path = if let Some(pq) = p.path_and_query {
             if pq.query().is_some() {
-                anyhow::bail!("query is not supported. Please request support for it. https://github.com/User65k/flash_rust_ws/issues");
+                anyhow::bail!(
+                    "query is not supported. Please request support for it. https://github.com/User65k/flash_rust_ws/issues"
+                );
             }
             Utf8PathBuf::from(pq.as_str())
         } else {

@@ -12,7 +12,7 @@ mod upgrades;
 mod webpath;
 #[cfg(feature = "websocket")]
 pub mod websocket;
-use exn::{bail, ResultExt as _};
+use exn::{ResultExt as _, bail};
 use hyper::body::Body as HttpBody;
 use hyper::header::HeaderValue;
 pub use webpath::{Req, WebPath};
@@ -21,7 +21,7 @@ use crate::body::{BoxBody, FRWSErr, FRWSResp, FRWSResult, IncomingBody};
 use crate::config::{self, Utf8PathBuf};
 use hyper::http::uri::Authority;
 use hyper::{
-    body::Incoming, header, http::Error as HTTPError, Request, Response, StatusCode, Version,
+    Request, Response, StatusCode, Version, body::Incoming, header, http::Error as HTTPError,
 }; //, Method};
 use log::{debug, error, info, trace};
 use staticf::ResolveResult;
@@ -199,8 +199,15 @@ async fn handle_wwwroot(
     debug!("check for file: {:?}", full_path);
 
     #[cfg(feature = "fcgi")]
-    let (full_path, resolved_file, path_info) =
-        fcgi::resolve_path(full_path, is_dir_request, sf, &req).await?;
+    let (full_path, resolved_file, path_info) = {
+        let exec_ext = if let config::UseCase::FCGI(fcgi::FcgiMnt { fcgi, .. }) = &wwwr.mount {
+            assert!(fcgi.exec.is_some()); //see mount match above
+            fcgi.exec.as_ref()
+        } else {
+            None
+        };
+        fcgi::resolve_path(full_path, is_dir_request, sf, &req, exec_ext).await?
+    };
     #[cfg(not(feature = "fcgi"))]
     let (full_path, resolved_file) =
         staticf::resolve_path(&full_path, is_dir_request, &sf.index).await?;

@@ -3,9 +3,9 @@ use crate::body::{FRWSErr, IncomingBody};
 use deadpool::unmanaged::{Object, Pool, PoolError};
 use exn::{Exn, OptionExt as _, ResultExt};
 use hyper::{
+    Request, Response, StatusCode, Version,
     body::Incoming,
     client::conn::{http1, http2},
-    Request, Response, StatusCode, Version,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::{net::TcpStream, sync::RwLock};
@@ -73,7 +73,8 @@ impl super::Proxy {
                     Err(PoolError::NoRuntimeSpecified) => unreachable!("pool not using timeout"),
                 }
             }
-            if let Some(h2) = client.h2.write().await.as_mut() {
+            let maybe_h2 = client.h2.read().await.clone();
+            if let Some(mut h2) = maybe_h2 {
                 match h2.ready().await {
                     Err(_e) => {
                         //only error here is is_closed
@@ -82,7 +83,7 @@ impl super::Proxy {
                     Ok(()) => {
                         return h2.send_request(req).await.or_raise(|| {
                             FRWSErr::new(StatusCode::BAD_GATEWAY, "error forwarding request")
-                        })
+                        });
                     }
                 }
             }
@@ -118,7 +119,7 @@ impl Client {
     async fn add_to_h1_pool(&self, s: http1::SendRequest<IncomingBody>, max_size: usize) {
         let mut lock = self.h1.write().await;
         let pool = lock.get_or_insert(Pool::new(max_size)); //semaphore:0permits, size_semaphore:max
-                                                            //pool.try_add(s).expect("pool should never close");
+        //pool.try_add(s).expect("pool should never close");
         match pool.try_add(s) {
             Ok(()) => {}
             Err((s, PoolError::Timeout)) => {
@@ -216,9 +217,9 @@ pub mod tls {
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::net::TcpStream;
+    use tokio_rustls::rustls::RootCertStore;
     use tokio_rustls::rustls::client::ClientConfig;
     use tokio_rustls::rustls::pki_types::{DnsName, ServerName};
-    use tokio_rustls::rustls::RootCertStore;
 
     #[derive(Deserialize, Debug)]
     #[serde(try_from = "PathBuf")]

@@ -7,9 +7,9 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 
 use config::HostCfg;
 use futures_util::future::join_all;
-use hyper::service::service_fn;
 use hyper::Version;
-use hyper::{body::Incoming, Request};
+use hyper::service::service_fn;
+use hyper::{Request, body::Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
@@ -29,9 +29,9 @@ mod pidfile;
 mod transport;
 mod user;
 
+use crate::transport::Connection;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 use crate::transport::tls::TLSBuilderTrait;
-use crate::transport::Connection;
 use transport::PlainIncoming;
 
 /// Set up each `SocketAddr` and return the `JoinHandle`s
@@ -132,11 +132,7 @@ fn print_hyper_error(rem: SocketAddr, here: SocketAddr, err: hyper::Error) {
 }
 
 #[inline]
-async fn run_http11_server(
-    incoming: PlainIncoming,
-    addr: SocketAddr,
-    hcfg: Arc<HostCfg>,
-) {
+async fn run_http11_server(incoming: PlainIncoming, addr: SocketAddr, hcfg: Arc<HostCfg>) {
     let builder = hyper::server::conn::http1::Builder::new();
     loop {
         let (stream, remote_addr) = match incoming.accept().await {
@@ -173,13 +169,13 @@ async fn main() {
 
     match config::load_config() {
         Err(e) => {
-            error!("Configuration error!\r\n{}", e);
+            error!("Configuration error!\r\n{:?}", e);
         }
         Ok(mut cfg) => {
             //group config by SocketAddrs
             let listening_ifs = match config::group_config(&mut cfg).await {
                 Err(e) => {
-                    error!("Configuration error!\r\n{}", e);
+                    error!("Configuration error!\r\n{:?}", e);
                     return;
                 }
                 Ok(m) => m,
@@ -330,8 +326,8 @@ pub(crate) mod tests {
         transport::tls::ParsedTLSConfig,
     ) {
         use crate::dispatch::test::TempFile;
-        use rand::{rngs::OsRng, TryRngCore};
-        use rustls_pemfile::{read_one, Item};
+        use rand::{TryRngCore, rngs::OsRng};
+        use rustls_pemfile::{Item, read_one};
         use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
         let tls_inst = OsRng.try_next_u32().unwrap();

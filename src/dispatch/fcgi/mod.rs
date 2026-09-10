@@ -3,28 +3,27 @@ mod cfg;
 pub(crate) mod test;
 pub use cfg::*;
 
+use crate::{
+    body::{
+        BoxBody, BufferedBody, FRWSErr, FRWSResult, IncomingBody, IncomingBodyTrait as _,
+        StatusResult,
+    },
+    config::{StaticFiles, Utf8PathBuf},
+};
 use bytes::{Bytes, BytesMut};
-use exn::{bail, Exn, Frame};
-use hyper::StatusCode;
-use hyper::{body::Body as _, Request, Response};
+use exn::{Exn, Frame, bail};
+use hyper::{Request, Response, StatusCode, body::Body as _};
 use log::{debug, error, trace};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::{
+    collections::HashMap,
     io::Error as IoError,
     net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
 };
 use tokio::time::timeout;
 
-use crate::body::{FRWSErr, StatusResult};
-use crate::{
-    body::{BoxBody, BufferedBody, FRWSResult, IncomingBody, IncomingBodyTrait as _},
-    config::StaticFiles,
-};
-
-use super::staticf;
-use super::webpath::Req;
+use super::{staticf, webpath::Req};
 
 const SCRIPT_NAME: &[u8] = b"SCRIPT_NAME";
 const PATH_INFO: &[u8] = b"PATH_INFO";
@@ -316,40 +315,53 @@ pub async fn resolve_path<'a>(
     is_dir_request: bool,
     sf: &StaticFiles,
     req: &'a Req<IncomingBody>,
+    exec_ext: Option<&Vec<Utf8PathBuf>>,
 ) -> StatusResult<(PathBuf, staticf::ResolveResult, Option<usize>)> {
     match staticf::resolve_path(&full_path, is_dir_request, &sf.index).await {
         Ok((p, r)) => Ok((p, r, None)),
         Err(err) => {
-            if find_error(&err).is_some_and(error_indicates_path_info) {
+            //only do this for fcgi
+            if let Some(ext_to_exec) = exec_ext
+                && find_error(&err).is_some_and(error_indicates_path_info)
+            {
                 debug!("{:?} might have a PATH_INFO", &full_path);
                 /*
                 pop the last path component until we hit a file
                 everything after the file will become PATH_INFO
                 */
                 let mut fp = full_path;
-                loop {
+                'go_up: loop {
                     if !fp.pop() {
                         // we went all the way up - should not ever happen on linux but on windows
                         return Err(err);
                     }
-                    match fp.metadata() {
-                        Ok(m) => {
-                            if m.is_file() {
-                                break;
-                            } else {
-                                // the first not to return ErrorKind::NotADirectory
-                                // must be a file
-                                return Err(err);
-                            }
-                        }
-                        Err(e) => {
-                            if error_indicates_path_info(&e) {
-                                //keep going up
-                            } else {
-                                bail!(FRWSErr::new(
-                                    StatusCode::NOT_FOUND,
-                                    "error while trying to split path_info"
-                                ));
+                    //check if a exec is in the path in order to avoid syscalls (metadata)
+                    if let Some(ext) = fp.extension() {
+                        for e in ext_to_exec {
+                            if e == ext {
+                                trace!("trying {:?}", &fp);
+                                match fp.metadata() {
+                                    Ok(m) => {
+                                        if m.is_file() {
+                                            break 'go_up;
+                                        } else {
+                                            // the first not to return ErrorKind::NotADirectory
+                                            // must be a file
+                                            return Err(err);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if error_indicates_path_info(&e) {
+                                            //keep going up
+                                            continue 'go_up;
+                                        } else {
+                                            bail!(FRWSErr::new(
+                                                StatusCode::NOT_FOUND,
+                                                "error while trying to split path_info"
+                                            ));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
