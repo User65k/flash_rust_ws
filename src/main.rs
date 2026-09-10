@@ -55,7 +55,7 @@ async fn prepare_hyper_servers(
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 let use_tls = cfg.tls.take();
 
-                let hcfg = Arc::new(cfg);
+                let hcfg = cfg.into_arc();
 
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if let Some(tls_cfg) = use_tls {
@@ -71,6 +71,22 @@ async fn prepare_hyper_servers(
                                     {
                                         //this was an ACME challenge. Don't print an error
                                         continue;
+                                    }
+                                    // downgrade benign peer disconnects during handshake
+                                    let io_kind = e
+                                        .frame()
+                                        .error()
+                                        .downcast_ref::<IoError>()
+                                        .map(|io| io.kind());
+                                    match io_kind {
+                                        Some(std::io::ErrorKind::UnexpectedEof)
+                                        | Some(std::io::ErrorKind::ConnectionReset)
+                                        | Some(std::io::ErrorKind::ConnectionAborted)
+                                        | Some(std::io::ErrorKind::HostUnreachable) => {
+                                            debug!("TLS handshake aborted by peer: {:?}", e);
+                                            continue;
+                                        }
+                                        _ => {}
                                     }
                                     error!("TLS Handshake {:?}", e); //FIXME Os { code: 113, kind: HostUnreachable, message: "No route to host" }
                                     continue;
@@ -169,13 +185,13 @@ async fn main() {
 
     match config::load_config() {
         Err(e) => {
-            error!("Configuration error!\r\n{:?}", e);
+            error!("Configuration error!\r\n{}", e);
         }
         Ok(mut cfg) => {
             //group config by SocketAddrs
             let listening_ifs = match config::group_config(&mut cfg).await {
                 Err(e) => {
-                    error!("Configuration error!\r\n{:?}", e);
+                    error!("Configuration error!\r\n{}", e);
                     return;
                 }
                 Ok(m) => m,
