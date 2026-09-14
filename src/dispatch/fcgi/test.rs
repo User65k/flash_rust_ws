@@ -1,6 +1,6 @@
 use super::*;
 use bytes::Bytes;
-use hyper::{body::Body, header, Request, Version};
+use hyper::{Request, Version, body::Body, header};
 use std::future::Future;
 use std::path::Path;
 use tokio::{
@@ -9,17 +9,17 @@ use tokio::{
 };
 
 use crate::body::{
-    test::{to_bytes, TestBody},
     FRWSResp, FRWSResult,
+    test::{TestBody, to_bytes},
 };
-use crate::config::{group_config, AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf};
+use crate::config::{AbsPathBuf, StaticFiles, UseCase, Utf8PathBuf, group_config};
 
 trait OldBodyApi: Body {
-    fn data(&mut self) -> OldApiFut;
+    fn data(&'_ mut self) -> OldApiFut<'_>;
 }
 struct OldApiFut<'a>(&'a mut FRWSResp);
 impl Future for OldApiFut<'_> {
-    type Output = Option<Result<Bytes, std::io::Error>>;
+    type Output = Option<Result<Bytes, Exn<FRWSErr>>>;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -36,7 +36,7 @@ impl Future for OldApiFut<'_> {
     }
 }
 impl OldBodyApi for FRWSResp {
-    fn data(&mut self) -> OldApiFut {
+    fn data(&mut self) -> OldApiFut<'_> {
         OldApiFut(self)
     }
 }
@@ -736,7 +736,7 @@ async fn test_resolve_path() {
 
     assert_eq!(req.path(), "a/b/c/d");
 
-    let e = resolve_path(full_path, false, &sf, &req).await.unwrap_err();
+    let e = resolve_path(full_path, false, &sf, &req, None).await.unwrap_err();
     assert_eq!(e.code, StatusCode::NOT_FOUND);
 }
 #[test]

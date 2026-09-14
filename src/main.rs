@@ -7,9 +7,9 @@ Incomming Requests are thus filtered by IP, then vHost, then URL.
 
 use config::HostCfg;
 use futures_util::future::join_all;
-use hyper::service::service_fn;
 use hyper::Version;
-use hyper::{body::Incoming, Request};
+use hyper::service::service_fn;
+use hyper::{Request, body::Incoming};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info, trace};
 use std::collections::HashMap;
@@ -29,9 +29,9 @@ mod pidfile;
 mod transport;
 mod user;
 
+use crate::transport::Connection;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 use crate::transport::tls::TLSBuilderTrait;
-use crate::transport::Connection;
 use transport::PlainIncoming;
 
 /// Set up each `SocketAddr` and return the `JoinHandle`s
@@ -55,7 +55,7 @@ async fn prepare_hyper_servers(
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 let use_tls = cfg.tls.take();
 
-                let hcfg = Arc::new(cfg);
+                let hcfg = cfg.into_arc();
 
                 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
                 if let Some(tls_cfg) = use_tls {
@@ -71,6 +71,23 @@ async fn prepare_hyper_servers(
                                     {
                                         //this was an ACME challenge. Don't print an error
                                         continue;
+                                    }
+                                    // downgrade benign peer disconnects during handshake
+                                    let io_kind = e
+                                        .frame()
+                                        .children()
+                                        .iter()
+                                        .find_map(|frame| frame.error().downcast_ref::<IoError>())
+                                        .map(|io| io.kind());
+                                    match io_kind {
+                                        Some(std::io::ErrorKind::UnexpectedEof)
+                                        | Some(std::io::ErrorKind::ConnectionReset)
+                                        | Some(std::io::ErrorKind::ConnectionAborted)
+                                        | Some(std::io::ErrorKind::HostUnreachable) => {
+                                            debug!("TLS handshake aborted by peer: {:?}", e);
+                                            continue;
+                                        }
+                                        _ => {}
                                     }
                                     error!("TLS Handshake {:?}", e); //FIXME Os { code: 113, kind: HostUnreachable, message: "No route to host" }
                                     continue;
@@ -132,11 +149,7 @@ fn print_hyper_error(rem: SocketAddr, here: SocketAddr, err: hyper::Error) {
 }
 
 #[inline]
-async fn run_http11_server(
-    incoming: PlainIncoming,
-    addr: SocketAddr,
-    hcfg: Arc<HostCfg>,
-) {
+async fn run_http11_server(incoming: PlainIncoming, addr: SocketAddr, hcfg: Arc<HostCfg>) {
     let builder = hyper::server::conn::http1::Builder::new();
     loop {
         let (stream, remote_addr) = match incoming.accept().await {
@@ -330,8 +343,8 @@ pub(crate) mod tests {
         transport::tls::ParsedTLSConfig,
     ) {
         use crate::dispatch::test::TempFile;
-        use rand::{rngs::OsRng, TryRngCore};
-        use rustls_pemfile::{read_one, Item};
+        use rand::{TryRngCore, rngs::OsRng};
+        use rustls_pemfile::{Item, read_one};
         use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
         let tls_inst = OsRng.try_next_u32().unwrap();

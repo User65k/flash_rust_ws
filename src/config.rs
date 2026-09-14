@@ -11,19 +11,20 @@ use crate::dispatch::websocket::Websocket;
 #[cfg(any(feature = "tlsrust", feature = "tlsnative"))]
 use crate::transport::tls::{ParsedTLSConfig, TLSBuilderTrait, TlsUserConfig};
 use exn::ResultExt as _;
+use hyper::StatusCode;
 use hyper::header::HeaderName;
 use hyper::http::HeaderValue;
-use hyper::StatusCode;
 use log::info;
 use log4rs::config::RawConfig as LogConfig;
-use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
 use serde::Deserialize;
+use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::read_to_string;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
@@ -438,6 +439,10 @@ impl HostCfg {
             tls: None,
         }
     }
+    pub fn into_arc(self) -> Arc<Self> {
+        Arc::new(self)
+        //walk VHost and add Weak refs for links -> no cross socket hosts
+    }
 }
 impl fmt::Debug for HostCfg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -477,7 +482,7 @@ pub async fn group_config(
                 UseCase::StaticFiles(sf) => sf.setup().await,
                 UseCase::Redirect(_) => Ok(()),
             } {
-                errors.add(format!("\"{}/{}\": {}", vhost, mount.to_string_lossy(), e));
+                errors.add(format!("\"{}/{}\": {}", vhost, mount.as_str(), e));
             }
         }
 
@@ -761,38 +766,44 @@ mod tests {
     }
     #[tokio::test]
     async fn bad_header() {
-        assert!(toml::from_str::<Configuration>(
-            r#"
+        assert!(
+            toml::from_str::<Configuration>(
+                r#"
     [host]
     ip = "0.0.0.0:1338"
     [host."/"]
     dir = "."
     header = {test = "bad\u0000header"}
     "#,
-        )
-        .is_err());
+            )
+            .is_err()
+        );
 
-        assert!(toml::from_str::<Configuration>(
-            r#"
+        assert!(
+            toml::from_str::<Configuration>(
+                r#"
     [host]
     ip = "0.0.0.0:1339"
     [host."/"]
     dir = "."
     header = {"test\n" = "1"}
     "#,
-        )
-        .is_err());
+            )
+            .is_err()
+        );
 
-        assert!(toml::from_str::<Configuration>(
-            r#"
+        assert!(
+            toml::from_str::<Configuration>(
+                r#"
     [host]
     ip = "0.0.0.0:1339"
     [host."/"]
     dir = "."
     header = {"X-ok" = "1"}
     "#,
-        )
-        .is_ok());
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]
