@@ -75,8 +75,9 @@ async fn prepare_hyper_servers(
                                     // downgrade benign peer disconnects during handshake
                                     let io_kind = e
                                         .frame()
-                                        .error()
-                                        .downcast_ref::<IoError>()
+                                        .children()
+                                        .iter()
+                                        .find_map(|frame| frame.error().downcast_ref::<IoError>())
                                         .map(|io| io.kind());
                                     match io_kind {
                                         Some(std::io::ErrorKind::UnexpectedEof)
